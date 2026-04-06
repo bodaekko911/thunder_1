@@ -1,0 +1,733 @@
+from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import HTMLResponse
+from sqlalchemy.orm import Session
+from sqlalchemy import func
+from typing import Optional
+from pydantic import BaseModel
+
+from app.database import get_db
+from app.models.product import Product
+from app.models.inventory import StockMove
+
+router = APIRouter(prefix="/inventory", tags=["Inventory"])
+
+
+# ── Schemas ────────────────────────────────────────────
+class StockAdjustment(BaseModel):
+    product_id: int
+    qty:        float
+    note:       Optional[str] = None
+
+
+# ── API ────────────────────────────────────────────────
+@router.get("/api/stock")
+def get_stock(
+    q:         str  = "",
+    low_stock: bool = False,
+    skip:      int  = 0,
+    limit:     int  = 50,
+    db: Session = Depends(get_db),
+):
+    query = db.query(Product).filter(Product.is_active == True)
+    if q:
+        query = query.filter(
+            Product.name.ilike(f"%{q}%") | Product.sku.ilike(f"%{q}%")
+        )
+    if low_stock:
+        query = query.filter(Product.stock <= Product.min_stock)
+    total = query.count()
+    items = query.order_by(Product.name).offset(skip).limit(limit).all()
+    return {
+        "total": total,
+        "items": [
+            {
+                "id":        p.id,
+                "sku":       p.sku,
+                "name":      p.name,
+                "stock":     float(p.stock),
+                "min_stock": float(p.min_stock),
+                "unit":      p.unit,
+                "low":       p.stock <= p.min_stock,
+            }
+            for p in items
+        ],
+    }
+
+
+@router.get("/api/moves")
+def get_moves(
+    product_id: int = None,
+    skip:       int = 0,
+    limit:      int = 100,
+    db: Session = Depends(get_db),
+):
+    query = db.query(StockMove)
+    if product_id:
+        query = query.filter(StockMove.product_id == product_id)
+    total = query.count()
+    moves = query.order_by(StockMove.created_at.desc()).offset(skip).limit(limit).all()
+    return {
+        "total": total,
+        "moves": [
+            {
+                "id":         m.id,
+                "product":    m.product.name if m.product else "—",
+                "sku":        m.product.sku  if m.product else "—",
+                "type":       m.type,
+                "qty":        float(m.qty),
+                "qty_before": float(m.qty_before) if m.qty_before is not None else 0,
+                "qty_after":  float(m.qty_after)  if m.qty_after  is not None else 0,
+                "ref_type":   m.ref_type or "—",
+                "ref_id":     m.ref_id,
+                "note":       m.note or "—",
+                "created_at": m.created_at.strftime("%Y-%m-%d %H:%M") if m.created_at else "—",
+            }
+            for m in moves
+        ],
+    }
+
+
+@router.post("/api/adjust")
+def adjust_stock(data: StockAdjustment, db: Session = Depends(get_db)):
+    product = db.query(Product).filter(Product.id == data.product_id).first()
+    if not product:
+        raise HTTPException(status_code=404, detail="Product not found")
+
+    before = float(product.stock)
+    after  = before + data.qty
+
+    if after < 0:
+        raise HTTPException(status_code=400, detail=f"Stock cannot go below 0. Current stock: {before}")
+
+    product.stock = after
+
+    move = StockMove(
+        product_id=product.id,
+        type="adjust",
+        qty=data.qty,
+        qty_before=before,
+        qty_after=after,
+        ref_type="manual",
+        note=data.note or "Manual adjustment",
+    )
+    db.add(move)
+    db.commit()
+    return {"ok": True, "new_stock": after}
+
+
+@router.get("/api/summary")
+def get_summary(db: Session = Depends(get_db)):
+    total_products = db.query(func.count(Product.id)).filter(Product.is_active == True).scalar() or 0
+    low_stock      = db.query(func.count(Product.id)).filter(
+        Product.is_active == True, Product.stock <= Product.min_stock
+    ).scalar() or 0
+    out_of_stock   = db.query(func.count(Product.id)).filter(
+        Product.is_active == True, Product.stock <= 0
+    ).scalar() or 0
+    total_moves    = db.query(func.count(StockMove.id)).scalar() or 0
+    return {
+        "total_products": total_products,
+        "low_stock":      low_stock,
+        "out_of_stock":   out_of_stock,
+        "total_moves":    total_moves,
+    }
+
+
+# ── UI ─────────────────────────────────────────────────
+@router.get("/", response_class=HTMLResponse)
+def inventory_ui():
+    return """
+<!DOCTYPE html>
+<html>
+<head>
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Inventory</title>
+<link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+<style>
+:root {
+    --bg:      #060810;
+    --surface: #0a0d18;
+    --card:    #0f1424;
+    --card2:   #151c30;
+    --border:  rgba(255,255,255,0.06);
+    --border2: rgba(255,255,255,0.11);
+    --green:   #00ff9d;
+    --blue:    #4d9fff;
+    --purple:  #a855f7;
+    --danger:  #ff4d6d;
+    --warn:    #ffb547;
+    --text:    #f0f4ff;
+    --sub:     #8899bb;
+    --muted:   #445066;
+    --sans:    'Outfit', sans-serif;
+    --mono:    'JetBrains Mono', monospace;
+    --r:       12px;
+}
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: var(--sans); background: var(--bg); color: var(--text); min-height: 100vh; font-size: 14px; }
+
+nav {
+    position: sticky; top: 0; z-index: 100;
+    display: flex; align-items: center; gap: 10px;
+    padding: 0 24px; height: 58px;
+    background: rgba(10,13,24,.92);
+    backdrop-filter: blur(20px);
+    border-bottom: 1px solid var(--border);
+}
+.logo {
+    font-size: 18px; font-weight: 900;
+    background: linear-gradient(135deg, var(--green), var(--blue));
+    -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+    background-clip: text; margin-right: 12px;
+}
+.nav-link {
+    padding: 7px 14px; border-radius: 8px;
+    color: var(--sub); font-size: 13px; font-weight: 600;
+    text-decoration: none; transition: all .2s;
+}
+.nav-link:hover { background: rgba(255,255,255,.05); color: var(--text); }
+.nav-link.active { background: rgba(0,255,157,.1); color: var(--green); }
+.nav-spacer { flex: 1; }
+
+.content { max-width: 1300px; margin: 0 auto; padding: 28px 24px; display: flex; flex-direction: column; gap: 20px; }
+.page-title { font-size: 24px; font-weight: 800; letter-spacing: -.5px; }
+.page-sub   { color: var(--muted); font-size: 13px; margin-top: 3px; }
+
+/* STAT CARDS */
+.stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px,1fr)); gap: 14px; }
+.stat-card {
+    background: var(--card); border: 1px solid var(--border);
+    border-radius: var(--r); padding: 18px 20px;
+    display: flex; flex-direction: column; gap: 8px;
+    position: relative; overflow: hidden;
+}
+.stat-card::before { content:''; position:absolute; top:0; left:0; right:0; height:2px; }
+.stat-card.green::before  { background: linear-gradient(90deg, var(--green), transparent); }
+.stat-card.warn::before   { background: linear-gradient(90deg, var(--warn), transparent); }
+.stat-card.danger::before { background: linear-gradient(90deg, var(--danger), transparent); }
+.stat-card.blue::before   { background: linear-gradient(90deg, var(--blue), transparent); }
+.stat-label { font-size: 10px; font-weight: 700; letter-spacing: 1.5px; text-transform: uppercase; color: var(--muted); }
+.stat-value { font-family: var(--mono); font-size: 28px; font-weight: 700; }
+.stat-value.green  { color: var(--green); }
+.stat-value.warn   { color: var(--warn); }
+.stat-value.danger { color: var(--danger); }
+.stat-value.blue   { color: var(--blue); }
+
+/* TABS */
+.tabs { display: flex; gap: 4px; background: var(--card); border: 1px solid var(--border); border-radius: var(--r); padding: 4px; width: fit-content; }
+.tab {
+    padding: 8px 20px; border-radius: 9px;
+    font-size: 13px; font-weight: 700; cursor: pointer;
+    border: none; background: transparent; color: var(--muted);
+    transition: all .2s; font-family: var(--sans);
+}
+.tab.active { background: var(--card2); color: var(--text); }
+
+/* TOOLBAR */
+.toolbar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.search-box {
+    display: flex; align-items: center; gap: 9px;
+    background: var(--card); border: 1px solid var(--border);
+    border-radius: var(--r); padding: 0 14px; flex: 1; min-width: 200px;
+    transition: border-color .2s;
+}
+.search-box:focus-within { border-color: rgba(0,255,157,.3); }
+.search-box svg { color: var(--muted); flex-shrink: 0; }
+.search-box input {
+    background: transparent; border: none; outline: none;
+    color: var(--text); font-family: var(--sans);
+    font-size: 14px; padding: 11px 0; width: 100%;
+}
+.search-box input::placeholder { color: var(--muted); }
+.btn {
+    display: flex; align-items: center; gap: 7px;
+    padding: 10px 16px; border-radius: var(--r);
+    font-family: var(--sans); font-size: 13px; font-weight: 700;
+    cursor: pointer; border: none; transition: all .2s; white-space: nowrap;
+}
+.btn-green  { background: linear-gradient(135deg, var(--green), #00d4ff); color: #021a10; }
+.btn-green:hover { filter: brightness(1.1); transform: translateY(-1px); }
+.btn-outline {
+    background: transparent; border: 1px solid var(--border2); color: var(--sub);
+}
+.btn-outline:hover { border-color: var(--warn); color: var(--warn); }
+.btn-outline.active { border-color: var(--warn); color: var(--warn); background: rgba(255,181,71,.08); }
+
+/* TABLE */
+.table-wrap { background: var(--card); border: 1px solid var(--border); border-radius: var(--r); overflow: hidden; }
+table { width: 100%; border-collapse: collapse; }
+thead { background: var(--card2); }
+th { text-align: left; font-size: 10px; font-weight: 700; letter-spacing: 1px; text-transform: uppercase; color: var(--muted); padding: 12px 16px; }
+td { padding: 12px 16px; border-top: 1px solid var(--border); color: var(--sub); font-size: 13px; }
+tr:hover td { background: rgba(255,255,255,.02); }
+td.name { color: var(--text); font-weight: 600; }
+td.mono { font-family: var(--mono); }
+.low-badge  { display:inline-flex;align-items:center;gap:4px;background:rgba(255,77,109,.1);border:1px solid rgba(255,77,109,.2);color:var(--danger);font-size:11px;font-weight:700;padding:2px 8px;border-radius:20px; }
+.ok-badge   { font-family:var(--mono);font-size:13px;color:var(--green); }
+.out-badge  { display:inline-flex;align-items:center;gap:4px;background:rgba(255,77,109,.15);border:1px solid rgba(255,77,109,.3);color:var(--danger);font-size:11px;font-weight:700;padding:2px 8px;border-radius:20px; }
+
+.action-btn {
+    background: transparent; border: 1px solid var(--border2);
+    color: var(--sub); font-size: 12px; font-weight: 600;
+    padding: 5px 10px; border-radius: 7px; cursor: pointer;
+    transition: all .15s; font-family: var(--sans);
+}
+.action-btn:hover { border-color: var(--green); color: var(--green); }
+
+/* MOVE TYPE BADGES */
+.move-in     { color: var(--green); font-weight: 700; }
+.move-out    { color: var(--danger); font-weight: 700; }
+.move-adjust { color: var(--blue); font-weight: 700; }
+
+/* PAGINATION */
+.pagination {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 14px 16px; border-top: 1px solid var(--border); font-size: 13px; color: var(--muted);
+}
+.page-btns { display: flex; gap: 6px; }
+.page-btn {
+    background: var(--card2); border: 1px solid var(--border2);
+    color: var(--sub); font-family: var(--sans); font-size: 12px;
+    padding: 6px 12px; border-radius: 7px; cursor: pointer; transition: all .15s;
+}
+.page-btn:hover { border-color: var(--green); color: var(--green); }
+.page-btn:disabled { opacity: .3; cursor: not-allowed; }
+
+/* MODAL */
+.modal-bg {
+    position: fixed; inset: 0; z-index: 500;
+    background: rgba(0,0,0,.7); backdrop-filter: blur(4px);
+    display: none; align-items: center; justify-content: center;
+}
+.modal-bg.open { display: flex; }
+.modal {
+    background: var(--card); border: 1px solid var(--border2);
+    border-radius: 16px; padding: 28px;
+    width: 460px; max-width: 95vw;
+    animation: modalIn .2s ease;
+}
+@keyframes modalIn { from{opacity:0;transform:scale(.95)} to{opacity:1;transform:scale(1)} }
+.modal-title { font-size: 18px; font-weight: 800; margin-bottom: 6px; }
+.modal-sub   { font-size: 13px; color: var(--muted); margin-bottom: 20px; }
+.fld { display: flex; flex-direction: column; gap: 6px; margin-bottom: 14px; }
+.fld label { font-size: 11px; font-weight: 700; letter-spacing: 1px; text-transform: uppercase; color: var(--muted); }
+.fld input, .fld select {
+    background: var(--card2); border: 1px solid var(--border2);
+    border-radius: 10px; padding: 10px 12px;
+    color: var(--text); font-family: var(--sans); font-size: 14px;
+    outline: none; transition: border-color .2s; width: 100%;
+}
+.fld input:focus, .fld select:focus { border-color: rgba(0,255,157,.4); }
+.current-stock-display {
+    background: var(--card2); border: 1px solid var(--border2);
+    border-radius: 10px; padding: 12px 14px;
+    display: flex; justify-content: space-between; align-items: center;
+    margin-bottom: 14px;
+}
+.modal-actions { display: flex; gap: 10px; margin-top: 6px; justify-content: flex-end; }
+.btn-cancel {
+    background: transparent; border: 1px solid var(--border2);
+    color: var(--sub); padding: 10px 18px; border-radius: var(--r);
+    font-family: var(--sans); font-size: 13px; font-weight: 700; cursor: pointer;
+}
+.btn-cancel:hover { border-color: var(--danger); color: var(--danger); }
+
+.toast {
+    position: fixed; bottom: 22px; left: 50%;
+    transform: translateX(-50%) translateY(16px);
+    background: var(--card2); border: 1px solid var(--border2);
+    border-radius: var(--r); padding: 12px 20px;
+    font-size: 13px; font-weight: 600; color: var(--text);
+    box-shadow: 0 20px 50px rgba(0,0,0,.5);
+    opacity: 0; pointer-events: none;
+    transition: opacity .25s, transform .25s; z-index: 999;
+}
+.toast.show { opacity:1; transform: translateX(-50%) translateY(0); }
+::-webkit-scrollbar { width: 4px; }
+::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 4px; }
+</style>
+</head>
+<body>
+
+<nav>
+    <a href="/home" class="logo" style="text-decoration:none;display:flex;align-items:center;gap:8px;"><svg width="22" height="22" viewBox="0 0 24 24" fill="none"><polygon points="13,2 4,14 11,14 11,22 20,10 13,10" fill="#f59e0b" stroke="#fbbf24" stroke-width="0.5"/></svg>Thunder ERP</a>
+    <a href="/dashboard"       class="nav-link">Dashboard</a>
+    <a href="/pos"             class="nav-link">POS</a>
+    <a href="/products/"       class="nav-link">Products</a>
+    <a href="/customers-mgmt/" class="nav-link">Customers</a>
+    <a href="/suppliers/"      class="nav-link">Suppliers</a>
+    <a href="/inventory/"      class="nav-link active">Inventory</a>
+    <a href="/import"          class="nav-link">Import</a>
+    <span class="nav-spacer"></span>
+</nav>
+
+<div class="content">
+    <div>
+        <div class="page-title">Inventory</div>
+        <div class="page-sub">Track stock levels and movements</div>
+    </div>
+
+    <!-- STAT CARDS -->
+    <div class="stats-grid">
+        <div class="stat-card green">
+            <div class="stat-label">Total Products</div>
+            <div class="stat-value green" id="stat-total">—</div>
+        </div>
+        <div class="stat-card warn">
+            <div class="stat-label">Low Stock</div>
+            <div class="stat-value warn" id="stat-low">—</div>
+        </div>
+        <div class="stat-card danger">
+            <div class="stat-label">Out of Stock</div>
+            <div class="stat-value danger" id="stat-out">—</div>
+        </div>
+        <div class="stat-card blue">
+            <div class="stat-label">Total Movements</div>
+            <div class="stat-value blue" id="stat-moves">—</div>
+        </div>
+    </div>
+
+    <!-- TABS -->
+    <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px;">
+        <div class="tabs">
+            <button class="tab active" id="tab-stock" onclick="switchTab('stock')">Stock Levels</button>
+            <button class="tab"        id="tab-moves" onclick="switchTab('moves')">Movements</button>
+        </div>
+    </div>
+
+    <!-- STOCK LEVELS -->
+    <div id="stock-section">
+        <div class="toolbar">
+            <div class="search-box">
+                <svg width="15" height="15" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24">
+                    <circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/>
+                </svg>
+                <input id="stock-search" placeholder="Search by name or SKU…" oninput="onStockSearch()">
+            </div>
+            <button class="btn btn-outline" id="low-stock-btn" onclick="toggleLowStock()">⚠ Low Stock Only</button>
+        </div>
+        <div class="table-wrap">
+            <table>
+                <thead>
+                    <tr>
+                        <th>SKU</th>
+                        <th>Product</th>
+                        <th>Current Stock</th>
+                        <th>Min Stock</th>
+                        <th>Unit</th>
+                        <th>Status</th>
+                        <th>Adjust</th>
+                    </tr>
+                </thead>
+                <tbody id="stock-body">
+                    <tr><td colspan="7" style="text-align:center;color:var(--muted);padding:40px">Loading…</td></tr>
+                </tbody>
+            </table>
+            <div class="pagination">
+                <span id="stock-page-info">—</span>
+                <div class="page-btns">
+                    <button class="page-btn" id="stock-prev" onclick="stockPrevPage()">← Prev</button>
+                    <button class="page-btn" id="stock-next" onclick="stockNextPage()">Next →</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- MOVEMENTS -->
+    <div id="moves-section" style="display:none">
+        <div class="toolbar">
+            <div class="search-box">
+                <svg width="15" height="15" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24">
+                    <circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/>
+                </svg>
+                <input id="moves-search" placeholder="Coming soon — filter by product…" disabled>
+            </div>
+        </div>
+        <div class="table-wrap">
+            <table>
+                <thead>
+                    <tr>
+                        <th>Date</th>
+                        <th>Product</th>
+                        <th>SKU</th>
+                        <th>Type</th>
+                        <th>Qty</th>
+                        <th>Before</th>
+                        <th>After</th>
+                        <th>Reference</th>
+                        <th>Note</th>
+                    </tr>
+                </thead>
+                <tbody id="moves-body">
+                    <tr><td colspan="9" style="text-align:center;color:var(--muted);padding:40px">Loading…</td></tr>
+                </tbody>
+            </table>
+            <div class="pagination">
+                <span id="moves-page-info">—</span>
+                <div class="page-btns">
+                    <button class="page-btn" id="moves-prev" onclick="movesPrevPage()">← Prev</button>
+                    <button class="page-btn" id="moves-next" onclick="movesNextPage()">Next →</button>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- ADJUST MODAL -->
+<div class="modal-bg" id="adjust-modal">
+    <div class="modal">
+        <div class="modal-title">Adjust Stock</div>
+        <div class="modal-sub" id="adjust-product-name">Product name</div>
+
+        <div class="current-stock-display">
+            <span style="color:var(--muted);font-size:13px;font-weight:600">Current Stock</span>
+            <span style="font-family:var(--mono);font-size:22px;font-weight:700;color:var(--green)" id="adjust-current">0</span>
+        </div>
+
+        <div class="fld">
+            <label>Adjustment Type</label>
+            <select id="adj-type" onchange="updateAdjPreview()">
+                <option value="add">➕ Add Stock (positive)</option>
+                <option value="remove">➖ Remove Stock (negative)</option>
+                <option value="set">🔄 Set Exact Amount</option>
+            </select>
+        </div>
+
+        <div class="fld">
+            <label>Quantity</label>
+            <input id="adj-qty" type="number" placeholder="0" min="0" step="any" oninput="updateAdjPreview()">
+        </div>
+
+        <div class="current-stock-display" id="adj-preview" style="display:none">
+            <span style="color:var(--muted);font-size:13px;font-weight:600">New Stock Will Be</span>
+            <span style="font-family:var(--mono);font-size:22px;font-weight:700;color:var(--blue)" id="adj-preview-val">0</span>
+        </div>
+
+        <div class="fld">
+            <label>Note (optional)</label>
+            <input id="adj-note" placeholder="Reason for adjustment…">
+        </div>
+
+        <div class="modal-actions">
+            <button class="btn-cancel" onclick="closeAdjustModal()">Cancel</button>
+            <button class="btn btn-green" onclick="saveAdjustment()">Apply Adjustment</button>
+        </div>
+    </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+let currentTab   = "stock";
+let stockPage    = 0;
+let movesPage    = 0;
+let pageSize     = 50;
+let stockTotal   = 0;
+let movesTotal   = 0;
+let lowStockOnly = false;
+let adjustingProduct = null;
+let searchTimer  = null;
+
+/* ── INIT ── */
+async function init(){
+    await loadSummary();
+    await loadStock();
+}
+
+/* ── SUMMARY ── */
+async function loadSummary(){
+    let d = await (await fetch("/inventory/api/summary")).json();
+    document.getElementById("stat-total").innerText  = d.total_products;
+    document.getElementById("stat-low").innerText    = d.low_stock;
+    document.getElementById("stat-out").innerText    = d.out_of_stock;
+    document.getElementById("stat-moves").innerText  = d.total_moves;
+}
+
+/* ── TABS ── */
+function switchTab(tab){
+    currentTab = tab;
+    document.getElementById("tab-stock").classList.toggle("active", tab==="stock");
+    document.getElementById("tab-moves").classList.toggle("active", tab==="moves");
+    document.getElementById("stock-section").style.display = tab==="stock" ? "" : "none";
+    document.getElementById("moves-section").style.display = tab==="moves" ? "" : "none";
+    if(tab==="moves") loadMoves();
+}
+
+/* ── STOCK ── */
+function onStockSearch(){
+    clearTimeout(searchTimer);
+    searchTimer = setTimeout(()=>{ stockPage=0; loadStock(); }, 300);
+}
+
+function toggleLowStock(){
+    lowStockOnly = !lowStockOnly;
+    stockPage = 0;
+    document.getElementById("low-stock-btn").classList.toggle("active", lowStockOnly);
+    loadStock();
+}
+
+async function loadStock(){
+    let q   = document.getElementById("stock-search").value.trim();
+    let url = `/inventory/api/stock?skip=${stockPage*pageSize}&limit=${pageSize}&low_stock=${lowStockOnly}`;
+    if(q) url += `&q=${encodeURIComponent(q)}`;
+    let data = await (await fetch(url)).json();
+    stockTotal = data.total;
+
+    document.getElementById("stock-page-info").innerText =
+        `Showing ${Math.min(stockPage*pageSize+1,stockTotal)}–${Math.min((stockPage+1)*pageSize,stockTotal)} of ${stockTotal}`;
+    document.getElementById("stock-prev").disabled = stockPage===0;
+    document.getElementById("stock-next").disabled = (stockPage+1)*pageSize >= stockTotal;
+
+    if(!data.items.length){
+        document.getElementById("stock-body").innerHTML =
+            `<tr><td colspan="7" style="text-align:center;color:var(--muted);padding:40px">No products found</td></tr>`;
+        return;
+    }
+
+    document.getElementById("stock-body").innerHTML = data.items.map(p => `
+        <tr>
+            <td style="font-family:var(--mono);font-size:12px;color:var(--muted)">${p.sku}</td>
+            <td class="name">${p.name}</td>
+            <td>${p.stock <= 0
+                ? `<span class="out-badge">✕ Out</span>`
+                : p.low
+                ? `<span class="low-badge">⚠ ${p.stock.toFixed(0)}</span>`
+                : `<span class="ok-badge">${p.stock.toFixed(0)}</span>`}
+            </td>
+            <td style="font-family:var(--mono);color:var(--muted)">${p.min_stock.toFixed(0)}</td>
+            <td style="color:var(--muted)">${p.unit}</td>
+            <td>${p.stock <= 0
+                ? `<span style="color:var(--danger);font-size:12px">Out of Stock</span>`
+                : p.low
+                ? `<span style="color:var(--warn);font-size:12px">⚠ Low</span>`
+                : `<span style="color:var(--green);font-size:12px">● OK</span>`}
+            </td>
+            <td>
+                <button class="action-btn" onclick="openAdjustModal(${p.id},'${p.name.replace(/'/g,"\\'")}',${p.stock})">
+                    Adjust
+                </button>
+            </td>
+        </tr>`).join("");
+}
+
+function stockPrevPage(){ if(stockPage>0){ stockPage--; loadStock(); } }
+function stockNextPage(){ if((stockPage+1)*pageSize<stockTotal){ stockPage++; loadStock(); } }
+
+/* ── MOVEMENTS ── */
+async function loadMoves(){
+    let url  = `/inventory/api/moves?skip=${movesPage*pageSize}&limit=${pageSize}`;
+    let data = await (await fetch(url)).json();
+    movesTotal = data.total;
+
+    document.getElementById("moves-page-info").innerText =
+        `Showing ${Math.min(movesPage*pageSize+1,movesTotal)}–${Math.min((movesPage+1)*pageSize,movesTotal)} of ${movesTotal}`;
+    document.getElementById("moves-prev").disabled = movesPage===0;
+    document.getElementById("moves-next").disabled = (movesPage+1)*pageSize >= movesTotal;
+
+    if(!data.moves.length){
+        document.getElementById("moves-body").innerHTML =
+            `<tr><td colspan="9" style="text-align:center;color:var(--muted);padding:40px">No movements yet</td></tr>`;
+        return;
+    }
+
+    document.getElementById("moves-body").innerHTML = data.moves.map(m => {
+        let typeClass = m.type==="in"?"move-in":m.type==="out"?"move-out":"move-adjust";
+        let typeLabel = m.type==="in"?"▲ IN":m.type==="out"?"▼ OUT":"⟳ ADJ";
+        let qtySign   = m.qty >= 0 ? "+" : "";
+        return `
+        <tr>
+            <td style="font-size:12px;color:var(--muted)">${m.created_at}</td>
+            <td class="name" style="max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${m.product}</td>
+            <td style="font-family:var(--mono);font-size:11px;color:var(--muted)">${m.sku}</td>
+            <td><span class="${typeClass}">${typeLabel}</span></td>
+            <td style="font-family:var(--mono);color:${m.qty>=0?'var(--green)':'var(--danger)'}">${qtySign}${m.qty.toFixed(0)}</td>
+            <td style="font-family:var(--mono);color:var(--muted)">${m.qty_before.toFixed(0)}</td>
+            <td style="font-family:var(--mono);color:var(--sub)">${m.qty_after.toFixed(0)}</td>
+            <td style="font-size:12px;color:var(--blue);text-transform:capitalize">${m.ref_type}</td>
+            <td style="font-size:12px;color:var(--muted);max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${m.note}</td>
+        </tr>`;
+    }).join("");
+}
+
+function movesPrevPage(){ if(movesPage>0){ movesPage--; loadMoves(); } }
+function movesNextPage(){ if((movesPage+1)*pageSize<movesTotal){ movesPage++; loadMoves(); } }
+
+/* ── ADJUST MODAL ── */
+function openAdjustModal(id, name, currentStock){
+    adjustingProduct = {id, currentStock};
+    document.getElementById("adjust-product-name").innerText = name;
+    document.getElementById("adjust-current").innerText      = currentStock.toFixed(0);
+    document.getElementById("adj-type").value  = "add";
+    document.getElementById("adj-qty").value   = "";
+    document.getElementById("adj-note").value  = "";
+    document.getElementById("adj-preview").style.display = "none";
+    document.getElementById("adjust-modal").classList.add("open");
+}
+
+function closeAdjustModal(){
+    document.getElementById("adjust-modal").classList.remove("open");
+}
+
+function updateAdjPreview(){
+    let type = document.getElementById("adj-type").value;
+    let qty  = parseFloat(document.getElementById("adj-qty").value)||0;
+    let curr = adjustingProduct ? adjustingProduct.currentStock : 0;
+    let newVal;
+    if(type==="add")    newVal = curr + qty;
+    else if(type==="remove") newVal = curr - qty;
+    else                newVal = qty;
+
+    document.getElementById("adj-preview").style.display = qty > 0 ? "" : "none";
+    document.getElementById("adj-preview-val").innerText = newVal.toFixed(0);
+    document.getElementById("adj-preview-val").style.color = newVal < 0 ? "var(--danger)" : "var(--blue)";
+}
+
+async function saveAdjustment(){
+    if(!adjustingProduct){ return; }
+    let type = document.getElementById("adj-type").value;
+    let qty  = parseFloat(document.getElementById("adj-qty").value)||0;
+    let note = document.getElementById("adj-note").value.trim();
+    let curr = adjustingProduct.currentStock;
+
+    if(qty <= 0){ showToast("Enter a quantity greater than 0"); return; }
+
+    let actualQty;
+    if(type==="add")         actualQty = qty;
+    else if(type==="remove") actualQty = -qty;
+    else                     actualQty = qty - curr; // set exact
+
+    let res  = await fetch("/inventory/api/adjust",{
+        method:"POST",
+        headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({
+            product_id: adjustingProduct.id,
+            qty:        actualQty,
+            note:       note || `Manual ${type}`,
+        }),
+    });
+    let data = await res.json();
+    if(data.detail){ showToast("Error: "+data.detail); return; }
+
+    closeAdjustModal();
+    showToast(`Stock updated ✓ New stock: ${data.new_stock.toFixed(0)}`);
+    loadStock();
+    loadSummary();
+}
+
+document.getElementById("adjust-modal").addEventListener("click",function(e){
+    if(e.target===this) closeAdjustModal();
+});
+
+let toastTimer=null;
+function showToast(msg){
+    let t=document.getElementById("toast");
+    t.innerText=msg; t.classList.add("show");
+    clearTimeout(toastTimer);
+    toastTimer=setTimeout(()=>t.classList.remove("show"),3500);
+}
+
+init();
+</script>
+</body>
+</html>
+"""

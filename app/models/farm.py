@@ -1,0 +1,48 @@
+from sqlalchemy import Column, Integer, String, Numeric, DateTime, ForeignKey, Text, Date
+from sqlalchemy.orm import relationship
+from sqlalchemy.sql import func
+from app.database import Base
+
+
+class Farm(Base):
+    __tablename__ = "farms"
+
+    id         = Column(Integer, primary_key=True, index=True)
+    name       = Column(String(150), nullable=False, unique=True)
+    location   = Column(String(200))
+    notes      = Column(Text)
+    is_active  = Column(Integer, default=1)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    deliveries = relationship("FarmDelivery", back_populates="farm")
+
+
+class FarmDelivery(Base):
+    __tablename__ = "farm_deliveries"
+
+    id             = Column(Integer, primary_key=True, index=True)
+    delivery_number= Column(String(30), unique=True, index=True)
+    farm_id        = Column(Integer, ForeignKey("farms.id"), nullable=False)
+    delivery_date  = Column(Date, nullable=False)
+    received_by    = Column(String(150))
+    quality_notes  = Column(Text)
+    notes          = Column(Text)
+    created_at     = Column(DateTime(timezone=True), server_default=func.now())
+
+    farm  = relationship("Farm", back_populates="deliveries")
+    items = relationship("FarmDeliveryItem", back_populates="delivery",
+                         cascade="all, delete-orphan")
+
+
+class FarmDeliveryItem(Base):
+    __tablename__ = "farm_delivery_items"
+
+    id          = Column(Integer, primary_key=True, index=True)
+    delivery_id = Column(Integer, ForeignKey("farm_deliveries.id"), nullable=False)
+    product_id  = Column(Integer, ForeignKey("products.id"), nullable=False)
+    qty         = Column(Numeric(12, 3), nullable=False)
+    unit        = Column(String(30))
+    notes       = Column(String(255))
+
+    delivery = relationship("FarmDelivery", back_populates="items")
+    product  = relationship("Product")
