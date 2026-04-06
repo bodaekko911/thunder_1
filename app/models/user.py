@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Boolean, DateTime
+from sqlalchemy import Column, Integer, String, Boolean, DateTime, Text
 from sqlalchemy.sql import func
 from app.database import Base
 
@@ -13,3 +13,4 @@ class User(Base):
     role       = Column(String(30), default="cashier")
     is_active  = Column(Boolean, default=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
+    permissions = Column(Text, nullable=True)

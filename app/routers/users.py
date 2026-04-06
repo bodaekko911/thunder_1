@@ -491,6 +491,7 @@ td.name{color:var(--text);font-weight:600;}
                 <option value="viewer">Viewer</option>
                 <option value="admin">Admin</option>
             </select>
+            <div id="role-info" class="role-info"></div>
         </div>
         <div class="fld">
             <label>Pages Access <span style="font-weight:400;text-transform:none;letter-spacing:0;font-size:10px;color:var(--muted)">(select pages first — then tabs & actions appear)</span></label>
