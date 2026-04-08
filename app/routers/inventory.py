@@ -1,15 +1,51 @@
 from fastapi import APIRouter, Depends, HTTPException
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, StreamingResponse
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 from typing import Optional
 from pydantic import BaseModel
+from datetime import datetime, date
+import io
 
 from app.database import get_db
 from app.models.product import Product
 from app.models.inventory import StockMove
 
 router = APIRouter(prefix="/inventory", tags=["Inventory"])
+
+
+def to_xlsx(headers, rows, sheet_name="Report"):
+    try:
+        import openpyxl
+        from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = sheet_name
+        hfill  = PatternFill("solid", fgColor="2a7a2a")
+        hfont  = Font(bold=True, color="FFFFFF", size=11)
+        thin   = Side(style="thin", color="DDDDDD")
+        border = Border(left=thin, right=thin, top=thin, bottom=thin)
+        for col, h in enumerate(headers, 1):
+            c = ws.cell(row=1, column=col, value=h)
+            c.fill = hfill; c.font = hfont
+            c.alignment = Alignment(horizontal="center", vertical="center")
+            c.border = border
+        for ri, row in enumerate(rows, 2):
+            for ci, val in enumerate(row, 1):
+                c = ws.cell(row=ri, column=ci, value=val)
+                c.border = border
+                c.alignment = Alignment(vertical="center")
+                if ri % 2 == 0:
+                    c.fill = PatternFill("solid", fgColor="F5FAF5")
+        for col in ws.columns:
+            mx = max((len(str(c.value or "")) for c in col), default=10)
+            ws.column_dimensions[col[0].column_letter].width = min(mx + 4, 40)
+        ws.row_dimensions[1].height = 20
+        buf = io.BytesIO()
+        wb.save(buf); buf.seek(0)
+        return buf
+    except ImportError:
+        raise Exception("Run: pip install openpyxl --break-system-packages")
 
 
 # ── Schemas ────────────────────────────────────────────
@@ -56,14 +92,36 @@ def get_stock(
 
 @router.get("/api/moves")
 def get_moves(
+    q:         str = "",
+    date_from: str = None,
+    date_to:   str = None,
     product_id: int = None,
     skip:       int = 0,
     limit:      int = 100,
     db: Session = Depends(get_db),
 ):
-    query = db.query(StockMove)
+    query = db.query(StockMove).join(Product, StockMove.product_id == Product.id)
     if product_id:
         query = query.filter(StockMove.product_id == product_id)
+    if q:
+        query = query.filter(
+            Product.name.ilike(f"%{q}%") |
+            Product.sku.ilike(f"%{q}%") |
+            StockMove.ref_type.ilike(f"%{q}%") |
+            StockMove.note.ilike(f"%{q}%")
+        )
+    if date_from:
+        try:
+            dt_from = datetime.fromisoformat(date_from)
+            query = query.filter(StockMove.created_at >= dt_from)
+        except ValueError:
+            pass
+    if date_to:
+        try:
+            dt_to = datetime.fromisoformat(date_to).replace(hour=23, minute=59, second=59)
+            query = query.filter(StockMove.created_at <= dt_to)
+        except ValueError:
+            pass
     total = query.count()
     moves = query.order_by(StockMove.created_at.desc()).offset(skip).limit(limit).all()
     return {
@@ -85,6 +143,31 @@ def get_moves(
             for m in moves
         ],
     }
+
+
+@router.get("/export/moves")
+def export_moves(
+    q:         str = "",
+    date_from: str = None,
+    date_to:   str = None,
+    product_id: int = None,
+    db: Session = Depends(get_db),
+):
+    data = get_moves(q=q, date_from=date_from, date_to=date_to, product_id=product_id, skip=0, limit=100000, db=db)
+    rows = [
+        [m["created_at"], m["product"], m["sku"], m["type"], m["qty"], m["qty_before"], m["qty_after"], m["ref_type"], m["ref_id"], m["note"]]
+        for m in data["moves"]
+    ]
+    buf = to_xlsx(
+        ["Date", "Product", "SKU", "Type", "Qty", "Before", "After", "Reference", "Ref ID", "Note"],
+        rows,
+        "Stock Moves"
+    )
+    return StreamingResponse(
+        buf,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f"attachment; filename=inventory_moves_{date.today()}.xlsx"}
+    )
 
 
 @router.post("/api/adjust")
@@ -163,6 +246,22 @@ def inventory_ui():
     --mono:    'JetBrains Mono', monospace;
     --r:       12px;
 }
+body.light{
+    --bg:#f4f5ef;--surface:#f1f3eb;--card:#eceee6;--card2:#e4e6de;
+    --border:rgba(0,0,0,0.08);--border2:rgba(0,0,0,0.14);
+    --text:#1a1e14;--sub:#4a5040;--muted:#7b816f;
+}
+body.light nav{background:rgba(244,245,239,.92);}
+body.light .nav-link:hover{background:rgba(0,0,0,.05);}
+body.light tr:hover td{background:rgba(0,0,0,.03);}
+.mode-btn{display:flex;align-items:center;justify-content:center;width:36px;height:36px;border-radius:10px;border:1px solid var(--border);background:var(--card);color:var(--sub);font-size:16px;cursor:pointer;transition:all .2s;font-family:var(--sans);}
+.mode-btn:hover{border-color:var(--border2);transform:scale(1.06);}
+.topbar-right{display:flex;align-items:center;gap:12px;}
+.user-pill{display:flex;align-items:center;gap:10px;background:var(--card);border:1px solid var(--border);border-radius:40px;padding:7px 16px 7px 10px;}
+.user-avatar{width:28px;height:28px;background:linear-gradient(135deg,#7ecb6f,#d4a256);border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;color:#0a0c08;}
+.user-name{font-size:13px;font-weight:500;color:var(--sub);}
+.logout-btn{background:transparent;border:1px solid var(--border);color:var(--muted);font-family:var(--sans);font-size:12px;font-weight:500;padding:8px 16px;border-radius:8px;cursor:pointer;transition:all .2s;letter-spacing:.3px;}
+.logout-btn:hover{border-color:#c97a7a;color:#c97a7a;}
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 body { font-family: var(--sans); background: var(--bg); color: var(--text); min-height: 100vh; font-size: 14px; }
 
@@ -359,6 +458,14 @@ td.mono { font-family: var(--mono); }
     <a href="/inventory/"      class="nav-link active">Inventory</a>
     <a href="/import"          class="nav-link">Import</a>
     <span class="nav-spacer"></span>
+    <div class="topbar-right">
+        <button class="mode-btn" id="mode-btn" onclick="toggleMode()" title="Toggle color mode">??</button>
+        <div class="user-pill">
+            <div class="user-avatar" id="user-avatar">A</div>
+            <span class="user-name" id="user-name">Admin</span>
+        </div>
+        <button class="logout-btn" onclick="logout()">Sign out</button>
+    </div>
 </nav>
 
 <div class="content">
@@ -432,7 +539,6 @@ td.mono { font-family: var(--mono); }
             </div>
         </div>
     </div>
-
     <!-- MOVEMENTS -->
     <div id="moves-section" style="display:none">
         <div class="toolbar">
@@ -440,8 +546,12 @@ td.mono { font-family: var(--mono); }
                 <svg width="15" height="15" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24">
                     <circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/>
                 </svg>
-                <input id="moves-search" placeholder="Coming soon — filter by product…" disabled>
+                <input id="moves-search" placeholder="Search by product, SKU, reference, or note..." oninput="onMovesSearch()">
             </div>
+            <input type="date" id="moves-date-from" style="background:var(--card);border:1px solid var(--border);border-radius:var(--r);color:var(--text);padding:10px 12px;font-family:var(--sans);">
+            <input type="date" id="moves-date-to" style="background:var(--card);border:1px solid var(--border);border-radius:var(--r);color:var(--text);padding:10px 12px;font-family:var(--sans);">
+            <button class="btn btn-outline" onclick="applyMovesFilters()">Apply</button>
+            <button class="btn btn-green" onclick="exportMoves()">Export Excel</button>
         </div>
         <div class="table-wrap">
             <table>
@@ -518,7 +628,94 @@ td.mono { font-family: var(--mono); }
 <div class="toast" id="toast"></div>
 
 <script>
-let currentTab   = "stock";
+  const __erpToken = localStorage.getItem("token");
+  const __erpUserRole = localStorage.getItem("user_role") || "";
+  const __erpUserPermissions = new Set(
+      (localStorage.getItem("user_permissions") || "")
+          .split(",")
+          .map(p => p.trim())
+          .filter(Boolean)
+  );
+  function setModeButton(isLight){
+    const btn = document.getElementById("mode-btn");
+    if(btn) btn.innerText = isLight ? "☀️" : "🌙";
+}
+function toggleMode(){
+    const isLight = document.body.classList.toggle("light");
+    localStorage.setItem("colorMode", isLight ? "light" : "dark");
+    setModeButton(isLight);
+}
+function initializeColorMode(){
+    const isLight = localStorage.getItem("colorMode") === "light";
+    document.body.classList.toggle("light", isLight);
+    setModeButton(isLight);
+}
+function setUserInfo(){
+    const name = localStorage.getItem("user_name") || "Admin";
+    const avatar = document.getElementById("user-avatar");
+    const userName = document.getElementById("user-name");
+    if(avatar) avatar.innerText = name.charAt(0).toUpperCase();
+    if(userName) userName.innerText = name;
+}
+function logout(){
+    localStorage.removeItem("token");
+    localStorage.removeItem("user_name");
+    localStorage.removeItem("user_role");
+    localStorage.removeItem("user_permissions");
+    window.location.href = "/";
+}
+  function requirePageAccess(permission){
+      if(!__erpToken){
+          window.location.href = "/";
+          throw new Error("Not authenticated");
+      }
+      if(__erpUserRole === "admin" || __erpUserPermissions.has(permission)) return;
+      document.body.innerHTML = `<div style="display:flex;align-items:center;justify-content:center;height:100vh;flex-direction:column;gap:16px;color:#445066;font-family:'Outfit',sans-serif;background:#060810"><div style="font-size:48px">🔒</div><div style="font-size:20px;font-weight:800;color:#f0f4ff">Access Restricted</div><div style="font-size:14px">You do not have permission to open this page.</div><a href="/home" style="color:#00ff9d;text-decoration:none;font-weight:700">Back to Home</a></div>`;
+      throw new Error("Access denied");
+  }
+  function applyNavPermissions(){
+      const navPermissions = {
+          "/home": null,
+          "/dashboard": "page_dashboard",
+          "/pos": "page_pos",
+          "/b2b/": "page_b2b",
+          "/inventory/": "page_inventory",
+          "/products/": "page_products",
+          "/customers-mgmt/": "page_customers",
+          "/suppliers/": "page_suppliers",
+          "/production/": "page_production",
+          "/farm/": "page_farm",
+          "/hr/": "page_hr",
+          "/accounting/": "page_accounting",
+          "/reports/": "page_reports",
+          "/import": "page_import",
+          "/users/": "admin_only"
+      };
+      document.querySelectorAll("a.nav-link[href]").forEach(link => {
+          const href = link.getAttribute("href");
+          const requirement = navPermissions[href];
+          if(requirement === undefined || requirement === null) return;
+          if(requirement === "admin_only"){
+              if(__erpUserRole !== "admin") link.style.display = "none";
+              return;
+          }
+          if(__erpUserRole !== "admin" && !__erpUserPermissions.has(requirement)){
+              link.style.display = "none";
+          }
+      });
+  }
+  function hasPermission(permission){
+      return __erpUserRole === "admin" || __erpUserPermissions.has(permission);
+  }
+  function applyInventoryActionPermissions(){
+      if(hasPermission("action_inventory_adjust")) return;
+      document.querySelectorAll("#stock-body tr td:last-child button").forEach(btn => btn.remove());
+  }
+  requirePageAccess("page_inventory");
+  applyNavPermissions();
+  initializeColorMode();
+  setUserInfo();
+  let currentTab   = "stock";
 let stockPage    = 0;
 let movesPage    = 0;
 let pageSize     = 50;
@@ -557,6 +754,16 @@ function switchTab(tab){
 function onStockSearch(){
     clearTimeout(searchTimer);
     searchTimer = setTimeout(()=>{ stockPage=0; loadStock(); }, 300);
+}
+
+function onMovesSearch(){
+    clearTimeout(searchTimer);
+    searchTimer = setTimeout(()=>{ movesPage=0; loadMoves(); }, 300);
+}
+
+function applyMovesFilters(){
+    movesPage = 0;
+    loadMoves();
 }
 
 function toggleLowStock(){
@@ -608,6 +815,7 @@ async function loadStock(){
                 </button>
             </td>
         </tr>`).join("");
+    applyInventoryActionPermissions();
 }
 
 function stockPrevPage(){ if(stockPage>0){ stockPage--; loadStock(); } }
@@ -615,7 +823,13 @@ function stockNextPage(){ if((stockPage+1)*pageSize<stockTotal){ stockPage++; lo
 
 /* ── MOVEMENTS ── */
 async function loadMoves(){
+    let q    = document.getElementById("moves-search").value.trim();
+    let from = document.getElementById("moves-date-from").value;
+    let to   = document.getElementById("moves-date-to").value;
     let url  = `/inventory/api/moves?skip=${movesPage*pageSize}&limit=${pageSize}`;
+    if(q) url += `&q=${encodeURIComponent(q)}`;
+    if(from) url += `&date_from=${encodeURIComponent(from)}`;
+    if(to) url += `&date_to=${encodeURIComponent(to)}`;
     let data = await (await fetch(url)).json();
     movesTotal = data.total;
 
@@ -651,6 +865,18 @@ async function loadMoves(){
 
 function movesPrevPage(){ if(movesPage>0){ movesPage--; loadMoves(); } }
 function movesNextPage(){ if((movesPage+1)*pageSize<movesTotal){ movesPage++; loadMoves(); } }
+
+function exportMoves(){
+    let q    = document.getElementById("moves-search").value.trim();
+    let from = document.getElementById("moves-date-from").value;
+    let to   = document.getElementById("moves-date-to").value;
+    let url  = `/inventory/export/moves?`;
+    let params = [];
+    if(q) params.push(`q=${encodeURIComponent(q)}`);
+    if(from) params.push(`date_from=${encodeURIComponent(from)}`);
+    if(to) params.push(`date_to=${encodeURIComponent(to)}`);
+    window.location.href = url + params.join("&");
+}
 
 /* ── ADJUST MODAL ── */
 function openAdjustModal(id, name, currentStock){
@@ -731,3 +957,5 @@ init();
 </body>
 </html>
 """
+
+

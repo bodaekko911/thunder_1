@@ -4,6 +4,7 @@ from decimal import Decimal
 
 from app.models.invoice import Invoice, InvoiceItem
 from app.models.product import Product
+from app.models.customer import Customer
 from app.models.inventory import StockMove
 from app.models.accounting import Account, Journal, JournalEntry
 from app.schemas.invoice import InvoiceCreate
@@ -14,8 +15,8 @@ def _next_invoice_number(db: Session) -> str:
     return f"INV-{str(count + 1).zfill(5)}"
 
 
-def _post_journal(db, description, entries):
-    journal = Journal(ref_type="invoice", description=description)
+def _post_journal(db, description, entries, user_id=None):
+    journal = Journal(ref_type="invoice", description=description, user_id=user_id)
     db.add(journal); db.flush()
     for code, debit, credit in entries:
         acc = db.query(Account).filter(Account.code == code).first()
@@ -25,6 +26,19 @@ def _post_journal(db, description, entries):
                 debit=debit, credit=credit,
             ))
             acc.balance += Decimal(str(debit)) - Decimal(str(credit))
+
+
+def _get_walk_in_customer_id(db: Session) -> int:
+    customer = (
+        db.query(Customer)
+        .filter(Customer.name == "Walk-in Customer")
+        .first()
+    )
+    if not customer:
+        customer = Customer(name="Walk-in Customer", phone="", email="", address="")
+        db.add(customer)
+        db.flush()
+    return customer.id
 
 
 def create_invoice(db: Session, data: InvoiceCreate, user_id: int) -> Invoice:
@@ -52,10 +66,11 @@ def create_invoice(db: Session, data: InvoiceCreate, user_id: int) -> Invoice:
     is_settle_later  = getattr(data, "settle_later", False)
     payment_method   = getattr(data, "payment_method", "cash") or "cash"
     status           = "unpaid" if is_settle_later else "paid"
+    customer_id      = data.customer_id or _get_walk_in_customer_id(db)
 
     invoice = Invoice(
         invoice_number=_next_invoice_number(db),
-        customer_id=data.customer_id,
+        customer_id=customer_id,
         user_id=user_id,
         payment_method=payment_method,
         subtotal=round(subtotal, 2),
@@ -92,13 +107,13 @@ def create_invoice(db: Session, data: InvoiceCreate, user_id: int) -> Invoice:
         _post_journal(db, f"Sale - {invoice.invoice_number}", [
             (acc_code, round(total, 2), 0),
             ("4000",   0, round(total, 2)),
-        ])
+        ], user_id=user_id)
     else:
         # Settle later → Accounts Receivable
         _post_journal(db, f"Unpaid Sale - {invoice.invoice_number}", [
             ("1100", round(total, 2), 0),
             ("4000", 0, round(total, 2)),
-        ])
+        ], user_id=user_id)
 
     db.commit()
     db.refresh(invoice)

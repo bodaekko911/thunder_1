@@ -102,6 +102,7 @@ def sales_report(date_from: Optional[str] = None, date_to: Optional[str] = None,
         pos_records.append({
             "invoice_number": inv.invoice_number or f"POS-{inv.id}",
             "datetime": inv.created_at.strftime("%Y-%m-%d %H:%M") if inv.created_at else "—",
+            "user_name": inv.user.name if inv.user else "—",
             "payment": inv.payment_method or "—",
             "items": [{"name": it.name, "qty": float(it.qty), "unit_price": float(it.unit_price), "total": float(it.total)} for it in items],
             "total": float(inv.total),
@@ -117,6 +118,7 @@ def sales_report(date_from: Optional[str] = None, date_to: Optional[str] = None,
             "invoice_number": inv.invoice_number,
             "client": inv.client.name if inv.client else "—",
             "datetime": inv.created_at.strftime("%Y-%m-%d %H:%M") if inv.created_at else "—",
+            "user_name": inv.user.name if inv.user else "—",
             "invoice_type": inv.invoice_type,
             "status": inv.status,
             "items": items_data,
@@ -197,26 +199,27 @@ def export_sales(date_from: str = None, date_to: str = None, db: Session = Depen
 
         # ── Sheet 2: POS Invoices ──
         ws2 = wb.create_sheet("POS Invoices")
-        style_header(ws2, ["Invoice #","Date / Time","Payment","Product","Qty","Unit Price (EGP)","Line Total (EGP)","Invoice Total (EGP)"], blue_fill)
+        style_header(ws2, ["Invoice #","Date / Time","User","Payment","Product","Qty","Unit Price (EGP)","Line Total (EGP)","Invoice Total (EGP)"], blue_fill)
         ri = 2
         for inv in data["pos_records"]:
             for i, item in enumerate(inv["items"]):
                 add_row(ws2, ri, [
                     inv["invoice_number"] if i == 0 else "",
                     inv["datetime"] if i == 0 else "",
+                    inv["user_name"] if i == 0 else "",
                     inv["payment"] if i == 0 else "",
                     item["name"], item["qty"], item["unit_price"], item["total"],
                     inv["total"] if i == 0 else ""
                 ])
                 ri += 1
             if not inv["items"]:
-                add_row(ws2, ri, [inv["invoice_number"], inv["datetime"], inv["payment"], "—", "", "", "", inv["total"]])
+                add_row(ws2, ri, [inv["invoice_number"], inv["datetime"], inv["user_name"], inv["payment"], "—", "", "", "", inv["total"]])
                 ri += 1
         auto_width(ws2)
 
         # ── Sheet 3: B2B Invoices ──
         ws3 = wb.create_sheet("B2B Invoices")
-        style_header(ws3, ["Invoice #","Client","Date / Time","Type","Product","Qty","Unit Price (EGP)","Line Total (EGP)","Invoice Total","Amount Paid","Balance Due"], orange_fill)
+        style_header(ws3, ["Invoice #","Client","Date / Time","User","Type","Product","Qty","Unit Price (EGP)","Line Total (EGP)","Invoice Total","Amount Paid","Balance Due"], orange_fill)
         ri = 2
         for inv in data["b2b_records"]:
             for i, item in enumerate(inv["items"]):
@@ -224,6 +227,7 @@ def export_sales(date_from: str = None, date_to: str = None, db: Session = Depen
                     inv["invoice_number"] if i == 0 else "",
                     inv["client"] if i == 0 else "",
                     inv["datetime"] if i == 0 else "",
+                    inv["user_name"] if i == 0 else "",
                     inv["invoice_type"] if i == 0 else "",
                     item["name"], item["qty"], item["unit_price"], item["total"],
                     inv["total"] if i == 0 else "",
@@ -232,7 +236,7 @@ def export_sales(date_from: str = None, date_to: str = None, db: Session = Depen
                 ])
                 ri += 1
             if not inv["items"]:
-                add_row(ws3, ri, [inv["invoice_number"], inv["client"], inv["datetime"], inv["invoice_type"], "—", "", "", "", inv["total"], inv["amount_paid"], inv["balance_due"]])
+                add_row(ws3, ri, [inv["invoice_number"], inv["client"], inv["datetime"], inv["user_name"], inv["invoice_type"], "—", "", "", "", inv["total"], inv["amount_paid"], inv["balance_due"]])
                 ri += 1
         auto_width(ws3)
 
@@ -310,10 +314,21 @@ def farm_intake_report(date_from: Optional[str] = None, date_to: Optional[str] =
     try: db.commit()
     except: db.rollback()
     result = []
+    delivery_rows = []
     for farm in farms:
         deliveries = db.query(FarmDelivery).filter(FarmDelivery.farm_id==farm.id, FarmDelivery.delivery_date>=d_from.date(), FarmDelivery.delivery_date<=d_to.date()).all()
         product_totals = {}
         for d in deliveries:
+            delivery_rows.append({
+                "delivery_number": d.delivery_number,
+                "farm": farm.name or f"Farm {farm.id}",
+                "delivery_date": str(d.delivery_date),
+                "received_by": d.received_by or "—",
+                "user_name": d.user.name if d.user else "—",
+                "total_items": len(d.items),
+                "total_qty": round(sum(float(item.qty) for item in d.items), 2),
+                "notes": d.notes or "",
+            })
             for item in d.items:
                 name = item.product.name if item.product else "—"
                 unit = item.unit or ""
@@ -321,18 +336,21 @@ def farm_intake_report(date_from: Optional[str] = None, date_to: Optional[str] =
                 product_totals[key] = product_totals.get(key, 0) + float(item.qty)
         products = [{"name":k.split("|")[0],"unit":k.split("|")[1],"total_qty":round(v,2)} for k,v in sorted(product_totals.items(), key=lambda x: x[1], reverse=True)]
         result.append({"name": farm.name or f"Farm {farm.id}", "delivery_count":len(deliveries), "products":products, "total_qty":round(sum(p["total_qty"] for p in products),2)})
-    return result
+    delivery_rows.sort(key=lambda row: (row["delivery_date"], row["delivery_number"]), reverse=True)
+    return {"farms": result, "deliveries": delivery_rows}
 
 @router.get("/export/farm-intake")
 def export_farm(date_from: str = None, date_to: str = None, db: Session = Depends(get_db)):
     data = farm_intake_report(date_from=date_from, date_to=date_to, db=db)
     rows = []
-    for farm in data:
+    for farm in data["farms"]:
         for p in farm["products"]:
             rows.append([farm["name"],p["name"],p["total_qty"],p["unit"],farm["delivery_count"]])
         if not farm["products"]:
             rows.append([farm["name"],"No deliveries",0,"",0])
-    buf = to_xlsx(["Farm","Product","Total Qty","Unit","Deliveries"], rows, "Farm Intake")
+    for delivery in data["deliveries"]:
+        rows.append([delivery["farm"], "Delivery " + delivery["delivery_number"], delivery["total_qty"], "", delivery["total_items"], delivery["user_name"]])
+    buf = to_xlsx(["Farm","Product / Record","Total Qty","Unit","Deliveries / Items","Performed By"], rows, "Farm Intake")
     return StreamingResponse(buf, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={"Content-Disposition": f"attachment; filename=farm_intake_{date.today()}.xlsx"})
 
@@ -347,7 +365,7 @@ def spoilage_report(date_from: Optional[str] = None, date_to: Optional[str] = No
         name = r.product.name if r.product else "—"; unit = r.product.unit if r.product else ""; reason = r.reason or "—"
         by_product[name]  = by_product.get(name, 0)  + float(r.qty)
         by_reason[reason] = by_reason.get(reason, 0) + float(r.qty)
-        rows.append({"ref":r.ref_number,"product":name,"qty":float(r.qty),"unit":unit,"reason":reason,"farm":r.farm.name if r.farm else "—","date":str(r.spoilage_date),"notes":r.notes or ""})
+        rows.append({"ref":r.ref_number,"product":name,"qty":float(r.qty),"unit":unit,"reason":reason,"farm":r.farm.name if r.farm else "—","date":str(r.spoilage_date),"user_name":r.user.name if r.user else "—","notes":r.notes or ""})
     return {"records":rows,"total_qty":round(sum(float(r.qty) for r in records),2),"total_count":len(records),
             "by_product":[{"name":k,"qty":round(v,2)} for k,v in sorted(by_product.items(),key=lambda x:x[1],reverse=True)[:8]],
             "by_reason": [{"reason":k,"qty":round(v,2)} for k,v in sorted(by_reason.items(), key=lambda x:x[1],reverse=True)]}
@@ -355,8 +373,8 @@ def spoilage_report(date_from: Optional[str] = None, date_to: Optional[str] = No
 @router.get("/export/spoilage")
 def export_spoilage(date_from: str = None, date_to: str = None, db: Session = Depends(get_db)):
     data = spoilage_report(date_from=date_from, date_to=date_to, db=db)
-    rows = [[r["ref"],r["product"],r["qty"],r["unit"],r["reason"],r["farm"],r["date"],r["notes"]] for r in data["records"]]
-    buf = to_xlsx(["Ref #","Product","Qty","Unit","Reason","Farm","Date","Notes"], rows, "Spoilage")
+    rows = [[r["ref"],r["product"],r["qty"],r["unit"],r["reason"],r["farm"],r["date"],r["user_name"],r["notes"]] for r in data["records"]]
+    buf = to_xlsx(["Ref #","Product","Qty","Unit","Reason","Farm","Date","Performed By","Notes"], rows, "Spoilage")
     return StreamingResponse(buf, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={"Content-Disposition": f"attachment; filename=spoilage_{date.today()}.xlsx"})
 
@@ -374,7 +392,7 @@ def production_report(date_from: Optional[str] = None, date_to: Optional[str] = 
         rows.append({"batch_number":b.batch_number,"type":"Packaging" if is_pkg else "Processing",
             "recipe":b.recipe.name if b.recipe else "Custom","waste_pct":float(b.waste_pct),
             "notes":b.notes or "","date":b.created_at.strftime("%Y-%m-%d") if b.created_at else "—",
-            "inputs_str":inputs_str,"outputs_str":outputs_str})
+            "inputs_str":inputs_str,"outputs_str":outputs_str,"user_name":b.user.name if b.user else "—"})
         if is_pkg: total_pkg  += 1
         else:      total_proc += 1; losses.append(float(b.waste_pct))
     return {"batches":rows,"total_processing":total_proc,"total_packaging":total_pkg,
@@ -383,8 +401,8 @@ def production_report(date_from: Optional[str] = None, date_to: Optional[str] = 
 @router.get("/export/production")
 def export_production(date_from: str = None, date_to: str = None, db: Session = Depends(get_db)):
     data = production_report(date_from=date_from, date_to=date_to, db=db)
-    rows = [[b["batch_number"],b["type"],b["recipe"],b["inputs_str"],b["outputs_str"],b["waste_pct"],b["date"],b["notes"]] for b in data["batches"]]
-    buf = to_xlsx(["Batch #","Type","Recipe","Inputs","Outputs","Loss %","Date","Notes"], rows, "Production")
+    rows = [[b["batch_number"],b["type"],b["recipe"],b["inputs_str"],b["outputs_str"],b["waste_pct"],b["date"],b["user_name"],b["notes"]] for b in data["batches"]]
+    buf = to_xlsx(["Batch #","Type","Recipe","Inputs","Outputs","Loss %","Date","Performed By","Notes"], rows, "Production")
     return StreamingResponse(buf, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={"Content-Disposition": f"attachment; filename=production_{date.today()}.xlsx"})
 
@@ -628,6 +646,7 @@ def transactions_report(
                     "source":         "POS",
                     "customer":       cname,
                     "sku":            item.sku or "—",
+                    "user_name":      inv.user.name if inv.user else "—",
                     "product":        item.name or "—",
                     "qty":            float(item.qty),
                     "unit_price":     float(item.unit_price),
@@ -652,6 +671,7 @@ def transactions_report(
                 rows.append({
                     "date":           inv.created_at.strftime("%Y-%m-%d %H:%M") if inv.created_at else "—",
                     "invoice_number": inv.invoice_number,
+                    "user_name":      inv.user.name if inv.user else "—",
                     "source":         f"B2B ({inv.invoice_type.replace('_',' ').title()})",
                     "customer":       cname,
                     "sku":            product.sku if product else "—",
@@ -678,9 +698,9 @@ def transactions_report(
 @router.get("/export/transactions")
 def export_transactions(date_from: str = None, date_to: str = None, source: str = None, db: Session = Depends(get_db)):
     data = transactions_report(date_from=date_from, date_to=date_to, source=source, db=db)
-    headers = ["Date","Invoice #","Source","Customer","SKU","Product","QTY","Unit Price","Line Total","Discount (EGP)","Discount %","Payment Method","Invoice Total","Status"]
-    rows    = [[r["date"],r["invoice_number"],r["source"],r["customer"],r["sku"],r["product"],r["qty"],r["unit_price"],r["line_total"],r["discount"],r["discount_pct"],r["payment_method"],r["invoice_total"],r["status"]] for r in data["rows"]]
-    rows.append(["","","","","","","TOTAL",data["total_qty"],"TOTAL REVENUE","","","","",""])
+    headers = ["Date","Invoice #","Source","Customer","Performed By","SKU","Product","QTY","Unit Price","Line Total","Discount (EGP)","Discount %","Payment Method","Invoice Total","Status"]
+    rows    = [[r["date"],r["invoice_number"],r["source"],r["customer"],r["user_name"],r["sku"],r["product"],r["qty"],r["unit_price"],r["line_total"],r["discount"],r["discount_pct"],r["payment_method"],r["invoice_total"],r["status"]] for r in data["rows"]]
+    rows.append(["","","","","","","TOTAL",data["total_qty"],"TOTAL REVENUE","","","","","",""])
     buf = to_xlsx(headers, rows, "Transactions")
     return StreamingResponse(buf, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={"Content-Disposition": f"attachment; filename=transactions_{date.today()}.xlsx"})
@@ -704,10 +724,26 @@ def reports_ui():
     --text:#f0f4ff;--sub:#8899bb;--muted:#445066;
     --sans:'Outfit',sans-serif;--mono:'JetBrains Mono',monospace;--r:12px;
 }
+body.light{
+    --bg:#f4f5ef;--surface:#f1f3eb;--card:#eceee6;--card2:#e4e6de;
+    --border:rgba(0,0,0,0.08);--border2:rgba(0,0,0,0.14);
+    --text:#1a1e14;--sub:#4a5040;--muted:#7b816f;
+}
+body.light nav{background:rgba(244,245,239,.92);}
+body.light .nav-link:hover{background:rgba(0,0,0,.05);}
+body.light tr:hover td{background:rgba(0,0,0,.03);}
+.mode-btn{display:flex;align-items:center;justify-content:center;width:36px;height:36px;border-radius:10px;border:1px solid var(--border);background:var(--card);color:var(--sub);font-size:16px;cursor:pointer;transition:all .2s;font-family:var(--sans);}
+.mode-btn:hover{border-color:var(--border2);transform:scale(1.06);}
+.topbar-right{display:flex;align-items:center;gap:12px;}
+.user-pill{display:flex;align-items:center;gap:10px;background:var(--card);border:1px solid var(--border);border-radius:40px;padding:7px 16px 7px 10px;}
+.user-avatar{width:28px;height:28px;background:linear-gradient(135deg,#7ecb6f,#d4a256);border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;color:#0a0c08;}
+.user-name{font-size:13px;font-weight:500;color:var(--sub);}
+.logout-btn{background:transparent;border:1px solid var(--border);color:var(--muted);font-family:var(--sans);font-size:12px;font-weight:500;padding:8px 16px;border-radius:8px;cursor:pointer;transition:all .2s;letter-spacing:.3px;}
+.logout-btn:hover{border-color:#c97a7a;color:#c97a7a;}
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0;}
 body{font-family:var(--sans);background:var(--bg);color:var(--text);min-height:100vh;font-size:14px;}
 nav{position:sticky;top:0;z-index:100;display:flex;align-items:center;gap:8px;padding:0 24px;height:58px;background:rgba(10,13,24,.92);backdrop-filter:blur(20px);border-bottom:1px solid var(--border);}
-.logo{font-size:17px;font-weight:900;background:linear-gradient(135deg,#f59e0b,#fbbf24);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;text-decoration:none;display:flex;align-items:center;gap:8px;margin-right:10px;}
+.logo{font-size:17px;font-weight:900;background:linear-gradient(135deg,var(--green),var(--blue));-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;text-decoration:none;display:flex;align-items:center;gap:8px;margin-right:10px;}
 .nav-link{padding:7px 12px;border-radius:8px;color:var(--sub);font-size:12px;font-weight:600;text-decoration:none;transition:all .2s;}
 .nav-link:hover{background:rgba(255,255,255,.05);color:var(--text);}
 .nav-link.active{background:rgba(132,204,22,.1);color:var(--lime);}
@@ -832,6 +868,14 @@ td.mono{font-family:var(--mono);}
     <a href="/b2b/"       class="nav-link">B2B</a>
     <a href="/reports/"   class="nav-link active">Reports</a>
     <span class="nav-spacer"></span>
+    <div class="topbar-right">
+        <button class="mode-btn" id="mode-btn" onclick="toggleMode()" title="Toggle color mode">??</button>
+        <div class="user-pill">
+            <div class="user-avatar" id="user-avatar">A</div>
+            <span class="user-name" id="user-name">Admin</span>
+        </div>
+        <button class="logout-btn" onclick="logout()">Sign out</button>
+    </div>
 </nav>
 
 <div class="content">
@@ -855,7 +899,7 @@ td.mono{font-family:var(--mono);}
     <div id="section-sales" class="section active">
         <div class="print-header">
             <div style="display:flex;align-items:center;gap:14px">
-                <img src="/static/logo.png" style="height:64px;object-fit:contain">
+                <img src="/static/Logo.png" style="height:120px;object-fit:contain">
                 <div>
                     <div style="font-size:16px;font-weight:900;color:#2a7a2a">Habiba Organic Farm</div>
                     <div style="font-size:11px;color:#666;margin-top:2px">Commercial registry: 126278 &nbsp;|&nbsp; Tax ID: 560042604</div>
@@ -899,7 +943,7 @@ td.mono{font-family:var(--mono);}
     <div id="section-transactions" class="section">
         <div class="print-header">
             <div style="display:flex;align-items:center;gap:14px">
-                <img src="/static/logo.png" style="height:64px;object-fit:contain">
+                <img src="/static/Logo.png" style="height:120px;object-fit:contain">
                 <div>
                     <div style="font-size:20px;font-weight:900;color:#2a7a2a">Habiba Organic Farm</div>
                     <div style="font-size:13px;color:#555;margin-top:2px">Transactions Report</div>
@@ -931,7 +975,7 @@ td.mono{font-family:var(--mono);}
             <div style="overflow-x:auto">
             <table>
                 <thead><tr>
-                    <th>Date</th><th>Invoice #</th><th>Source</th><th>Customer</th>
+                    <th>Date</th><th>Invoice #</th><th>Source</th><th>Customer</th><th>By</th>
                     <th>SKU</th><th>Product</th><th>QTY</th><th>Unit Price</th>
                     <th>Line Total</th><th>Discount</th><th>Disc %</th>
                     <th>Payment</th><th>Inv. Total</th><th>Status</th>
@@ -945,7 +989,7 @@ td.mono{font-family:var(--mono);}
     <div id="section-b2b" class="section">
         <div class="print-header">
             <div style="display:flex;align-items:center;gap:14px">
-                <img src="/static/logo.png" style="height:64px;object-fit:contain">
+                <img src="/static/Logo.png" style="height:120px;object-fit:contain">
                 <div>
                     <div style="font-size:16px;font-weight:900;color:#2a7a2a">Habiba Organic Farm</div>
                     <div style="font-size:11px;color:#666;margin-top:2px">Commercial registry: 126278 &nbsp;|&nbsp; Tax ID: 560042604</div>
@@ -980,7 +1024,7 @@ td.mono{font-family:var(--mono);}
     <div id="section-inventory" class="section">
         <div class="print-header">
             <div style="display:flex;align-items:center;gap:14px">
-                <img src="/static/logo.png" style="height:64px;object-fit:contain">
+                <img src="/static/Logo.png" style="height:120px;object-fit:contain">
                 <div>
                     <div style="font-size:16px;font-weight:900;color:#2a7a2a">Habiba Organic Farm</div>
                     <div style="font-size:11px;color:#666;margin-top:2px">Commercial registry: 126278 &nbsp;|&nbsp; Tax ID: 560042604</div>
@@ -1014,7 +1058,7 @@ td.mono{font-family:var(--mono);}
     <div id="section-farm" class="section">
         <div class="print-header">
             <div style="display:flex;align-items:center;gap:14px">
-                <img src="/static/logo.png" style="height:64px;object-fit:contain">
+                <img src="/static/Logo.png" style="height:120px;object-fit:contain">
                 <div>
                     <div style="font-size:16px;font-weight:900;color:#2a7a2a">Habiba Organic Farm</div>
                     <div style="font-size:11px;color:#666;margin-top:2px">Commercial registry: 126278 &nbsp;|&nbsp; Tax ID: 560042604</div>
@@ -1040,7 +1084,7 @@ td.mono{font-family:var(--mono);}
     <div id="section-spoilage" class="section">
         <div class="print-header">
             <div style="display:flex;align-items:center;gap:14px">
-                <img src="/static/logo.png" style="height:64px;object-fit:contain">
+                <img src="/static/Logo.png" style="height:120px;object-fit:contain">
                 <div>
                     <div style="font-size:16px;font-weight:900;color:#2a7a2a">Habiba Organic Farm</div>
                     <div style="font-size:11px;color:#666;margin-top:2px">Commercial registry: 126278 &nbsp;|&nbsp; Tax ID: 560042604</div>
@@ -1069,7 +1113,7 @@ td.mono{font-family:var(--mono);}
         </div>
         <div class="table-wrap">
             <div class="table-title">All Records</div>
-            <table><thead><tr><th>Ref #</th><th>Product</th><th>Qty</th><th>Reason</th><th>Farm</th><th>Date</th><th>Notes</th></tr></thead>
+            <table><thead><tr><th>Ref #</th><th>Product</th><th>Qty</th><th>Reason</th><th>Farm</th><th>Date</th><th>By</th><th>Notes</th></tr></thead>
             <tbody id="spl-body"></tbody></table>
         </div>
     </div>
@@ -1078,7 +1122,7 @@ td.mono{font-family:var(--mono);}
     <div id="section-production" class="section">
         <div class="print-header">
             <div style="display:flex;align-items:center;gap:14px">
-                <img src="/static/logo.png" style="height:64px;object-fit:contain">
+                <img src="/static/Logo.png" style="height:120px;object-fit:contain">
                 <div>
                     <div style="font-size:16px;font-weight:900;color:#2a7a2a">Habiba Organic Farm</div>
                     <div style="font-size:11px;color:#666;margin-top:2px">Commercial registry: 126278 &nbsp;|&nbsp; Tax ID: 560042604</div>
@@ -1104,7 +1148,7 @@ td.mono{font-family:var(--mono);}
         </div>
         <div class="table-wrap">
             <div class="table-title">All Batches</div>
-            <table><thead><tr><th>Batch #</th><th>Type</th><th>Recipe</th><th>Inputs</th><th>Outputs</th><th>Loss %</th><th>Date</th></tr></thead>
+            <table><thead><tr><th>Batch #</th><th>Type</th><th>Recipe</th><th>Inputs</th><th>Outputs</th><th>Loss %</th><th>Date</th><th>By</th></tr></thead>
             <tbody id="prod-body"></tbody></table>
         </div>
     </div>
@@ -1113,7 +1157,7 @@ td.mono{font-family:var(--mono);}
     <div id="section-pl" class="section">
         <div class="print-header">
             <div style="display:flex;align-items:center;gap:14px">
-                <img src="/static/logo.png" style="height:64px;object-fit:contain">
+                <img src="/static/Logo.png" style="height:120px;object-fit:contain">
                 <div>
                     <div style="font-size:16px;font-weight:900;color:#2a7a2a">Habiba Organic Farm</div>
                     <div style="font-size:11px;color:#666;margin-top:2px">Commercial registry: 126278 &nbsp;|&nbsp; Tax ID: 560042604</div>
@@ -1139,10 +1183,125 @@ td.mono{font-family:var(--mono);}
 <div class="toast" id="toast"></div>
 
 <script>
-let currentTab = "sales";
+  const __erpToken = localStorage.getItem("token");
+  const __erpUserRole = localStorage.getItem("user_role") || "";
+  const __erpUserPermissions = new Set(
+      (localStorage.getItem("user_permissions") || "")
+          .split(",")
+          .map(p => p.trim())
+          .filter(Boolean)
+  );
+  function setModeButton(isLight){
+    const btn = document.getElementById("mode-btn");
+    if(btn) btn.innerText = isLight ? "☀️" : "🌙";
+}
+function toggleMode(){
+    const isLight = document.body.classList.toggle("light");
+    localStorage.setItem("colorMode", isLight ? "light" : "dark");
+    setModeButton(isLight);
+}
+function initializeColorMode(){
+    const isLight = localStorage.getItem("colorMode") === "light";
+    document.body.classList.toggle("light", isLight);
+    setModeButton(isLight);
+}
+function setUserInfo(){
+    const name = localStorage.getItem("user_name") || "Admin";
+    const avatar = document.getElementById("user-avatar");
+    const userName = document.getElementById("user-name");
+    if(avatar) avatar.innerText = name.charAt(0).toUpperCase();
+    if(userName) userName.innerText = name;
+}
+function logout(){
+    localStorage.removeItem("token");
+    localStorage.removeItem("user_name");
+    localStorage.removeItem("user_role");
+    localStorage.removeItem("user_permissions");
+    window.location.href = "/";
+}
+  function requirePageAccess(permission){
+      if(!__erpToken){
+          window.location.href = "/";
+          throw new Error("Not authenticated");
+      }
+      if(__erpUserRole === "admin" || __erpUserPermissions.has(permission)) return;
+      document.body.innerHTML = `<div style="display:flex;align-items:center;justify-content:center;height:100vh;flex-direction:column;gap:16px;color:#445066;font-family:'Outfit',sans-serif;background:#060810"><div style="font-size:48px">🔒</div><div style="font-size:20px;font-weight:800;color:#f0f4ff">Access Restricted</div><div style="font-size:14px">You do not have permission to open this page.</div><a href="/home" style="color:#00ff9d;text-decoration:none;font-weight:700">Back to Home</a></div>`;
+      throw new Error("Access denied");
+  }
+  function applyNavPermissions(){
+      const navPermissions = {
+          "/home": null,
+          "/dashboard": "page_dashboard",
+          "/pos": "page_pos",
+          "/b2b/": "page_b2b",
+          "/inventory/": "page_inventory",
+          "/products/": "page_products",
+          "/customers-mgmt/": "page_customers",
+          "/suppliers/": "page_suppliers",
+          "/production/": "page_production",
+          "/farm/": "page_farm",
+          "/hr/": "page_hr",
+          "/accounting/": "page_accounting",
+          "/reports/": "page_reports",
+          "/import": "page_import",
+          "/users/": "admin_only"
+      };
+      document.querySelectorAll("a.nav-link[href]").forEach(link => {
+          const href = link.getAttribute("href");
+          const requirement = navPermissions[href];
+          if(requirement === undefined || requirement === null) return;
+          if(requirement === "admin_only"){
+              if(__erpUserRole !== "admin") link.style.display = "none";
+              return;
+          }
+          if(__erpUserRole !== "admin" && !__erpUserPermissions.has(requirement)){
+              link.style.display = "none";
+          }
+      });
+  }
+  function hasPermission(permission){
+      return __erpUserRole === "admin" || __erpUserPermissions.has(permission);
+  }
+  function configureReportsPermissions(){
+      const tabMap = [
+          {tab:"sales", permission:"tab_reports_sales"},
+          {tab:"transactions", permission:"tab_reports_transactions"},
+          {tab:"inventory", permission:"tab_reports_inventory"},
+          {tab:"pl", permission:"tab_reports_pl"},
+      ];
+      let firstAllowed = null;
+      document.querySelectorAll(".tabs .tab").forEach((btn, index) => {
+          const conf = tabMap[index];
+          if(!conf) return;
+          if(!hasPermission(conf.permission)){
+              btn.style.display = "none";
+          } else if(!firstAllowed) {
+              firstAllowed = conf.tab;
+          }
+      });
+      if(!hasPermission(`tab_reports_${currentTab}`) && firstAllowed){
+          currentTab = firstAllowed;
+      }
+      if(!hasPermission("action_export_excel")){
+          document.querySelectorAll(".btn-excel").forEach(btn => btn.style.display = "none");
+      }
+  }
+  requirePageAccess("page_reports");
+  applyNavPermissions();
+  initializeColorMode();
+  setUserInfo();
+  let currentTab = "sales";
 let toastTimer = null;
+configureReportsPermissions();
 
 function switchTab(tab){
+    const required = {
+        sales: "tab_reports_sales",
+        transactions: "tab_reports_transactions",
+        inventory: "tab_reports_inventory",
+        pl: "tab_reports_pl",
+    };
+    if(required[tab] && !hasPermission(required[tab])) return;
     currentTab = tab;
     const tabs = ["sales","transactions","b2b","inventory","farm","spoilage","production","pl"];
     document.querySelectorAll(".tab").forEach((btn,i) => btn.classList.toggle("active", tabs[i]===tab));
@@ -1215,6 +1374,7 @@ async function loadTransactions(){
             <td class="mono" style="font-size:11px;color:var(--lime)">${r.invoice_number}</td>
             <td style="font-size:11px;color:var(--sub)">${r.source}</td>
             <td class="name" style="white-space:nowrap">${r.customer}</td>
+            <td style="font-size:12px;color:var(--muted);white-space:nowrap">${r.user_name}</td>
             <td class="mono" style="font-size:11px;color:var(--muted)">${r.sku}</td>
             <td style="font-weight:600;white-space:nowrap">${r.product}</td>
             <td class="mono" style="color:var(--blue);font-weight:700">${r.qty.toFixed(2)}</td>
@@ -1226,7 +1386,7 @@ async function loadTransactions(){
             <td class="mono" style="font-weight:700">${r.invoice_total.toFixed(2)}</td>
             <td><span style="font-size:11px;font-weight:700;padding:2px 8px;border-radius:20px;background:rgba(0,0,0,.2);color:${statusColor(r.status)}">${r.status}</span></td>
           </tr>`).join("")
-        : `<tr><td colspan="14" style="text-align:center;color:var(--muted);padding:40px">No transactions in this period</td></tr>`;
+        : `<tr><td colspan="15" style="text-align:center;color:var(--muted);padding:40px">No transactions in this period</td></tr>`;
 }
 
 /* ── SALES ── */
@@ -1263,12 +1423,13 @@ async function loadSales(){
     let posHtml = `
         <div class="table-title" style="margin-top:28px">POS Invoices — ${data.pos_records.length} transactions</div>
         <div class="table-wrap">
-        <table><thead><tr><th>Invoice #</th><th>Date / Time</th><th>Payment</th><th>Items</th><th style="text-align:right">Total (EGP)</th></tr></thead><tbody>`;
+        <table><thead><tr><th>Invoice #</th><th>Date / Time</th><th>By</th><th>Payment</th><th>Items</th><th style="text-align:right">Total (EGP)</th></tr></thead><tbody>`;
     if(data.pos_records.length){
         posHtml += data.pos_records.map(inv=>`
             <tr>
                 <td class="mono" style="font-size:11px;color:var(--blue)">${inv.invoice_number}</td>
                 <td class="mono" style="font-size:12px;color:var(--muted)">${inv.datetime}</td>
+                <td style="font-size:12px;color:var(--muted);white-space:nowrap">${inv.user_name}</td>
                 <td style="font-size:12px">${inv.payment}</td>
                 <td style="font-size:12px;color:var(--sub)">
                     ${inv.items.map(it=>`<span style="display:inline-block;background:var(--card2);border:1px solid var(--border2);border-radius:5px;padding:1px 7px;margin:2px;white-space:nowrap">${it.qty % 1===0?it.qty.toFixed(0):it.qty.toFixed(2)} × ${it.name} <span style="color:var(--muted)">${it.total.toFixed(2)}</span></span>`).join("")}
@@ -1276,7 +1437,7 @@ async function loadSales(){
                 <td class="mono" style="text-align:right;font-weight:700;color:var(--green)">${inv.total.toFixed(2)}</td>
             </tr>`).join("");
     } else {
-        posHtml += `<tr><td colspan="5" style="text-align:center;color:var(--muted);padding:24px">No POS invoices</td></tr>`;
+        posHtml += `<tr><td colspan="6" style="text-align:center;color:var(--muted);padding:24px">No POS invoices</td></tr>`;
     }
     posHtml += `</tbody></table></div>`;
 
@@ -1285,13 +1446,14 @@ async function loadSales(){
     let b2bHtml = `
         <div class="table-title" style="margin-top:22px">B2B Invoices — ${data.b2b_records.length} invoices</div>
         <div class="table-wrap">
-        <table><thead><tr><th>Invoice #</th><th>Client</th><th>Date / Time</th><th>Type</th><th>Items</th><th style="text-align:right">Total</th><th style="text-align:right">Paid</th><th style="text-align:right">Balance</th></tr></thead><tbody>`;
+        <table><thead><tr><th>Invoice #</th><th>Client</th><th>Date / Time</th><th>By</th><th>Type</th><th>Items</th><th style="text-align:right">Total</th><th style="text-align:right">Paid</th><th style="text-align:right">Balance</th></tr></thead><tbody>`;
     if(data.b2b_records.length){
         b2bHtml += data.b2b_records.map(inv=>`
             <tr>
                 <td class="mono" style="font-size:11px;color:var(--blue)">${inv.invoice_number}</td>
                 <td class="name" style="font-size:13px">${inv.client}</td>
                 <td class="mono" style="font-size:12px;color:var(--muted)">${inv.datetime}</td>
+                <td style="font-size:12px;color:var(--muted);white-space:nowrap">${inv.user_name}</td>
                 <td style="font-size:12px">${typeLabel[inv.invoice_type]||inv.invoice_type}</td>
                 <td style="font-size:12px;color:var(--sub)">
                     ${inv.items.map(it=>`<span style="display:inline-block;background:var(--card2);border:1px solid var(--border2);border-radius:5px;padding:1px 7px;margin:2px;white-space:nowrap">${it.qty % 1===0?it.qty.toFixed(0):it.qty.toFixed(2)} × ${it.name} <span style="color:var(--muted)">${it.total.toFixed(2)}</span></span>`).join("")}
@@ -1301,7 +1463,7 @@ async function loadSales(){
                 <td class="mono" style="text-align:right;color:${inv.balance_due>0?"var(--warn)":"var(--muted)"}">${inv.balance_due>0?inv.balance_due.toFixed(2):"—"}</td>
             </tr>`).join("");
     } else {
-        b2bHtml += `<tr><td colspan="8" style="text-align:center;color:var(--muted);padding:24px">No B2B invoices</td></tr>`;
+        b2bHtml += `<tr><td colspan="9" style="text-align:center;color:var(--muted);padding:24px">No B2B invoices</td></tr>`;
     }
     b2bHtml += `</tbody></table></div>`;
 
@@ -1352,7 +1514,7 @@ async function loadFarm(){
     let r = getRange("farm-from","farm-to");
     let data = await (await fetch(`/reports/api/farm-intake?date_from=${r.from}&date_to=${r.to}`)).json();
     setPrintDates("ph-farm-dates", r.from, r.to);
-    document.getElementById("farm-content").innerHTML = data.map((farm,fi)=>{
+    let summaryHtml = data.farms.map((farm,fi)=>{
         let color = fi===0?"var(--lime)":"var(--teal)";
         let maxQty = farm.products.length ? farm.products[0].total_qty : 1;
         return `<div class="table-wrap" style="margin-bottom:12px">
@@ -1371,7 +1533,27 @@ async function loadFarm(){
             </div>
         </div>`;
     }).join("");
+    let deliveriesHtml = `<div class="table-wrap">
+        <div class="table-title">Delivery Records</div>
+        <table><thead><tr><th>Delivery #</th><th>Farm</th><th>Date</th><th>Received By</th><th>Qty</th><th>Items</th><th>By</th><th>Notes</th></tr></thead><tbody>`;
+    if(data.deliveries.length){
+        deliveriesHtml += data.deliveries.map(d=>`<tr>
+            <td class="mono" style="font-size:11px;color:var(--lime)">${d.delivery_number}</td>
+            <td class="name">${d.farm}</td>
+            <td class="mono" style="font-size:12px;color:var(--muted)">${d.delivery_date}</td>
+            <td style="font-size:12px">${d.received_by}</td>
+            <td class="mono" style="color:var(--green)">${d.total_qty.toFixed(2)}</td>
+            <td class="mono">${d.total_items}</td>
+            <td style="font-size:12px;color:var(--muted);white-space:nowrap">${d.user_name}</td>
+            <td style="font-size:12px;color:var(--muted)">${d.notes||"—"}</td>
+        </tr>`).join("");
+    } else {
+        deliveriesHtml += `<tr><td colspan="8" style="text-align:center;color:var(--muted);padding:30px">No deliveries in this period</td></tr>`;
+    }
+    deliveriesHtml += `</tbody></table></div>`;
+    document.getElementById("farm-content").innerHTML = summaryHtml + deliveriesHtml;
 }
+
 
 /* ── SPOILAGE ── */
 async function loadSpoilage(){
@@ -1404,9 +1586,10 @@ async function loadSpoilage(){
             <td style="font-size:12px">${r.reason}</td>
             <td style="font-size:12px;color:var(--muted)">${r.farm}</td>
             <td class="mono" style="font-size:12px">${r.date}</td>
+            <td style="font-size:12px;color:var(--muted);white-space:nowrap">${r.user_name}</td>
             <td style="font-size:12px;color:var(--muted)">${r.notes}</td>
           </tr>`).join("")
-        : `<tr><td colspan="7" style="text-align:center;color:var(--muted);padding:30px">No spoilage in this period</td></tr>`;
+        : `<tr><td colspan="8" style="text-align:center;color:var(--muted);padding:30px">No spoilage in this period</td></tr>`;
 }
 
 /* ── PRODUCTION ── */
@@ -1426,9 +1609,11 @@ async function loadProduction(){
             <td style="font-size:11px;color:var(--green);max-width:130px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${b.outputs_str||"—"}</td>
             <td class="mono" style="color:${b.waste_pct<10?"var(--green)":b.waste_pct<25?"var(--warn)":"var(--danger)"}">${b.waste_pct.toFixed(1)}%</td>
             <td class="mono" style="font-size:12px;color:var(--muted)">${b.date}</td>
+            <td style="font-size:12px;color:var(--muted);white-space:nowrap">${b.user_name}</td>
           </tr>`).join("")
-        : `<tr><td colspan="7" style="text-align:center;color:var(--muted);padding:30px">No batches in this period</td></tr>`;
+        : `<tr><td colspan="8" style="text-align:center;color:var(--muted);padding:30px">No batches in this period</td></tr>`;
 }
+
 
 /* ── P&L ── */
 async function loadPL(){
@@ -1528,3 +1713,6 @@ loadSales();
 </script>
 </body>
 </html>"""
+
+
+

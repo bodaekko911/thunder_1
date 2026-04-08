@@ -7,8 +7,10 @@ from decimal import Decimal
 from datetime import date as date_type
 
 from app.database import get_db
+from app.core.permissions import get_current_user
 from app.models.product import Product
 from app.models.inventory import StockMove
+from app.models.user import User
 from app.models.production import (
     Recipe, RecipeInput, RecipeOutput,
     ProductionBatch, BatchInput, BatchOutput,
@@ -113,7 +115,7 @@ def get_batches(skip: int = 0, limit: int = 50, db: Session = Depends(get_db)):
     }
 
 @router.post("/api/batches")
-def create_batch(data: BatchCreate, db: Session = Depends(get_db)):
+def create_batch(data: BatchCreate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     if not data.inputs or not data.outputs:
         raise HTTPException(status_code=400, detail="Batch must have at least one input and one output")
     for item in data.inputs:
@@ -138,14 +140,14 @@ def create_batch(data: BatchCreate, db: Session = Depends(get_db)):
     else:
         auto_waste = data.waste_pct
 
-    batch = ProductionBatch(batch_number=batch_number, recipe_id=data.recipe_id, waste_pct=auto_waste, notes=data.notes, status="completed")
+    batch = ProductionBatch(batch_number=batch_number, recipe_id=data.recipe_id, user_id=current_user.id, waste_pct=auto_waste, notes=data.notes, status="completed")
     db.add(batch); db.flush()
 
     for item in data.inputs:
         product = db.query(Product).filter(Product.id == item.product_id).first()
         before = float(product.stock); after = before - item.qty; product.stock = after
         db.add(BatchInput(batch_id=batch.id, product_id=product.id, qty=item.qty))
-        db.add(StockMove(product_id=product.id, type="out", qty=-item.qty, qty_before=before, qty_after=after, ref_type="production", ref_id=batch.id, note=f"Used in {batch_number}"))
+        db.add(StockMove(product_id=product.id, type="out", user_id=current_user.id, qty=-item.qty, qty_before=before, qty_after=after, ref_type="production", ref_id=batch.id, note=f"Used in {batch_number}"))
 
     for item in data.outputs:
         product = db.query(Product).filter(Product.id == item.product_id).first()
@@ -153,14 +155,14 @@ def create_batch(data: BatchCreate, db: Session = Depends(get_db)):
             raise HTTPException(status_code=404, detail=f"Output product not found: {item.product_id}")
         before = float(product.stock); after = before + item.qty; product.stock = after
         db.add(BatchOutput(batch_id=batch.id, product_id=product.id, qty=item.qty))
-        db.add(StockMove(product_id=product.id, type="in", qty=item.qty, qty_before=before, qty_after=after, ref_type="production", ref_id=batch.id, note=f"Produced in {batch_number}"))
+        db.add(StockMove(product_id=product.id, type="in", user_id=current_user.id, qty=item.qty, qty_before=before, qty_after=after, ref_type="production", ref_id=batch.id, note=f"Produced in {batch_number}"))
 
     db.commit(); db.refresh(batch)
     return {"id": batch.id, "batch_number": batch_number, "waste_pct": float(batch.waste_pct)}
 
 
 @router.put("/api/batches/{batch_id}")
-def edit_batch(batch_id: int, data: BatchCreate, db: Session = Depends(get_db)):
+def edit_batch(batch_id: int, data: BatchCreate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     batch = db.query(ProductionBatch).filter(ProductionBatch.id == batch_id).first()
     if not batch:
         raise HTTPException(status_code=404, detail="Batch not found")
@@ -168,13 +170,13 @@ def edit_batch(batch_id: int, data: BatchCreate, db: Session = Depends(get_db)):
         product = db.query(Product).filter(Product.id == item.product_id).first()
         if product:
             before = float(product.stock); after = before + float(item.qty); product.stock = after
-            db.add(StockMove(product_id=product.id, type="in", qty=float(item.qty), qty_before=before, qty_after=after, ref_type="production_reversal", ref_id=batch.id, note=f"Edit reversal — {batch.batch_number}"))
+            db.add(StockMove(product_id=product.id, type="in", user_id=current_user.id, qty=float(item.qty), qty_before=before, qty_after=after, ref_type="production_reversal", ref_id=batch.id, note=f"Edit reversal — {batch.batch_number}"))
         db.delete(item)
     for item in batch.outputs:
         product = db.query(Product).filter(Product.id == item.product_id).first()
         if product:
             before = float(product.stock); after = before - float(item.qty); product.stock = after
-            db.add(StockMove(product_id=product.id, type="out", qty=-float(item.qty), qty_before=before, qty_after=after, ref_type="production_reversal", ref_id=batch.id, note=f"Edit reversal — {batch.batch_number}"))
+            db.add(StockMove(product_id=product.id, type="out", user_id=current_user.id, qty=-float(item.qty), qty_before=before, qty_after=after, ref_type="production_reversal", ref_id=batch.id, note=f"Edit reversal — {batch.batch_number}"))
         db.delete(item)
     for item in data.inputs:
         product = db.query(Product).filter(Product.id == item.product_id).first()
@@ -182,7 +184,7 @@ def edit_batch(batch_id: int, data: BatchCreate, db: Session = Depends(get_db)):
             raise HTTPException(status_code=404, detail=f"Product not found: {item.product_id}")
         if float(product.stock) < item.qty:
             raise HTTPException(status_code=400, detail=f"Not enough stock for '{product.name}'.")
-    batch.recipe_id = data.recipe_id; batch.notes = data.notes
+    batch.recipe_id = data.recipe_id; batch.notes = data.notes; batch.user_id = current_user.id
     WEIGHT_UNITS = {"gram","g","kg","ltr","ml","liter","litre"}
     def is_weight2(pid):
         p = db.query(Product).filter(Product.id == pid).first()
@@ -194,14 +196,14 @@ def edit_batch(batch_id: int, data: BatchCreate, db: Session = Depends(get_db)):
         product = db.query(Product).filter(Product.id == item.product_id).first()
         before = float(product.stock); after = before - item.qty; product.stock = after
         db.add(BatchInput(batch_id=batch.id, product_id=product.id, qty=item.qty))
-        db.add(StockMove(product_id=product.id, type="out", qty=-item.qty, qty_before=before, qty_after=after, ref_type="production", ref_id=batch.id, note=f"Used in {batch.batch_number} (edited)"))
+        db.add(StockMove(product_id=product.id, type="out", user_id=current_user.id, qty=-item.qty, qty_before=before, qty_after=after, ref_type="production", ref_id=batch.id, note=f"Used in {batch.batch_number} (edited)"))
     for item in data.outputs:
         product = db.query(Product).filter(Product.id == item.product_id).first()
         if not product:
             raise HTTPException(status_code=404, detail=f"Output product not found: {item.product_id}")
         before = float(product.stock); after = before + item.qty; product.stock = after
         db.add(BatchOutput(batch_id=batch.id, product_id=product.id, qty=item.qty))
-        db.add(StockMove(product_id=product.id, type="in", qty=item.qty, qty_before=before, qty_after=after, ref_type="production", ref_id=batch.id, note=f"Produced in {batch.batch_number} (edited)"))
+        db.add(StockMove(product_id=product.id, type="in", user_id=current_user.id, qty=item.qty, qty_before=before, qty_after=after, ref_type="production", ref_id=batch.id, note=f"Produced in {batch.batch_number} (edited)"))
     db.commit()
     return {"ok": True, "batch_number": batch.batch_number, "waste_pct": float(batch.waste_pct)}
 
@@ -251,7 +253,7 @@ def get_spoilage(skip: int = 0, limit: int = 100, db: Session = Depends(get_db))
     }
 
 @router.post("/api/spoilage")
-def create_spoilage(data: SpoilageCreate, db: Session = Depends(get_db)):
+def create_spoilage(data: SpoilageCreate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     from app.models.accounting import Account, Journal, JournalEntry
     product = db.query(Product).filter(Product.id == data.product_id).first()
     if not product:
@@ -262,16 +264,17 @@ def create_spoilage(data: SpoilageCreate, db: Session = Depends(get_db)):
     ref   = f"SPL-{str(count + 1).zfill(4)}"
     record = SpoilageRecord(
         ref_number=ref, product_id=data.product_id, qty=data.qty,
+        user_id=current_user.id,
         spoilage_date=date_type.fromisoformat(data.spoilage_date),
         reason=data.reason, farm_id=data.farm_id, notes=data.notes,
     )
     db.add(record); db.flush()
     before = float(product.stock); after = before - data.qty; product.stock = after
-    db.add(StockMove(product_id=product.id, type="out", qty=-data.qty, qty_before=before, qty_after=after, ref_type="spoilage", ref_id=record.id, note=f"Spoilage — {ref}"))
+    db.add(StockMove(product_id=product.id, type="out", user_id=current_user.id, qty=-data.qty, qty_before=before, qty_after=after, ref_type="spoilage", ref_id=record.id, note=f"Spoilage — {ref}"))
     cost_per_unit = float(product.cost) if product.cost else 0
     loss_value    = round(data.qty * cost_per_unit, 2)
     if loss_value > 0:
-        journal = Journal(ref_type="spoilage", description=f"Spoilage — {ref} — {product.name}")
+        journal = Journal(ref_type="spoilage", description=f"Spoilage — {ref} — {product.name}", user_id=current_user.id)
         db.add(journal); db.flush()
         for code, debit, credit in [("5600", loss_value, 0), ("1200", 0, loss_value)]:
             acc = db.query(Account).filter(Account.code == code).first()
@@ -322,10 +325,26 @@ def production_ui():
     --danger:#ff4d6d;--warn:#ffb547;--text:#f0f4ff;--sub:#8899bb;--muted:#445066;
     --sans:'Outfit',sans-serif;--mono:'JetBrains Mono',monospace;--r:12px;
 }
+body.light{
+    --bg:#f4f5ef;--surface:#f1f3eb;--card:#eceee6;--card2:#e4e6de;
+    --border:rgba(0,0,0,0.08);--border2:rgba(0,0,0,0.14);
+    --text:#1a1e14;--sub:#4a5040;--muted:#7b816f;
+}
+body.light nav{background:rgba(244,245,239,.92);}
+body.light .nav-link:hover{background:rgba(0,0,0,.05);}
+body.light tr:hover td{background:rgba(0,0,0,.03);}
+.mode-btn{display:flex;align-items:center;justify-content:center;width:36px;height:36px;border-radius:10px;border:1px solid var(--border);background:var(--card);color:var(--sub);font-size:16px;cursor:pointer;transition:all .2s;font-family:var(--sans);}
+.mode-btn:hover{border-color:var(--border2);transform:scale(1.06);}
+.topbar-right{display:flex;align-items:center;gap:12px;}
+.user-pill{display:flex;align-items:center;gap:10px;background:var(--card);border:1px solid var(--border);border-radius:40px;padding:7px 16px 7px 10px;}
+.user-avatar{width:28px;height:28px;background:linear-gradient(135deg,#7ecb6f,#d4a256);border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;color:#0a0c08;}
+.user-name{font-size:13px;font-weight:500;color:var(--sub);}
+.logout-btn{background:transparent;border:1px solid var(--border);color:var(--muted);font-family:var(--sans);font-size:12px;font-weight:500;padding:8px 16px;border-radius:8px;cursor:pointer;transition:all .2s;letter-spacing:.3px;}
+.logout-btn:hover{border-color:#c97a7a;color:#c97a7a;}
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0;}
 body{font-family:var(--sans);background:var(--bg);color:var(--text);min-height:100vh;font-size:14px;}
 nav{position:sticky;top:0;z-index:100;display:flex;align-items:center;gap:8px;padding:0 24px;height:58px;background:rgba(10,13,24,.92);backdrop-filter:blur(20px);border-bottom:1px solid var(--border);flex-wrap:wrap;}
-.logo{font-size:17px;font-weight:900;background:linear-gradient(135deg,#f59e0b,#fbbf24);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;margin-right:10px;text-decoration:none;display:flex;align-items:center;gap:8px;}
+.logo{font-size:17px;font-weight:900;background:linear-gradient(135deg,var(--green),var(--blue));-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;margin-right:10px;text-decoration:none;display:flex;align-items:center;gap:8px;}
 .nav-link{padding:7px 12px;border-radius:8px;color:var(--sub);font-size:12px;font-weight:600;text-decoration:none;transition:all .2s;white-space:nowrap;}
 .nav-link:hover{background:rgba(255,255,255,.05);color:var(--text);}
 .nav-link.active{background:rgba(251,146,60,.12);color:var(--orange);}
@@ -439,6 +458,14 @@ td.name{color:var(--text);font-weight:600;}
     <a href="/b2b/"       class="nav-link">B2B</a>
     <a href="/accounting/"class="nav-link">Accounting</a>
     <span class="nav-spacer"></span>
+    <div class="topbar-right">
+        <button class="mode-btn" id="mode-btn" onclick="toggleMode()" title="Toggle color mode">??</button>
+        <div class="user-pill">
+            <div class="user-avatar" id="user-avatar">A</div>
+            <span class="user-name" id="user-name">Admin</span>
+        </div>
+        <button class="logout-btn" onclick="logout()">Sign out</button>
+    </div>
 </nav>
 
 <div class="content">
@@ -639,7 +666,117 @@ td.name{color:var(--text);font-weight:600;}
 <div class="toast" id="toast"></div>
 
 <script>
-let allProducts   = [];
+  const __erpToken = localStorage.getItem("token");
+  const __erpUserRole = localStorage.getItem("user_role") || "";
+  const __erpUserPermissions = new Set(
+      (localStorage.getItem("user_permissions") || "")
+          .split(",")
+          .map(p => p.trim())
+          .filter(Boolean)
+  );
+  const __erpFetch = window.fetch.bind(window);
+  window.fetch = (input, init = {}) => {
+      const url = typeof input === "string" ? input : (input && input.url) || "";
+      const isRelativeUrl = typeof url === "string" && !(url.startsWith("http://") || url.startsWith("https://"));
+      const headers = new Headers(init.headers || (input instanceof Request ? input.headers : undefined));
+      if(__erpToken && isRelativeUrl && !headers.has("Authorization")){
+          headers.set("Authorization", "Bearer " + __erpToken);
+      }
+      return __erpFetch(input, {...init, headers});
+  };
+  function setModeButton(isLight){
+    const btn = document.getElementById("mode-btn");
+    if(btn) btn.innerText = isLight ? "☀️" : "🌙";
+}
+function toggleMode(){
+    const isLight = document.body.classList.toggle("light");
+    localStorage.setItem("colorMode", isLight ? "light" : "dark");
+    setModeButton(isLight);
+}
+function initializeColorMode(){
+    const isLight = localStorage.getItem("colorMode") === "light";
+    document.body.classList.toggle("light", isLight);
+    setModeButton(isLight);
+}
+function setUserInfo(){
+    const name = localStorage.getItem("user_name") || "Admin";
+    const avatar = document.getElementById("user-avatar");
+    const userName = document.getElementById("user-name");
+    if(avatar) avatar.innerText = name.charAt(0).toUpperCase();
+    if(userName) userName.innerText = name;
+}
+function logout(){
+    localStorage.removeItem("token");
+    localStorage.removeItem("user_name");
+    localStorage.removeItem("user_role");
+    localStorage.removeItem("user_permissions");
+    window.location.href = "/";
+}
+  function requirePageAccess(permission){
+      if(!__erpToken){
+          window.location.href = "/";
+          throw new Error("Not authenticated");
+      }
+      if(__erpUserRole === "admin" || __erpUserPermissions.has(permission)) return;
+      document.body.innerHTML = `<div style="display:flex;align-items:center;justify-content:center;height:100vh;flex-direction:column;gap:16px;color:#445066;font-family:'Outfit',sans-serif;background:#060810"><div style="font-size:48px">🔒</div><div style="font-size:20px;font-weight:800;color:#f0f4ff">Access Restricted</div><div style="font-size:14px">You do not have permission to open this page.</div><a href="/home" style="color:#00ff9d;text-decoration:none;font-weight:700">Back to Home</a></div>`;
+      throw new Error("Access denied");
+  }
+  function applyNavPermissions(){
+      const navPermissions = {
+          "/home": null,
+          "/dashboard": "page_dashboard",
+          "/pos": "page_pos",
+          "/b2b/": "page_b2b",
+          "/inventory/": "page_inventory",
+          "/products/": "page_products",
+          "/customers-mgmt/": "page_customers",
+          "/suppliers/": "page_suppliers",
+          "/production/": "page_production",
+          "/farm/": "page_farm",
+          "/hr/": "page_hr",
+          "/accounting/": "page_accounting",
+          "/reports/": "page_reports",
+          "/import": "page_import",
+          "/users/": "admin_only"
+      };
+      document.querySelectorAll("a.nav-link[href]").forEach(link => {
+          const href = link.getAttribute("href");
+          const requirement = navPermissions[href];
+          if(requirement === undefined || requirement === null) return;
+          if(requirement === "admin_only"){
+              if(__erpUserRole !== "admin") link.style.display = "none";
+              return;
+          }
+          if(__erpUserRole !== "admin" && !__erpUserPermissions.has(requirement)){
+              link.style.display = "none";
+          }
+      });
+  }
+  function hasPermission(permission){
+      return __erpUserRole === "admin" || __erpUserPermissions.has(permission);
+  }
+  function configureProductionPermissions(){
+      const tabMap = [
+          {id:"tab-batches", permission:"tab_production_batches", tab:"batches"},
+          {id:"tab-packaging", permission:"tab_production_packaging", tab:"packaging"},
+          {id:"tab-recipes", permission:"tab_production_recipes", tab:"recipes"},
+          {id:"tab-spoilage", permission:"tab_production_spoilage", tab:"spoilage"},
+      ];
+      let firstAllowed = null;
+      tabMap.forEach(conf => {
+          let el = document.getElementById(conf.id);
+          if(!el) return;
+          if(!hasPermission(conf.permission)) el.style.display = "none";
+          else if(!firstAllowed) firstAllowed = conf.tab;
+      });
+      if(firstAllowed) setTimeout(() => switchTab(firstAllowed), 0);
+  }
+  requirePageAccess("page_production");
+  applyNavPermissions();
+  initializeColorMode();
+  setUserInfo();
+  configureProductionPermissions();
+  let allProducts   = [];
 let allRecipes    = [];
 let pkgRecipes    = [];
 let procRecipes   = [];
@@ -677,6 +814,13 @@ function fillSel(selId, recipes){
 
 /* ── TABS ── */
 function switchTab(tab){
+    const required = {
+        batches: "tab_production_batches",
+        packaging: "tab_production_packaging",
+        recipes: "tab_production_recipes",
+        spoilage: "tab_production_spoilage",
+    };
+    if(required[tab] && !hasPermission(required[tab])) return;
     ["batches","packaging","recipes","spoilage"].forEach(t => {
         document.getElementById("section-"+t).style.display = t===tab ? "" : "none";
         document.getElementById("tab-"+t).classList.toggle("active", t===tab);
@@ -1286,3 +1430,5 @@ init();
 </script>
 </body>
 </html>"""
+
+

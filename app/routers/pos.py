@@ -182,7 +182,7 @@ body {{ font-family: monospace; background:#060810; color:white; }}
 <body>
 <div class="r">
     <div class="center">
-        <img src="/static/logo.png" alt="Habiba" style="height:70px;object-fit:contain;margin-bottom:6px;display:block;margin-left:auto;margin-right:auto">
+        <img src="/static/Logo.png" alt="Habiba" style="height:120px;object-fit:contain;margin-bottom:6px;display:block;margin-left:auto;margin-right:auto">
         <div style="font-size:15px;font-weight:900;color:#2a7a2a;margin-bottom:2px">Habiba Organic Farm</div>
         <div style="color:#445066;font-size:12px">{inv.invoice_number}</div>
     </div>
@@ -220,13 +220,19 @@ def pos_ui():
     --text:#f0f4ff;--sub:#8899bb;--muted:#445066;
     --sans:'Outfit',sans-serif;--mono:'JetBrains Mono',monospace;--r:13px;
 }
+body.light{
+    --bg:#f4f5ef;--surface:#f1f3eb;--card:#eceee6;--card2:#e4e6de;
+    --border:rgba(0,0,0,0.08);--border2:rgba(0,0,0,0.14);
+    --text:#1a1e14;--sub:#4a5040;--muted:#7b816f;
+}
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0;}
 body{font-family:var(--sans);background:var(--bg);color:var(--text);height:100vh;overflow:hidden;display:grid;grid-template-columns:1fr 430px;grid-template-rows:58px 1fr;font-size:14px;}
 body>*{position:relative;z-index:1;}
 
 /* TOPBAR */
 #topbar{grid-column:1/-1;display:flex;align-items:center;gap:10px;padding:0 18px;background:rgba(10,13,24,.9);backdrop-filter:blur(20px);border-bottom:1px solid var(--border);overflow:visible;z-index:100;}
-.logo{font-size:17px;font-weight:900;background:linear-gradient(135deg,#f59e0b,#fbbf24);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;margin-right:6px;text-decoration:none;display:flex;align-items:center;gap:8px;}
+body.light #topbar{background:rgba(244,245,239,.92);}
+.logo{font-size:17px;font-weight:900;background:linear-gradient(135deg,var(--green),var(--blue));-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;margin-right:6px;text-decoration:none;display:flex;align-items:center;gap:8px;}
 .tb-field{display:flex;align-items:center;gap:9px;background:var(--card);border:1px solid var(--border);border-radius:var(--r);padding:0 13px;transition:border-color .2s;}
 .tb-field:focus-within{border-color:rgba(0,255,157,.3);}
 .tb-field svg{color:var(--muted);flex-shrink:0;}
@@ -236,6 +242,14 @@ body>*{position:relative;z-index:1;}
 #barcode_wrap input{font-family:var(--mono);font-size:13px;}
 #search_wrap{flex:1;}
 .tb-spacer{flex:1;}
+.mode-btn{display:flex;align-items:center;justify-content:center;width:38px;height:38px;border-radius:10px;border:1px solid var(--border);background:var(--card);color:var(--sub);font-size:16px;cursor:pointer;transition:all .2s;font-family:var(--sans);}
+.mode-btn:hover{border-color:var(--border2);transform:scale(1.06);}
+.topbar-right{display:flex;align-items:center;gap:12px;}
+.user-pill{display:flex;align-items:center;gap:10px;background:var(--card);border:1px solid var(--border);border-radius:40px;padding:7px 16px 7px 10px;}
+.user-avatar{width:28px;height:28px;background:linear-gradient(135deg,#7ecb6f,#d4a256);border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;color:#0a0c08;}
+.user-name{font-size:13px;font-weight:500;color:var(--sub);}
+.logout-btn{background:transparent;border:1px solid var(--border);color:var(--muted);font-family:var(--sans);font-size:12px;font-weight:500;padding:8px 16px;border-radius:8px;cursor:pointer;transition:all .2s;letter-spacing:.3px;}
+.logout-btn:hover{border-color:#c97a7a;color:#c97a7a;}
 
 /* CUSTOMER */
 #cust_wrap{flex:0 0 240px;position:relative;}
@@ -252,8 +266,6 @@ body>*{position:relative;z-index:1;}
 #selected_badge.show{display:flex;}
 #xcust{background:none;border:none;color:var(--green);opacity:.5;font-size:17px;cursor:pointer;padding:0;transition:all .15s;}
 #xcust:hover{opacity:1;transform:rotate(90deg);}
-#logout_btn{display:flex;align-items:center;gap:7px;background:transparent;border:1px solid var(--border);color:var(--sub);font-family:var(--sans);font-size:13px;font-weight:600;padding:8px 14px;border-radius:var(--r);cursor:pointer;transition:all .2s;}
-#logout_btn:hover{border-color:var(--danger);color:var(--danger);}
 
 /* LEFT */
 #left{overflow-y:auto;padding:18px;display:flex;flex-direction:column;gap:14px;scrollbar-width:thin;scrollbar-color:var(--border2) transparent;}
@@ -275,8 +287,9 @@ body>*{position:relative;z-index:1;}
 
 /* RIGHT */
 #right{background:rgba(10,13,24,.9);backdrop-filter:blur(20px);border-left:1px solid var(--border);display:flex;flex-direction:column;overflow:hidden;}
+body.light #right{background:rgba(244,245,239,.92);}
 #cart_header{display:flex;align-items:center;justify-content:space-between;padding:12px 16px;border-bottom:1px solid var(--border);flex-shrink:0;gap:8px;}
-#cart_count{background:linear-gradient(135deg,var(--green),var(--blue));color:#000;font-size:11px;font-weight:800;padding:2px 7px;border-radius:20px;display:none;}
+#cart_count{background:linear-gradient(135deg,#7ecb6f,#d4a256);color:#000;font-size:11px;font-weight:800;padding:2px 7px;border-radius:20px;display:none;}
 #clear_btn{display:flex;align-items:center;gap:6px;background:rgba(255,77,109,.08);border:1px solid rgba(255,77,109,.2);color:var(--danger);font-family:var(--sans);font-size:12px;font-weight:700;padding:7px 13px;border-radius:9px;cursor:pointer;transition:all .2s;}
 #clear_btn:hover{background:rgba(255,77,109,.18);border-color:var(--danger);}
 
@@ -364,6 +377,8 @@ body>*{position:relative;z-index:1;}
 .inv-close-btn{flex:1;padding:12px;background:var(--card2);border:1px solid var(--border2);border-radius:10px;color:var(--sub);font-family:var(--sans);font-size:13px;font-weight:700;cursor:pointer;}
 .inv-close-btn:hover{border-color:var(--danger);color:var(--danger);}
 .unpaid-badge{background:rgba(255,181,71,.12);border:1px solid rgba(255,181,71,.3);color:var(--warn);border-radius:8px;padding:8px;text-align:center;font-weight:700;font-size:12px;margin-bottom:8px;}
+body.light #cust_dropdown{background:#eceee6;border-color:rgba(0,0,0,.12);box-shadow:0 24px 60px rgba(0,0,0,.18);}
+body.light .toast{background:var(--card);}
 
 /* NOTIFICATION BADGE */
 .notif-badge{display:none;background:var(--danger);color:white;font-size:10px;font-weight:800;padding:1px 6px;border-radius:20px;margin-left:4px;vertical-align:middle;}
@@ -372,7 +387,7 @@ body>*{position:relative;z-index:1;}
 /* TOAST */
 .toast{position:fixed;bottom:22px;left:50%;transform:translateX(-50%) translateY(16px);background:#0f1424;border:1px solid var(--border2);border-radius:var(--r);padding:12px 18px;display:flex;align-items:center;gap:12px;font-size:13px;font-weight:600;color:var(--text);box-shadow:0 20px 50px rgba(0,0,0,.5);opacity:0;pointer-events:none;transition:opacity .25s,transform .25s;z-index:999;}
 .toast.show{opacity:1;transform:translateX(-50%) translateY(0);pointer-events:auto;}
-.toast-undo{background:linear-gradient(135deg,var(--green),var(--blue));color:#021a10;border:none;border-radius:7px;padding:5px 11px;font-family:var(--sans);font-size:12px;font-weight:800;cursor:pointer;}
+.toast-undo{background:linear-gradient(135deg,#7ecb6f,#d4a256);color:#021a10;border:none;border-radius:7px;padding:5px 11px;font-family:var(--sans);font-size:12px;font-weight:800;cursor:pointer;}
 ::-webkit-scrollbar{width:4px;}
 ::-webkit-scrollbar-thumb{background:var(--border2);border-radius:4px;}
 
@@ -433,13 +448,14 @@ body>*{position:relative;z-index:1;}
         <button id="xcust" onclick="clearCustomer()">×</button>
     </div>
 
-    <button id="logout_btn" onclick="logout()">
-        <svg width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24">
-            <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/>
-            <polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/>
-        </svg>
-        Sign out
-    </button>
+    <div class="topbar-right">
+        <button class="mode-btn" id="mode-btn" onclick="toggleMode()" title="Toggle color mode">??</button>
+        <div class="user-pill">
+            <div class="user-avatar" id="user-avatar">A</div>
+            <span class="user-name" id="user-name">Admin</span>
+        </div>
+        <button class="logout-btn" onclick="logout()">Sign out</button>
+    </div>
 </div>
 
 <!-- LEFT: PRODUCTS -->
@@ -568,13 +584,96 @@ body>*{position:relative;z-index:1;}
 </div>
 
 <script>
-let beep = new Audio("/static/sounds/beep.wav");
+  const __erpToken = localStorage.getItem("token");
+  const __erpUserRole = localStorage.getItem("user_role") || "";
+  const __erpUserPermissions = new Set(
+      (localStorage.getItem("user_permissions") || "")
+          .split(",")
+          .map(p => p.trim())
+          .filter(Boolean)
+  );
+  function setModeButton(isLight){
+      const btn = document.getElementById("mode-btn");
+      if(btn) btn.innerText = isLight ? "☀️" : "🌙";
+  }
+  function toggleMode(){
+      const isLight = document.body.classList.toggle("light");
+      localStorage.setItem("colorMode", isLight ? "light" : "dark");
+      setModeButton(isLight);
+  }
+  function initializeColorMode(){
+      const isLight = localStorage.getItem("colorMode") === "light";
+      document.body.classList.toggle("light", isLight);
+      setModeButton(isLight);
+  }
+  function setUserInfo(){
+      const name = localStorage.getItem("user_name") || "Admin";
+      const avatar = document.getElementById("user-avatar");
+      const userName = document.getElementById("user-name");
+      if(avatar) avatar.innerText = name.charAt(0).toUpperCase();
+      if(userName) userName.innerText = name;
+  }
+  function requirePageAccess(permission){
+      if(!__erpToken){
+          window.location.href = "/";
+          throw new Error("Not authenticated");
+      }
+      if(__erpUserRole === "admin" || __erpUserPermissions.has(permission)) return;
+      document.body.innerHTML = `<div style="display:flex;align-items:center;justify-content:center;height:100vh;flex-direction:column;gap:16px;color:#445066;font-family:'Outfit',sans-serif;background:#060810"><div style="font-size:48px">🔒</div><div style="font-size:20px;font-weight:800;color:#f0f4ff">Access Restricted</div><div style="font-size:14px">You do not have permission to open this page.</div><a href="/home" style="color:#00ff9d;text-decoration:none;font-weight:700">Back to Home</a></div>`;
+      throw new Error("Access denied");
+  }
+  function applyNavPermissions(){
+      const navPermissions = {
+          "/home": null,
+          "/dashboard": "page_dashboard",
+          "/pos": "page_pos",
+          "/b2b/": "page_b2b",
+          "/inventory/": "page_inventory",
+          "/products/": "page_products",
+          "/customers-mgmt/": "page_customers",
+          "/suppliers/": "page_suppliers",
+          "/production/": "page_production",
+          "/farm/": "page_farm",
+          "/hr/": "page_hr",
+          "/accounting/": "page_accounting",
+          "/reports/": "page_reports",
+          "/import": "page_import",
+          "/users/": "admin_only"
+      };
+      document.querySelectorAll("a.nav-link[href]").forEach(link => {
+          const href = link.getAttribute("href");
+          const requirement = navPermissions[href];
+          if(requirement === undefined || requirement === null) return;
+          if(requirement === "admin_only"){
+              if(__erpUserRole !== "admin") link.style.display = "none";
+              return;
+          }
+          if(__erpUserRole !== "admin" && !__erpUserPermissions.has(requirement)){
+              link.style.display = "none";
+          }
+      });
+  }
+  function hasPermission(permission){
+      return __erpUserRole === "admin" || __erpUserPermissions.has(permission);
+  }
+  requirePageAccess("page_pos");
+  applyNavPermissions();
+  initializeColorMode();
+  setUserInfo();
+  let beep = new Audio("/static/sounds/beep.wav");
 let customers=[], products=[], cart=[], lastCart=[];
 let selectedCustomer = null;
 let selectedPayMethod = "cash";
 let token = localStorage.getItem("token");
 let toastTimer = null;
 let currentInvoiceData = null;
+if(!hasPermission("action_pos_discount")){
+    document.getElementById("discount").disabled = true;
+    document.getElementById("discount").value = "0";
+}
+if(!hasPermission("action_pos_settle_later")){
+    document.getElementById("settle_btn").style.display = "none";
+}
 
 /* ── INIT ── */
 async function load(){
@@ -736,7 +835,7 @@ function clearCart(){
     lastCart=[...cart]; cart=[]; drawCart(); showToast("Cart cleared",true,true);
 }
 function undoCart(){ cart=[...lastCart]; drawCart(); hideToast(); }
-function logout(){ localStorage.removeItem("token"); window.location.href="/"; }
+function logout(){ localStorage.removeItem("token"); localStorage.removeItem("user_name"); localStorage.removeItem("user_role"); localStorage.removeItem("user_permissions"); window.location.href="/"; }
 
 function drawCart(){
     let empty=document.getElementById("cart_empty"), cartEl=document.getElementById("cart"), countEl=document.getElementById("cart_count"), total=0;
@@ -799,7 +898,12 @@ async function checkout(settleLater=false){
                 settle_later:     settleLater,
             }),
         });
-        let data=await res.json();
+        let data;
+        try {
+            data = await res.json();
+        } catch(e) {
+            data = {detail:`Request failed (${res.status})`};
+        }
         if(data.detail){ showToast("Error: "+data.detail); return; }
         if(settleLater){
             showToast(`⏳ ${data.invoice_number} saved — settle later`);
@@ -839,7 +943,7 @@ async function loadUnpaidInvoices(){
                     </div>
                     <div class="unpaid-total">${inv.total.toFixed(2)}</div>
                 </div>
-                <div class="collect-row" onclick="event.stopPropagation()">
+                <div class="collect-row" onclick="event.stopPropagation()" style="${hasPermission("action_pos_settle_later") ? "" : "display:none"}">
                     <button class="collect-btn collect-cash"
                         onclick="collectPayment(${inv.id},'${inv.invoice_number}','cash')">
                         💵 Cash

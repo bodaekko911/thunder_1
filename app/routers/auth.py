@@ -18,35 +18,54 @@ def login_page():
 <head>
     <title>ERP Login</title>
     <style>
+        :root {
+            --bg: #0a0d18;
+            --card: #0f1424;
+            --border: rgba(255,255,255,0.08);
+            --text: #ffffff;
+            --sub: #8899bb;
+            --muted: #445066;
+            --accent: #00ff9d;
+        }
+        body.light {
+            --bg: #f4f5ef;
+            --card: #eceee6;
+            --border: rgba(0,0,0,0.08);
+            --text: #1a1e14;
+            --sub: #4a5040;
+            --muted: #7b816f;
+        }
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body {
             font-family: 'Segoe UI', sans-serif;
-            background: #0a0d18;
+            background: var(--bg);
             height: 100vh;
             display: flex;
             align-items: center;
             justify-content: center;
+            color: var(--text);
         }
         .box {
-            background: #0f1424;
-            border: 1px solid rgba(255,255,255,0.08);
+            background: var(--card);
+            border: 1px solid var(--border);
             border-radius: 16px;
             padding: 40px;
             width: 360px;
+            position: relative;
         }
         h2 {
-            color: #00ff9d;
+            color: var(--accent);
             font-size: 24px;
             margin-bottom: 6px;
         }
         p {
-            color: #445066;
+            color: var(--muted);
             font-size: 13px;
             margin-bottom: 28px;
         }
         label {
             display: block;
-            color: #8899bb;
+            color: var(--sub);
             font-size: 11px;
             font-weight: 700;
             letter-spacing: 1px;
@@ -56,13 +75,16 @@ def login_page():
         input {
             width: 100%;
             padding: 12px;
-            background: #151c30;
-            border: 1px solid rgba(255,255,255,0.08);
+            background: rgba(21,28,48,0.9);
+            border: 1px solid var(--border);
             border-radius: 10px;
-            color: white;
+            color: var(--text);
             font-size: 14px;
             margin-bottom: 18px;
             outline: none;
+        }
+        body.light input {
+            background: rgba(255,255,255,0.55);
         }
         input:focus {
             border-color: rgba(0,255,157,0.4);
@@ -86,9 +108,27 @@ def login_page():
             text-align: center;
             display: none;
         }
+        .mode-btn {
+            position: fixed;
+            top: 18px;
+            right: 18px;
+            width: 40px;
+            height: 40px;
+            border-radius: 10px;
+            border: 1px solid var(--border);
+            background: var(--card);
+            color: var(--sub);
+            font-size: 16px;
+            cursor: pointer;
+            transition: all .2s;
+        }
+        .mode-btn:hover {
+            transform: scale(1.06);
+        }
     </style>
 </head>
 <body>
+    <button class="mode-btn" id="mode-btn" onclick="toggleMode()" title="Toggle color mode">🌙</button>
     <div class="box">
         <h2>Welcome Back</h2>
         <p>Sign in to your ERP system</p>
@@ -104,6 +144,23 @@ def login_page():
     </div>
 
     <script>
+        function setModeButton(isLight) {
+            const btn = document.getElementById("mode-btn");
+            if (btn) btn.innerText = isLight ? "☀️" : "🌙";
+        }
+
+        function toggleMode() {
+            const isLight = document.body.classList.toggle("light");
+            localStorage.setItem("colorMode", isLight ? "light" : "dark");
+            setModeButton(isLight);
+        }
+
+        function initializeColorMode() {
+            const isLight = localStorage.getItem("colorMode") === "light";
+            document.body.classList.toggle("light", isLight);
+            setModeButton(isLight);
+        }
+
         async function login() {
             let res = await fetch("/auth/login", {
                 method: "POST",
@@ -121,6 +178,7 @@ def login_page():
             localStorage.setItem("token", data.access_token);
             localStorage.setItem("user_name", data.name);
             localStorage.setItem("user_role", data.role);
+            localStorage.setItem("user_permissions", data.permissions || "");
             window.location.href = "/home";
         }
 
@@ -128,6 +186,8 @@ def login_page():
         document.addEventListener("keydown", e => {
             if (e.key === "Enter") login();
         });
+
+        initializeColorMode();
     </script>
 </body>
 </html>
@@ -146,7 +206,8 @@ def login(data: UserLogin, db: Session = Depends(get_db)):
         "access_token": token,
         "token_type": "bearer",
         "role": user.role,
-        "name": user.name
+        "name": user.name,
+        "permissions": user.permissions or ""
     }
 
 

@@ -1,10 +1,15 @@
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
+from sqlalchemy import text
 from app.core.config import settings
 from app.database import Base, engine
 import app.models
 
 Base.metadata.create_all(bind=engine)
+
+with engine.begin() as conn:
+    for table_name in ("b2b_invoices", "consignments", "b2b_refunds", "farm_deliveries", "production_batches", "spoilage_records"):
+        conn.execute(text(f"ALTER TABLE {table_name} ADD COLUMN IF NOT EXISTS user_id INTEGER"))
 
 app = FastAPI(title=settings.APP_NAME)
 

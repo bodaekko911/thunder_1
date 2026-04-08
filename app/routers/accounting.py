@@ -6,10 +6,12 @@ from typing import Optional, List
 from pydantic import BaseModel
 
 from app.database import get_db
+from app.core.permissions import get_current_user
 from app.models.accounting import Account, Journal, JournalEntry
 from app.models.b2b import B2BClient, B2BInvoice, B2BInvoiceItem, Consignment
 from app.models.product import Product
 from app.models.inventory import StockMove
+from app.models.user import User
 from decimal import Decimal
 
 router = APIRouter(prefix="/accounting", tags=["Accounting"])
@@ -32,6 +34,10 @@ class JournalCreate(BaseModel):
     ref_type:    Optional[str] = None
     description: Optional[str] = None
     entries:     List[JournalEntryIn]
+
+class B2BRefundIn(BaseModel):
+    amount: float
+    reason: Optional[str] = None
 
 
 # ── ACCOUNTS API ───────────────────────────────────────
@@ -147,7 +153,7 @@ def get_journal(journal_id: int, db: Session = Depends(get_db)):
     }
 
 @router.post("/api/journals")
-def create_journal(data: JournalCreate, db: Session = Depends(get_db)):
+def create_journal(data: JournalCreate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     total_debit  = sum(e.debit  for e in data.entries)
     total_credit = sum(e.credit for e in data.entries)
     if round(total_debit, 2) != round(total_credit, 2):
@@ -159,6 +165,7 @@ def create_journal(data: JournalCreate, db: Session = Depends(get_db)):
     journal = Journal(
         ref_type=data.ref_type or "manual",
         description=data.description,
+        user_id=current_user.id,
     )
     db.add(journal); db.flush()
 
@@ -246,6 +253,7 @@ def get_b2b_invoices(invoice_type: str = None, status: str = None, db: Session =
             "invoice_number": i.invoice_number,
             "client":         i.client.name if i.client else "—",
             "client_id":      i.client_id,
+            "client_outstanding": float(i.client.outstanding) if i.client else 0,
             "invoice_type":   i.invoice_type,
             "status":         i.status,
             "subtotal":       float(i.subtotal),
@@ -336,6 +344,47 @@ def consignment_b2b_payment(invoice_id: int, data: dict, db: Session = Depends(g
     db.commit()
     return {"ok": True, "status": invoice.status, "invoice_number": invoice.invoice_number}
 
+@router.post("/api/b2b-clients/{client_id}/refund")
+def refund_b2b_client_account(client_id: int, data: B2BRefundIn, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    client = db.query(B2BClient).filter(B2BClient.id == client_id).first()
+    if not client:
+        raise HTTPException(status_code=404, detail="Client not found")
+
+    amount = round(float(data.amount or 0), 2)
+    outstanding = round(float(client.outstanding or 0), 2)
+    if amount <= 0:
+        raise HTTPException(status_code=400, detail="Amount must be greater than 0")
+    if outstanding <= 0.01:
+        raise HTTPException(status_code=400, detail="This client has no outstanding balance to reduce")
+    if amount > outstanding + 0.01:
+        raise HTTPException(status_code=400, detail=f"Amount exceeds client outstanding: {outstanding:.2f}")
+
+    client.outstanding = Decimal(str(max(0, float(client.outstanding) - amount)))
+
+    reason = (data.reason or "").strip()
+    note_suffix = f" - {reason}" if reason else ""
+    journal = Journal(
+        ref_type="b2b_refund",
+        description=f"B2B client account refund - {client.name}{note_suffix}",
+        user_id=current_user.id,
+    )
+    db.add(journal); db.flush()
+    for code, debit, credit in [
+        ("2200", amount, 0),
+        ("1100", 0, amount),
+    ]:
+        acc = db.query(Account).filter(Account.code == code).first()
+        if acc:
+            db.add(JournalEntry(journal_id=journal.id, account_id=acc.id, debit=debit, credit=credit))
+            acc.balance += Decimal(str(debit)) - Decimal(str(credit))
+
+    db.commit()
+    return {
+        "ok": True,
+        "client": client.name,
+        "client_outstanding": round(float(client.outstanding), 2),
+    }
+
 
 # ── UI ─────────────────────────────────────────────────
 @router.get("/", response_class=HTMLResponse)
@@ -367,6 +416,22 @@ def accounting_ui():
     --mono:    'JetBrains Mono', monospace;
     --r:       12px;
 }
+body.light{
+    --bg:#f4f5ef;--surface:#f1f3eb;--card:#eceee6;--card2:#e4e6de;
+    --border:rgba(0,0,0,0.08);--border2:rgba(0,0,0,0.14);
+    --text:#1a1e14;--sub:#4a5040;--muted:#7b816f;
+}
+body.light nav{background:rgba(244,245,239,.92);}
+body.light .nav-link:hover{background:rgba(0,0,0,.05);}
+body.light tr:hover td{background:rgba(0,0,0,.03);}
+.mode-btn{display:flex;align-items:center;justify-content:center;width:36px;height:36px;border-radius:10px;border:1px solid var(--border);background:var(--card);color:var(--sub);font-size:16px;cursor:pointer;transition:all .2s;font-family:var(--sans);}
+.mode-btn:hover{border-color:var(--border2);transform:scale(1.06);}
+.topbar-right{display:flex;align-items:center;gap:12px;}
+.user-pill{display:flex;align-items:center;gap:10px;background:var(--card);border:1px solid var(--border);border-radius:40px;padding:7px 16px 7px 10px;}
+.user-avatar{width:28px;height:28px;background:linear-gradient(135deg,#7ecb6f,#d4a256);border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;color:#0a0c08;}
+.user-name{font-size:13px;font-weight:500;color:var(--sub);}
+.logout-btn{background:transparent;border:1px solid var(--border);color:var(--muted);font-family:var(--sans);font-size:12px;font-weight:500;padding:8px 16px;border-radius:8px;cursor:pointer;transition:all .2s;letter-spacing:.3px;}
+.logout-btn:hover{border-color:#c97a7a;color:#c97a7a;}
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 body { font-family: var(--sans); background: var(--bg); color: var(--text); min-height: 100vh; font-size: 14px; }
 nav {
@@ -378,7 +443,7 @@ nav {
 }
 .logo { font-size: 18px; font-weight: 900; background: linear-gradient(135deg,#f59e0b,#fbbf24); -webkit-background-clip:text; -webkit-text-fill-color:transparent; background-clip:text; margin-right:10px; text-decoration:none; display:flex; align-items:center; gap:8px; cursor:pointer; }
 .nav-link { padding:7px 12px; border-radius:8px; color:var(--sub); font-size:12px; font-weight:600; text-decoration:none; transition:all .2s; white-space:nowrap; }
-.nav-link:hover { background:rgba(255,255,255,.05); color:var(--text); }
+.nav-link:hover { background:rgba(255,255,255,.05); background:linear-gradient(135deg,var(--green),var(--blue));-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text; }
 .nav-link.active { background:rgba(0,255,157,.1); color:var(--green); }
 .nav-spacer { flex:1; }
 .content { max-width:1300px; margin:0 auto; padding:28px 24px; display:flex; flex-direction:column; gap:20px; }
@@ -482,6 +547,14 @@ td.cr { font-family:var(--mono); color:var(--blue); }
     <a href="/hr/"             class="nav-link">HR</a>
     <a href="/accounting/"     class="nav-link active">Accounting</a>
     <span class="nav-spacer"></span>
+    <div class="topbar-right">
+        <button class="mode-btn" id="mode-btn" onclick="toggleMode()" title="Toggle color mode">??</button>
+        <div class="user-pill">
+            <div class="user-avatar" id="user-avatar">A</div>
+            <span class="user-name" id="user-name">Admin</span>
+        </div>
+        <button class="logout-btn" onclick="logout()">Sign out</button>
+    </div>
 </nav>
 
 <div class="content">
@@ -580,7 +653,7 @@ td.cr { font-family:var(--mono); color:var(--blue); }
 <div class="modal-bg" id="inv-detail-modal">
     <div class="modal" style="width:520px">
         <div style="text-align:center;margin-bottom:16px">
-            <img src="/static/logo.png" style="height:60px;object-fit:contain;margin-bottom:6px">
+            <img src="/static/Logo.png" style="height:120px;object-fit:contain;margin-bottom:6px">
             <div style="font-size:16px;font-weight:900;color:#2a7a2a">Habiba Organic Farm</div>
             <div style="font-size:12px;color:var(--muted);margin-top:2px" id="inv-detail-num"></div>
         </div>
@@ -659,6 +732,36 @@ td.cr { font-family:var(--mono); color:var(--blue); }
     </div>
 </div>
 
+<!-- B2B REFUND MODAL -->
+<div class="modal-bg" id="refund-modal">
+    <div class="modal" style="width:440px">
+        <div class="modal-title">Adjust Client Account</div>
+        <div class="modal-sub" id="refund-modal-sub"></div>
+        <div style="background:rgba(255,181,71,.08);border:1px solid rgba(255,181,71,.18);border-radius:10px;padding:10px 14px;margin-bottom:14px;font-size:12px;color:var(--warn)">
+            This reduces the client's outstanding balance without editing an invoice.
+        </div>
+        <div style="display:flex;flex-direction:column;gap:6px;margin-bottom:14px">
+            <label style="font-size:11px;font-weight:700;letter-spacing:1px;text-transform:uppercase;color:var(--muted)">Confirm Client Name *</label>
+            <input id="refund-inv-num" placeholder="Type client name exactly"
+                style="background:var(--card2);border:1px solid var(--border2);border-radius:10px;padding:10px 12px;color:var(--text);font-family:var(--mono);font-size:14px;outline:none;width:100%">
+        </div>
+        <div style="display:flex;flex-direction:column;gap:6px;margin-bottom:14px">
+            <label style="font-size:11px;font-weight:700;letter-spacing:1px;text-transform:uppercase;color:var(--muted)">Adjustment Amount *</label>
+            <input id="refund-amount" type="number" placeholder="0.00" min="0.01" step="any"
+                style="background:var(--card2);border:1px solid var(--border2);border-radius:10px;padding:10px 12px;color:var(--text);font-family:var(--mono);font-size:14px;outline:none;width:100%">
+        </div>
+        <div style="display:flex;flex-direction:column;gap:6px;margin-bottom:16px">
+            <label style="font-size:11px;font-weight:700;letter-spacing:1px;text-transform:uppercase;color:var(--muted)">Reason</label>
+            <input id="refund-reason" placeholder="Returned items / supplier return note"
+                style="background:var(--card2);border:1px solid var(--border2);border-radius:10px;padding:10px 12px;color:var(--text);font-family:var(--sans);font-size:14px;outline:none;width:100%">
+        </div>
+        <div style="display:flex;gap:10px;justify-content:flex-end">
+            <button onclick="document.getElementById('refund-modal').classList.remove('open')" style="background:transparent;border:1px solid var(--border2);color:var(--sub);padding:10px 18px;border-radius:var(--r);font-family:var(--sans);font-size:13px;font-weight:700;cursor:pointer;">Cancel</button>
+            <button onclick="saveRefund()" style="background:linear-gradient(135deg,#ffb547,#ff7a45);border:none;color:#241200;padding:12px 28px;border-radius:var(--r);font-family:var(--sans);font-size:14px;font-weight:800;cursor:pointer;letter-spacing:.3px;">Record Return</button>
+        </div>
+    </div>
+</div>
+
 <!-- ADD ACCOUNT MODAL -->
 <div class="modal-bg" id="acc-modal">
     <div class="modal" style="width:420px">
@@ -722,7 +825,116 @@ td.cr { font-family:var(--mono); color:var(--blue); }
 <div class="toast" id="toast"></div>
 
 <script>
-let accounts    = [];
+  const __erpToken = localStorage.getItem("token");
+  const __erpUserRole = localStorage.getItem("user_role") || "";
+  const __erpUserPermissions = new Set(
+      (localStorage.getItem("user_permissions") || "")
+          .split(",")
+          .map(p => p.trim())
+          .filter(Boolean)
+  );
+  const __erpFetch = window.fetch.bind(window);
+  window.fetch = (input, init = {}) => {
+      const url = typeof input === "string" ? input : (input && input.url) || "";
+      const isRelativeUrl = typeof url === "string" && !(url.startsWith("http://") || url.startsWith("https://"));
+      const headers = new Headers(init.headers || (input instanceof Request ? input.headers : undefined));
+      if(__erpToken && isRelativeUrl && !headers.has("Authorization")){
+          headers.set("Authorization", "Bearer " + __erpToken);
+      }
+      return __erpFetch(input, {...init, headers});
+  };
+  function setModeButton(isLight){
+    const btn = document.getElementById("mode-btn");
+    if(btn) btn.innerText = isLight ? "☀️" : "🌙";
+}
+function toggleMode(){
+    const isLight = document.body.classList.toggle("light");
+    localStorage.setItem("colorMode", isLight ? "light" : "dark");
+    setModeButton(isLight);
+}
+function initializeColorMode(){
+    const isLight = localStorage.getItem("colorMode") === "light";
+    document.body.classList.toggle("light", isLight);
+    setModeButton(isLight);
+}
+function setUserInfo(){
+    const name = localStorage.getItem("user_name") || "Admin";
+    const avatar = document.getElementById("user-avatar");
+    const userName = document.getElementById("user-name");
+    if(avatar) avatar.innerText = name.charAt(0).toUpperCase();
+    if(userName) userName.innerText = name;
+}
+function logout(){
+    localStorage.removeItem("token");
+    localStorage.removeItem("user_name");
+    localStorage.removeItem("user_role");
+    localStorage.removeItem("user_permissions");
+    window.location.href = "/";
+}
+  function requirePageAccess(permission){
+      if(!__erpToken){
+          window.location.href = "/";
+          throw new Error("Not authenticated");
+      }
+      if(__erpUserRole === "admin" || __erpUserPermissions.has(permission)) return;
+      document.body.innerHTML = `<div style="display:flex;align-items:center;justify-content:center;height:100vh;flex-direction:column;gap:16px;color:#445066;font-family:'Outfit',sans-serif;background:#060810"><div style="font-size:48px">🔒</div><div style="font-size:20px;font-weight:800;color:#f0f4ff">Access Restricted</div><div style="font-size:14px">You do not have permission to open this page.</div><a href="/home" style="color:#00ff9d;text-decoration:none;font-weight:700">Back to Home</a></div>`;
+      throw new Error("Access denied");
+  }
+  function applyNavPermissions(){
+      const navPermissions = {
+          "/home": null,
+          "/dashboard": "page_dashboard",
+          "/pos": "page_pos",
+          "/b2b/": "page_b2b",
+          "/inventory/": "page_inventory",
+          "/products/": "page_products",
+          "/customers-mgmt/": "page_customers",
+          "/suppliers/": "page_suppliers",
+          "/production/": "page_production",
+          "/farm/": "page_farm",
+          "/hr/": "page_hr",
+          "/accounting/": "page_accounting",
+          "/reports/": "page_reports",
+          "/import": "page_import",
+          "/users/": "admin_only"
+      };
+      document.querySelectorAll("a.nav-link[href]").forEach(link => {
+          const href = link.getAttribute("href");
+          const requirement = navPermissions[href];
+          if(requirement === undefined || requirement === null) return;
+          if(requirement === "admin_only"){
+              if(__erpUserRole !== "admin") link.style.display = "none";
+              return;
+          }
+          if(__erpUserRole !== "admin" && !__erpUserPermissions.has(requirement)){
+              link.style.display = "none";
+          }
+      });
+  }
+  function hasPermission(permission){
+      return __erpUserRole === "admin" || __erpUserPermissions.has(permission);
+  }
+  function configureAccountingPermissions(){
+      const tabMap = [
+          {id:"tab-journals", permission:"tab_accounting_journal"},
+          {id:"tab-pl", permission:"tab_accounting_pl"},
+          {id:"tab-b2b", permission:"tab_accounting_b2b"},
+      ];
+      tabMap.forEach(conf => {
+          let el = document.getElementById(conf.id);
+          if(el && !hasPermission(conf.permission)) el.style.display = "none";
+      });
+      if(!hasPermission("action_accounting_post_journal")){
+          let btn = document.getElementById("btn-add-je");
+          if(btn) btn.style.display = "none";
+      }
+  }
+  requirePageAccess("page_accounting");
+  applyNavPermissions();
+  initializeColorMode();
+  setUserInfo();
+  configureAccountingPermissions();
+  let accounts    = [];
 let currentTab  = "accounts";
 
 async function init(){
@@ -731,6 +943,12 @@ async function init(){
 
 /* ── TABS ── */
 function switchTab(tab){
+    const required = {
+        journals: "tab_accounting_journal",
+        pl: "tab_accounting_pl",
+        b2b: "tab_accounting_b2b",
+    };
+    if(required[tab] && !hasPermission(required[tab])) return;
     currentTab = tab;
     ["accounts","journals","pl","tb","b2b"].forEach(t=>{
         document.getElementById("section-"+t).style.display = t===tab?"":"none";
@@ -738,7 +956,7 @@ function switchTab(tab){
     });
     document.getElementById("btn-add-acc").style.display  = tab==="accounts"?"":"none";
     document.getElementById("btn-seed").style.display     = tab==="accounts"?"":"none";
-    document.getElementById("btn-add-je").style.display   = tab==="journals"?"":"none";
+    document.getElementById("btn-add-je").style.display   = tab==="journals" && hasPermission("action_accounting_post_journal")?"":"none";
 
     if(tab==="journals") loadJournals();
     if(tab==="pl")       loadPL();
@@ -1010,6 +1228,8 @@ let allB2BInvoices  = [];
 let collectInvoiceId = null;
 let consInvoiceId    = null;
 let currentInvDetail = null;
+let refundInvoiceId  = null;
+let refundInvoiceNum = null;
 
 async function loadB2BInvoices(){
     let type   = document.getElementById("b2b-type-filter").value;
@@ -1053,6 +1273,12 @@ function renderB2BInvoices(invoices){
                     onmouseenter="this.style.borderColor='var(--teal)';this.style.color='var(--teal)'"
                     onmouseleave="this.style.borderColor='var(--border2)';this.style.color='var(--sub)'"
                     onclick="openConsModal(${i.id},'${i.invoice_number}',${i.balance_due})">💰 Record Payment</button>`
+                : ""}
+            ${i.client_outstanding > 0.01
+                ? `<button style="background:transparent;border:1px solid var(--border2);color:var(--sub);font-size:12px;font-weight:600;padding:5px 10px;border-radius:7px;cursor:pointer;font-family:var(--sans);"
+                    onmouseenter="this.style.borderColor='var(--danger)';this.style.color='var(--danger)'"
+                    onmouseleave="this.style.borderColor='var(--border2)';this.style.color='var(--sub)'"
+                    onclick="openRefundModal(${i.client_id},'${i.client.replace(/'/g,"\\'")}',${i.client_outstanding})">Client Refund</button>`
                 : ""}
         </div>`;
 
@@ -1113,7 +1339,7 @@ function printInvDetail(){
     win.document.write(`<!DOCTYPE html><html><head><title>${inv.invoice_number}</title>
     <style>body{font-family:Arial,sans-serif;padding:30px;color:#111;max-width:600px;margin:0 auto}
     .header{text-align:center;margin-bottom:20px;padding-bottom:16px;border-bottom:2px solid #2a7a2a}
-    .logo{max-height:70px;margin-bottom:6px}
+    .logo{max-height:120px;margin-bottom:6px}
     .company{font-size:18px;font-weight:900;color:#2a7a2a;margin-bottom:4px}
     .meta{display:flex;justify-content:space-between;font-size:13px;margin-bottom:16px}
     .meta-label{color:#555}
@@ -1126,7 +1352,7 @@ function printInvDetail(){
     @media print{button{display:none}}
     </style></head><body>
     <div class="header">
-        <img src="/static/logo.png" class="logo"><br>
+        <img src="/static/Logo.png" class="logo"><br>
         <div class="company">Habiba Organic Farm</div>
         <div style="font-size:12px;color:#555">Commercial registry: 126278 | Tax ID: 560042604</div>
     </div>
@@ -1207,6 +1433,40 @@ function openConsModal(id, num, balance){
     setTimeout(()=>document.getElementById("cons-amount").focus(), 100);
 }
 
+function openRefundModal(clientId, clientName, outstanding){
+    refundInvoiceId  = clientId;
+    refundInvoiceNum = clientName;
+    document.getElementById("refund-modal-sub").innerText = `${clientName} — Outstanding balance: ${outstanding.toFixed(2)} EGP`;
+    document.getElementById("refund-inv-num").value = "";
+    document.getElementById("refund-amount").value = outstanding.toFixed(2);
+    document.getElementById("refund-reason").value = "";
+    document.getElementById("refund-inv-num").style.border = "1px solid var(--border2)";
+    document.getElementById("refund-modal").classList.add("open");
+}
+
+async function saveRefund(){
+    let typed  = document.getElementById("refund-inv-num").value.trim();
+    let amount = parseFloat(document.getElementById("refund-amount").value) || 0;
+    let reason = document.getElementById("refund-reason").value.trim();
+    if(!typed){ showToast("Please enter the client name to confirm"); return; }
+    if(typed !== refundInvoiceNum){
+        showToast(`Client name doesn't match — expected: ${refundInvoiceNum}`);
+        document.getElementById("refund-inv-num").style.border = "1px solid var(--danger)";
+        return;
+    }
+    document.getElementById("refund-inv-num").style.border = "1px solid var(--border2)";
+    if(amount<=0){ showToast("Enter a valid refund amount"); return; }
+    let res  = await fetch(`/accounting/api/b2b-clients/${refundInvoiceId}/refund`,{
+        method:"POST", headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({amount, reason:reason||null}),
+    });
+    let data = await res.json();
+    if(data.detail){ showToast("Error: "+data.detail); return; }
+    document.getElementById("refund-modal").classList.remove("open");
+    showToast(`✓ Client refund recorded — New outstanding: ${data.client_outstanding.toFixed(2)} EGP`);
+    loadB2BInvoices();
+}
+
 async function saveConsPayment(){
     let amount = parseFloat(document.getElementById("cons-amount").value)||0;
     if(amount<=0){ showToast("Enter a valid amount"); return; }
@@ -1222,7 +1482,7 @@ async function saveConsPayment(){
     loadB2BInvoices();
 }
 
-["inv-detail-modal","collect-modal","cons-modal"].forEach(id=>{
+["inv-detail-modal","collect-modal","cons-modal","refund-modal"].forEach(id=>{
     let el = document.getElementById(id);
     if(el) el.addEventListener("click",function(e){ if(e.target===this) this.classList.remove("open"); });
 });
@@ -1232,3 +1492,5 @@ init();
 </body>
 </html>
 """
+
+

@@ -12,7 +12,7 @@ def home_ui():
 <head>
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Habiba Organic Farm — ERP</title>
-<link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,300;0,400;0,600;1,300;1,400&family=DM+Sans:wght@300;400;500;600&family=DM+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,300;0,400;0,600;1,300;1,400&family=DM+Sans:wght@300;400;500;600&family=DM+Mono:wght@400;500&family=Outfit:wght@400;500;600;700;800;900&display=swap" rel="stylesheet">
 <style>
 :root {
     --bg:       #08090c;
@@ -98,11 +98,15 @@ body {
 }
 
 .topbar {
+    position: sticky; top: 0; z-index: 100;
     display: flex; align-items: center; justify-content: space-between;
-    padding: 24px 40px;
+    gap: 10px;
+    padding: 0 24px;
+    height: 58px;
     border-bottom: 1px solid var(--border);
-    background: rgba(8,9,12,.6);
+    background: rgba(10,13,24,.92);
     backdrop-filter: blur(20px);
+    flex-wrap: wrap;
     animation: fadeDown .6s ease both;
 }
 
@@ -111,23 +115,18 @@ body {
     to   { opacity:1; transform:translateY(0); }
 }
 
-.brand { display: flex; align-items: center; gap: 14px; }
-
-.brand-leaf {
-    width: 36px; height: 36px;
-    background: linear-gradient(135deg, var(--green), var(--green2));
-    border-radius: 50% 12px 50% 12px;
-    display: flex; align-items: center; justify-content: center;
-    font-size: 18px;
+.logo {
+    font-family: 'Outfit', sans-serif;
+    font-size: 17px; font-weight: 900;
+    text-decoration: none;
+    display: flex; align-items: center; gap: 8px;
+    margin-right: 10px;
 }
-
-.brand-text h1 {
-    font-family: var(--serif); font-size: 20px; font-weight: 600;
-    letter-spacing: .3px; color: var(--text);
-}
-.brand-text span {
-    font-size: 11px; color: var(--muted);
-    letter-spacing: 2px; text-transform: uppercase; font-weight: 500;
+.logo-text {
+    background: linear-gradient(135deg, var(--green), var(--blue));
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
 }
 
 .topbar-right { display: flex; align-items: center; gap: 12px; }
@@ -292,7 +291,7 @@ body {
 .footer-brand { font-family: var(--serif); font-size: 14px; color: var(--sub); font-style: italic; }
 
 @media (max-width: 700px) {
-    .topbar        { padding: 16px 20px; }
+    .topbar        { padding: 0 20px; height: auto; min-height: 58px; }
     .hero          { padding: 40px 20px 24px; }
     .hero-greeting { font-size: 32px; }
     .modules-wrap  { padding: 0 20px 40px; }
@@ -316,15 +315,14 @@ body {
 <div class="page">
 
     <header class="topbar">
-        <div class="brand">
-            <div class="brand-leaf">🌿</div>
-            <div class="brand-text">
-                <h1>Habiba Organic Farm</h1>
-                <span>Enterprise Resource System</span>
-            </div>
-        </div>
+        <a href="/home" class="logo">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none">
+                <polygon points="13,2 4,14 11,14 11,22 20,10 13,10" fill="#f59e0b"/>
+            </svg>
+            <span class="logo-text">Thunder ERP</span>
+        </a>
         <div class="topbar-right">
-            <button class="mode-btn" id="mode-btn" onclick="toggleMode()" title="Toggle light/dark mode">🌙</button>
+            <button class="mode-btn" id="mode-btn" onclick="toggleMode()" title="Toggle light/dark mode">&#127769;</button>
             <div class="user-pill">
                 <div class="user-avatar" id="user-avatar">A</div>
                 <span class="user-name" id="user-name">Admin</span>
@@ -344,7 +342,7 @@ body {
         <div class="section-title">Core Operations</div>
         <div class="modules-grid">
 
-            <a href="/pos" class="module-card c-green">
+            <a href="/pos" class="module-card c-green" data-permission="page_pos">
                 <div class="card-icon">🛒</div>
                 <div class="card-body">
                     <div class="card-name">Point of Sale</div>
@@ -356,8 +354,8 @@ body {
                 </div>
             </a>
 
-            <a href="/production/" class="module-card c-amber">
-                <div class="card-icon">⚗</div>
+            <a href="/production/" class="module-card c-amber" data-permission="page_production">
+                <div class="card-icon">🏭</div>
                 <div class="card-body">
                     <div class="card-name">Production</div>
                     <div class="card-desc">Process raw materials, packaging runs, track loss</div>
@@ -368,7 +366,7 @@ body {
                 </div>
             </a>
 
-            <a href="/inventory/" class="module-card c-teal">
+            <a href="/inventory/" class="module-card c-teal" data-permission="page_inventory">
                 <div class="card-icon">📦</div>
                 <div class="card-body">
                     <div class="card-name">Inventory</div>
@@ -380,7 +378,7 @@ body {
                 </div>
             </a>
 
-            <a href="/dashboard" class="module-card c-blue">
+            <a href="/dashboard" class="module-card c-blue" data-permission="page_dashboard">
                 <div class="card-icon">📊</div>
                 <div class="card-body">
                     <div class="card-name">Dashboard</div>
@@ -398,7 +396,19 @@ body {
         <div class="section-title">Management</div>
         <div class="modules-grid">
 
-            <a href="/products/" class="module-card c-lime">
+            <a href="/farm/" class="module-card c-green" data-permission="page_farm">
+                <div class="card-icon">🚜</div>
+                <div class="card-body">
+                    <div class="card-name">Farm Intake</div>
+                    <div class="card-desc">Farm suppliers, deliveries, and intake tracking</div>
+                </div>
+                <div class="card-footer">
+                    <span class="card-tag">Operations</span>
+                    <span class="card-arrow">↗</span>
+                </div>
+            </a>
+
+            <a href="/products/" class="module-card c-lime" data-permission="page_products">
                 <div class="card-icon">🌱</div>
                 <div class="card-body">
                     <div class="card-name">Products</div>
@@ -410,7 +420,7 @@ body {
                 </div>
             </a>
 
-            <a href="/customers-mgmt/" class="module-card c-rose">
+            <a href="/customers-mgmt/" class="module-card c-rose" data-permission="page_customers">
                 <div class="card-icon">👥</div>
                 <div class="card-body">
                     <div class="card-name">Customers</div>
@@ -422,7 +432,7 @@ body {
                 </div>
             </a>
 
-            <a href="/suppliers/" class="module-card c-orange">
+            <a href="/suppliers/" class="module-card c-orange" data-permission="page_suppliers">
                 <div class="card-icon">🚚</div>
                 <div class="card-body">
                     <div class="card-name">Suppliers</div>
@@ -434,7 +444,7 @@ body {
                 </div>
             </a>
 
-            <a href="/import" class="module-card c-sky">
+            <a href="/import" class="module-card c-sky" data-permission="page_import">
                 <div class="card-icon">📥</div>
                 <div class="card-body">
                     <div class="card-name">Import Data</div>
@@ -448,11 +458,39 @@ body {
 
         </div>
 
+        <div class="modules-grid">
+
+        <a href="/reports/" class="module-card c-blue" data-permission="page_reports">
+            <div class="card-icon">📑</div>
+            <div class="card-body">
+                <div class="card-name">Reports</div>
+                <div class="card-desc">Sales, production, stock, transactions, and exports</div>
+            </div>
+            <div class="card-footer">
+                <span class="card-tag">Analytics</span>
+                <span class="card-arrow">↗</span>
+            </div>
+        </a>
+
+            <a href="/b2b/" class="module-card c-sky" data-permission="page_b2b">
+                <div class="card-icon">&#128188;</div>
+                <div class="card-body">
+                    <div class="card-name">B2B Wholesale</div>
+                    <div class="card-desc">Wholesale clients, invoices, returns, and consignments</div>
+                </div>
+                <div class="card-footer">
+                    <span class="card-tag">Wholesale</span>
+                    <span class="card-arrow">&nearr;</span>
+                </div>
+            </a>
+
+        </div>
+
         <div class="group-gap"></div>
         <div class="section-title">People &amp; Finance</div>
         <div class="modules-grid">
 
-            <a href="/hr/" class="module-card c-purple">
+            <a href="/hr/" class="module-card c-purple" data-permission="page_hr">
                 <div class="card-icon">🧑‍🤝‍🧑</div>
                 <div class="card-body">
                     <div class="card-name">HR &amp; Payroll</div>
@@ -464,7 +502,7 @@ body {
                 </div>
             </a>
 
-            <a href="/accounting/" class="module-card c-amber">
+            <a href="/accounting/" class="module-card c-amber" data-permission="page_accounting">
                 <div class="card-icon">📒</div>
                 <div class="card-body">
                     <div class="card-name">Accounting</div>
@@ -520,12 +558,13 @@ function logout(){
     localStorage.removeItem("token");
     localStorage.removeItem("user_name");
     localStorage.removeItem("user_role");
+    localStorage.removeItem("user_permissions");
     window.location.href = "/";
 }
 
 function toggleMode(){
     let isLight = document.body.classList.toggle("light");
-    document.getElementById("mode-btn").innerText = isLight ? "☀️" : "🌙";
+    document.getElementById("mode-btn").innerHTML = isLight ? "&#9728;&#65039;" : "&#127769;";
     localStorage.setItem("colorMode", isLight ? "light" : "dark");
 }
 
@@ -535,7 +574,25 @@ if(!localStorage.getItem("token")){
 }
 
 // Show Users card for admin only
-if(localStorage.getItem("user_role") === "admin"){
+const userRole = localStorage.getItem("user_role") || "";
+const userPermissions = new Set(
+    (localStorage.getItem("user_permissions") || "")
+        .split(",")
+        .map(p => p.trim())
+        .filter(Boolean)
+);
+
+function canAccess(permission){
+    return userRole === "admin" || userPermissions.has(permission);
+}
+
+document.querySelectorAll(".module-card[data-permission]").forEach(card => {
+    if(!canAccess(card.dataset.permission)){
+        card.style.display = "none";
+    }
+});
+
+if(userRole === "admin"){
     let c = document.getElementById("card-users");
     if(c) c.style.display = "";
 }
@@ -543,7 +600,7 @@ if(localStorage.getItem("user_role") === "admin"){
 // Restore saved colour mode
 if(localStorage.getItem("colorMode") === "light"){
     document.body.classList.add("light");
-    document.getElementById("mode-btn").innerText = "☀️";
+    document.getElementById("mode-btn").innerHTML = "&#9728;&#65039;";
 }
 
 setGreeting();

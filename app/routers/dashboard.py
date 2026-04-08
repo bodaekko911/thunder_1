@@ -65,7 +65,8 @@ def dashboard_data(db: Session = Depends(get_db)):
     b2b_year  = journal_revenue(year_start_dt,  now_dt)
 
     b2b_outstanding = float(db.query(func.sum(B2BInvoice.total - B2BInvoice.amount_paid)).filter(
-        B2BInvoice.status.in_(["unpaid","partial"])).scalar() or 0)
+        B2BInvoice.status.in_(["unpaid","partial"]),
+        B2BInvoice.invoice_type.in_(["cash", "full_payment"])).scalar() or 0)
     b2b_clients = db.query(func.count(B2BClient.id)).filter(B2BClient.is_active == True).scalar() or 0
 
     # ── COMBINED REVENUE ───────────────────────────────
@@ -196,6 +197,22 @@ def dashboard_ui():
     --text:#f0f4ff;--sub:#8899bb;--muted:#445066;
     --sans:'Outfit',sans-serif;--mono:'JetBrains Mono',monospace;--r:14px;
 }
+body.light{
+    --bg:#f4f5ef;--surface:#f1f3eb;--card:#eceee6;--card2:#e4e6de;
+    --border:rgba(0,0,0,0.08);--border2:rgba(0,0,0,0.14);
+    --text:#1a1e14;--sub:#4a5040;--muted:#7b816f;
+}
+body.light nav{background:rgba(244,245,239,.92);}
+body.light .nav-link:hover{background:rgba(0,0,0,.05);}
+body.light tr:hover td{background:rgba(0,0,0,.03);}
+.mode-btn{display:flex;align-items:center;justify-content:center;width:36px;height:36px;border-radius:10px;border:1px solid var(--border);background:var(--card);color:var(--sub);font-size:16px;cursor:pointer;transition:all .2s;font-family:var(--sans);}
+.mode-btn:hover{border-color:var(--border2);transform:scale(1.06);}
+.topbar-right{display:flex;align-items:center;gap:12px;}
+.user-pill{display:flex;align-items:center;gap:10px;background:var(--card);border:1px solid var(--border);border-radius:40px;padding:7px 16px 7px 10px;}
+.user-avatar{width:28px;height:28px;background:linear-gradient(135deg,#7ecb6f,#d4a256);border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;color:#0a0c08;}
+.user-name{font-size:13px;font-weight:500;color:var(--sub);}
+.logout-btn{background:transparent;border:1px solid var(--border);color:var(--muted);font-family:var(--sans);font-size:12px;font-weight:500;padding:8px 16px;border-radius:8px;cursor:pointer;transition:all .2s;letter-spacing:.3px;}
+.logout-btn:hover{border-color:#c97a7a;color:#c97a7a;}
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0;}
 body{font-family:var(--sans);background:var(--bg);color:var(--text);min-height:100vh;font-size:14px;}
 body::before{content:'';position:fixed;inset:0;
@@ -206,7 +223,7 @@ body>*{position:relative;z-index:1;}
 
 /* NAV */
 nav{position:sticky;top:0;z-index:100;display:flex;align-items:center;gap:10px;padding:0 24px;height:58px;background:rgba(10,13,24,.92);backdrop-filter:blur(20px);border-bottom:1px solid var(--border);flex-wrap:wrap;}
-.logo{font-size:17px;font-weight:900;background:linear-gradient(135deg,#f59e0b,#fbbf24);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;margin-right:10px;text-decoration:none;display:flex;align-items:center;gap:8px;}
+.logo{font-size:17px;font-weight:900;background:linear-gradient(135deg,var(--green),var(--blue));-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;margin-right:10px;text-decoration:none;display:flex;align-items:center;gap:8px;}
 .nav-link{padding:7px 12px;border-radius:8px;color:var(--sub);font-size:12px;font-weight:600;text-decoration:none;transition:all .2s;white-space:nowrap;}
 .nav-link:hover{background:rgba(255,255,255,.05);color:var(--text);}
 .nav-link.active{background:rgba(0,255,157,.1);color:var(--green);}
@@ -334,7 +351,15 @@ tr:hover td{background:rgba(255,255,255,.02);}
     <a href="/reports/"   class="nav-link">Reports</a>
     <a href="/inventory/" class="nav-link">Inventory</a>
     <span class="nav-spacer"></span>
-    <span class="nav-date" id="nav-date"></span>
+    <div class="topbar-right">
+        <span class="nav-date" id="nav-date"></span>
+        <button class="mode-btn" id="mode-btn" onclick="toggleMode()" title="Toggle color mode">??</button>
+        <div class="user-pill">
+            <div class="user-avatar" id="user-avatar">A</div>
+            <span class="user-name" id="user-name">Admin</span>
+        </div>
+        <button class="logout-btn" onclick="logout()">Sign out</button>
+    </div>
 </nav>
 
 <div class="content">
@@ -469,7 +494,87 @@ tr:hover td{background:rgba(255,255,255,.02);}
 </div>
 
 <script>
-let now = new Date();
+  const __erpToken = localStorage.getItem("token");
+  const __erpUserRole = localStorage.getItem("user_role") || "";
+  const __erpUserPermissions = new Set(
+      (localStorage.getItem("user_permissions") || "")
+          .split(",")
+          .map(p => p.trim())
+          .filter(Boolean)
+  );
+  function setModeButton(isLight){
+    const btn = document.getElementById("mode-btn");
+    if(btn) btn.innerText = isLight ? "☀️" : "🌙";
+}
+function toggleMode(){
+    const isLight = document.body.classList.toggle("light");
+    localStorage.setItem("colorMode", isLight ? "light" : "dark");
+    setModeButton(isLight);
+}
+function initializeColorMode(){
+    const isLight = localStorage.getItem("colorMode") === "light";
+    document.body.classList.toggle("light", isLight);
+    setModeButton(isLight);
+}
+function setUserInfo(){
+    const name = localStorage.getItem("user_name") || "Admin";
+    const avatar = document.getElementById("user-avatar");
+    const userName = document.getElementById("user-name");
+    if(avatar) avatar.innerText = name.charAt(0).toUpperCase();
+    if(userName) userName.innerText = name;
+}
+function logout(){
+    localStorage.removeItem("token");
+    localStorage.removeItem("user_name");
+    localStorage.removeItem("user_role");
+    localStorage.removeItem("user_permissions");
+    window.location.href = "/";
+}
+  function requirePageAccess(permission){
+      if(!__erpToken){
+          window.location.href = "/";
+          throw new Error("Not authenticated");
+      }
+      if(__erpUserRole === "admin" || __erpUserPermissions.has(permission)) return;
+      document.body.innerHTML = `<div style="display:flex;align-items:center;justify-content:center;height:100vh;flex-direction:column;gap:16px;color:#445066;font-family:'Outfit',sans-serif;background:#060810"><div style="font-size:48px">🔒</div><div style="font-size:20px;font-weight:800;color:#f0f4ff">Access Restricted</div><div style="font-size:14px">You do not have permission to open this page.</div><a href="/home" style="color:#00ff9d;text-decoration:none;font-weight:700">Back to Home</a></div>`;
+      throw new Error("Access denied");
+  }
+  function applyNavPermissions(){
+      const navPermissions = {
+          "/home": null,
+          "/dashboard": "page_dashboard",
+          "/pos": "page_pos",
+          "/b2b/": "page_b2b",
+          "/inventory/": "page_inventory",
+          "/products/": "page_products",
+          "/customers-mgmt/": "page_customers",
+          "/suppliers/": "page_suppliers",
+          "/production/": "page_production",
+          "/farm/": "page_farm",
+          "/hr/": "page_hr",
+          "/accounting/": "page_accounting",
+          "/reports/": "page_reports",
+          "/import": "page_import",
+          "/users/": "admin_only"
+      };
+      document.querySelectorAll("a.nav-link[href]").forEach(link => {
+          const href = link.getAttribute("href");
+          const requirement = navPermissions[href];
+          if(requirement === undefined || requirement === null) return;
+          if(requirement === "admin_only"){
+              if(__erpUserRole !== "admin") link.style.display = "none";
+              return;
+          }
+          if(__erpUserRole !== "admin" && !__erpUserPermissions.has(requirement)){
+              link.style.display = "none";
+          }
+      });
+  }
+  requirePageAccess("page_dashboard");
+  applyNavPermissions();
+  initializeColorMode();
+  setUserInfo();
+  let now = new Date();
 document.getElementById("nav-date").innerText =
     now.toLocaleDateString("en-GB",{weekday:"long",year:"numeric",month:"long",day:"numeric"});
 document.getElementById("date-sub").innerText =
@@ -588,3 +693,5 @@ load();
 </script>
 </body>
 </html>"""
+
+

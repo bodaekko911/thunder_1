@@ -10,6 +10,7 @@ class SpoilageRecord(Base):
     id             = Column(Integer, primary_key=True, index=True)
     ref_number     = Column(String(30), unique=True, index=True)
     product_id     = Column(Integer, ForeignKey("products.id"), nullable=False)
+    user_id        = Column(Integer, ForeignKey("users.id"), nullable=True)
     qty            = Column(Numeric(12, 3), nullable=False)
     spoilage_date  = Column(Date, nullable=False)
     reason         = Column(String(100))
@@ -19,3 +20,4 @@ class SpoilageRecord(Base):
 
     product = relationship("Product")
     farm    = relationship("Farm")
+    user    = relationship("User")

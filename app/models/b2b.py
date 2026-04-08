@@ -30,6 +30,7 @@ class B2BInvoice(Base):
     id              = Column(Integer, primary_key=True, index=True)
     invoice_number  = Column(String(30), unique=True, index=True)
     client_id       = Column(Integer, ForeignKey("b2b_clients.id"), nullable=False)
+    user_id         = Column(Integer, ForeignKey("users.id"), nullable=True)
     invoice_type    = Column(String(20), nullable=False)  # full_payment | credit | consignment
     status          = Column(String(20), default="unpaid")  # unpaid | paid | partial | consignment
     payment_method  = Column(String(30))  # cash | transfer | —
@@ -42,6 +43,7 @@ class B2BInvoice(Base):
     created_at      = Column(DateTime(timezone=True), server_default=func.now())
 
     client          = relationship("B2BClient", back_populates="invoices")
+    user            = relationship("User")
     items           = relationship("B2BInvoiceItem", back_populates="invoice", cascade="all, delete-orphan")
 
 
@@ -66,6 +68,7 @@ class Consignment(Base):
     ref_number      = Column(String(30), unique=True, index=True)
     client_id       = Column(Integer, ForeignKey("b2b_clients.id"), nullable=False)
     invoice_id      = Column(Integer, ForeignKey("b2b_invoices.id"), nullable=True)
+    user_id         = Column(Integer, ForeignKey("users.id"), nullable=True)
     status          = Column(String(20), default="active")  # active | settled | closed
     notes           = Column(Text)
     created_at      = Column(DateTime(timezone=True), server_default=func.now())
@@ -73,6 +76,7 @@ class Consignment(Base):
 
     client          = relationship("B2BClient", back_populates="consignments")
     invoice         = relationship("B2BInvoice")
+    user            = relationship("User")
     items           = relationship("ConsignmentItem", back_populates="consignment", cascade="all, delete-orphan")
 
 
@@ -89,3 +93,35 @@ class ConsignmentItem(Base):
 
     consignment         = relationship("Consignment", back_populates="items")
     product             = relationship("Product")
+
+
+class B2BRefund(Base):
+    __tablename__ = "b2b_refunds"
+
+    id              = Column(Integer, primary_key=True, index=True)
+    refund_number   = Column(String(30), unique=True, index=True)
+    client_id       = Column(Integer, ForeignKey("b2b_clients.id"), nullable=False)
+    user_id         = Column(Integer, ForeignKey("users.id"), nullable=True)
+    subtotal        = Column(Numeric(14,2), default=0)
+    discount        = Column(Numeric(14,2), default=0)
+    total           = Column(Numeric(14,2), default=0)
+    notes           = Column(Text)
+    created_at      = Column(DateTime(timezone=True), server_default=func.now())
+
+    client          = relationship("B2BClient")
+    user            = relationship("User")
+    items           = relationship("B2BRefundItem", back_populates="refund", cascade="all, delete-orphan")
+
+
+class B2BRefundItem(Base):
+    __tablename__ = "b2b_refund_items"
+
+    id          = Column(Integer, primary_key=True, index=True)
+    refund_id   = Column(Integer, ForeignKey("b2b_refunds.id"), nullable=False)
+    product_id  = Column(Integer, ForeignKey("products.id"), nullable=False)
+    qty         = Column(Numeric(12,3), nullable=False)
+    unit_price  = Column(Numeric(14,2), nullable=False)
+    total       = Column(Numeric(14,2), nullable=False)
+
+    refund      = relationship("B2BRefund", back_populates="items")
+    product     = relationship("Product")

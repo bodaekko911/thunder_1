@@ -8,10 +8,12 @@ from decimal import Decimal
 from datetime import date, datetime
 
 from app.database import get_db
-from app.models.b2b import B2BClient, B2BInvoice, B2BInvoiceItem, Consignment, ConsignmentItem
+from app.core.permissions import get_current_user
+from app.models.b2b import B2BClient, B2BInvoice, B2BInvoiceItem, Consignment, ConsignmentItem, B2BRefund, B2BRefundItem
 from app.models.product import Product
 from app.models.inventory import StockMove
 from app.models.accounting import Account, Journal, JournalEntry
+from app.models.user import User
 
 router = APIRouter(prefix="/b2b", tags=["B2B"])
 
@@ -46,7 +48,7 @@ class InvoiceItemIn(BaseModel):
 
 class InvoiceCreate(BaseModel):
     client_id:      int
-    invoice_type:   str
+    invoice_type:   Optional[str] = None
     payment_method: Optional[str] = None
     discount_pct:   float = 0
     notes:          Optional[str] = None
@@ -59,6 +61,16 @@ class PaymentRecord(BaseModel):
 class ConsignmentSettle(BaseModel):
     items: List[dict]
 
+class RefundItemIn(BaseModel):
+    product_id: int
+    qty:        float
+    unit_price: float
+
+class ClientRefundCreate(BaseModel):
+    client_id: int
+    notes:     Optional[str] = None
+    items:     List[RefundItemIn]
+
 
 # ── HELPERS ────────────────────────────────────────────
 def _next_b2b_number(db):
@@ -69,8 +81,12 @@ def _next_cons_number(db):
     count = db.query(Consignment).count()
     return f"CONS-{str(count + 1).zfill(4)}"
 
-def _post_journal(db, description, ref_type, entries):
-    journal = Journal(ref_type=ref_type, description=description)
+def _next_refund_number(db):
+    count = db.query(B2BRefund).count()
+    return f"RFD-{str(count + 1).zfill(5)}"
+
+def _post_journal(db, description, ref_type, entries, user_id=None):
+    journal = Journal(ref_type=ref_type, description=description, user_id=user_id)
     db.add(journal); db.flush()
     for code, debit, credit in entries:
         acc = db.query(Account).filter(Account.code == code).first()
@@ -90,6 +106,20 @@ def _seed_deferred_revenue(db):
             account_type="liability", balance=Decimal("0"),
         ))
         db.commit()
+
+def _normalized_client_terms(client: B2BClient) -> str:
+    terms = (client.payment_terms or "cash").strip().lower()
+    if terms in ("cash", "full_payment", "consignment"):
+        return terms
+    if terms in ("immediate", "pay_now", "cod"):
+        return "cash"
+    if terms in ("credit", "net15", "net30", "net60"):
+        return "full_payment"
+    return "cash"
+
+def _client_discount_pct(client: B2BClient) -> float:
+    # This app currently stores the client-side default discount in credit_limit.
+    return float(client.credit_limit or 0)
 
 def _reverse_invoice_stock(invoice, db):
     for item in invoice.items:
@@ -239,7 +269,7 @@ def get_invoices(client_id: int = None, skip: int = 0, limit: int = 100, db: Ses
     }
 
 @router.post("/api/invoices")
-def create_invoice(data: InvoiceCreate, db: Session = Depends(get_db)):
+def create_invoice(data: InvoiceCreate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     _seed_deferred_revenue(db)
 
     client = db.query(B2BClient).filter(B2BClient.id == data.client_id).first()
@@ -256,20 +286,23 @@ def create_invoice(data: InvoiceCreate, db: Session = Depends(get_db)):
             raise HTTPException(status_code=400,
                 detail=f"Not enough stock for '{product.name}'. Available: {float(product.stock)}")
 
+    invoice_type    = _normalized_client_terms(client)
+    discount_pct    = _client_discount_pct(client)
     subtotal        = sum(i.qty * i.unit_price for i in data.items)
-    discount_amount = round(subtotal * (data.discount_pct / 100), 2)
+    discount_amount = round(subtotal * (discount_pct / 100), 2)
     total           = round(subtotal - discount_amount, 2)
     invoice_number  = _next_b2b_number(db)
-    status = "paid" if data.invoice_type == "cash" else "unpaid"
+    status = "paid" if invoice_type == "cash" else "unpaid"
 
     invoice = B2BInvoice(
         invoice_number=invoice_number, client_id=data.client_id,
-        invoice_type=data.invoice_type,
+        user_id=current_user.id,
+        invoice_type=invoice_type,
         status=status,
-        payment_method=data.payment_method or data.invoice_type,
+        payment_method=invoice_type,
         subtotal=round(subtotal, 2), discount=discount_amount,
         total=total,
-        amount_paid=total if data.invoice_type == "cash" else 0,
+        amount_paid=total if invoice_type == "cash" else 0,
         notes=data.notes,
     )
     db.add(invoice); db.flush()
@@ -285,39 +318,40 @@ def create_invoice(data: InvoiceCreate, db: Session = Depends(get_db)):
         product.stock = after
         db.add(StockMove(
             product_id=product.id, type="out", qty=-item.qty,
+            user_id=current_user.id,
             qty_before=before, qty_after=after,
             ref_type="b2b", ref_id=invoice.id,
-            note=f"B2B {invoice_number} ({data.invoice_type})",
+            note=f"B2B {invoice_number} ({invoice_type})",
         ))
 
     # ── ACCOUNTING ──────────────────────────────────────
-    if data.invoice_type == "cash":
+    if invoice_type == "cash":
         # Cash: immediate revenue
         _post_journal(db, f"B2B Cash Sale - {invoice_number}", "b2b", [
             ("1000", total, 0),   # Debit Cash
             ("4000", 0, total),   # Credit Sales Revenue
-        ])
+        ], user_id=current_user.id)
 
-    elif data.invoice_type == "full_payment":
+    elif invoice_type == "full_payment":
         # Full Payment: AR → Deferred Revenue (not yet earned)
         _post_journal(db, f"B2B Full Payment Invoice - {invoice_number}", "b2b", [
             ("1100", total, 0),   # Debit AR
             ("2200", 0, total),   # Credit Deferred Revenue
-        ])
+        ], user_id=current_user.id)
         client.outstanding = Decimal(str(float(client.outstanding) + total))
 
-    elif data.invoice_type == "consignment":
+    elif invoice_type == "consignment":
         # Consignment: AR → Deferred Revenue
         _post_journal(db, f"B2B Consignment Invoice - {invoice_number}", "b2b", [
             ("1100", total, 0),   # Debit AR
             ("2200", 0, total),   # Credit Deferred Revenue
-        ])
+        ], user_id=current_user.id)
         client.outstanding = Decimal(str(float(client.outstanding) + total))
 
         cons_ref = _next_cons_number(db)
         consignment = Consignment(
             ref_number=cons_ref, client_id=data.client_id,
-            invoice_id=invoice.id, status="active", notes=data.notes,
+            invoice_id=invoice.id, user_id=current_user.id, status="active", notes=data.notes,
         )
         db.add(consignment); db.flush()
         for item in data.items:
@@ -332,7 +366,7 @@ def create_invoice(data: InvoiceCreate, db: Session = Depends(get_db)):
 
 
 @router.put("/api/invoices/{invoice_id}")
-def edit_invoice(invoice_id: int, data: InvoiceCreate, db: Session = Depends(get_db)):
+def edit_invoice(invoice_id: int, data: InvoiceCreate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     invoice = db.query(B2BInvoice).filter(B2BInvoice.id == invoice_id).first()
     if not invoice:
         raise HTTPException(status_code=404, detail="Invoice not found")
@@ -362,21 +396,26 @@ def edit_invoice(invoice_id: int, data: InvoiceCreate, db: Session = Depends(get
             raise HTTPException(status_code=400,
                 detail=f"Not enough stock for '{product.name}'. Available: {float(product.stock)}")
 
+    client = db.query(B2BClient).filter(B2BClient.id == data.client_id).first()
+    if not client:
+        raise HTTPException(status_code=404, detail="Client not found")
+
+    invoice_type    = _normalized_client_terms(client)
+    discount_pct    = _client_discount_pct(client)
     subtotal        = sum(i.qty * i.unit_price for i in data.items)
-    discount_amount = round(subtotal * (data.discount_pct / 100), 2)
+    discount_amount = round(subtotal * (discount_pct / 100), 2)
     total           = round(subtotal - discount_amount, 2)
 
     invoice.client_id      = data.client_id
-    invoice.invoice_type   = data.invoice_type
-    invoice.payment_method = data.payment_method or data.invoice_type
+    invoice.user_id        = current_user.id
+    invoice.invoice_type   = invoice_type
+    invoice.payment_method = invoice_type
     invoice.subtotal       = round(subtotal, 2)
     invoice.discount       = discount_amount
     invoice.total          = total
-    invoice.amount_paid    = total if data.invoice_type == "cash" else 0
-    invoice.status         = "paid" if data.invoice_type == "cash" else "unpaid"
+    invoice.amount_paid    = total if invoice_type == "cash" else 0
+    invoice.status         = "paid" if invoice_type == "cash" else "unpaid"
     invoice.notes          = data.notes
-
-    client = db.query(B2BClient).filter(B2BClient.id == data.client_id).first()
 
     for item in data.items:
         product = db.query(Product).filter(Product.id == item.product_id).first()
@@ -389,28 +428,29 @@ def edit_invoice(invoice_id: int, data: InvoiceCreate, db: Session = Depends(get
         product.stock = after
         db.add(StockMove(
             product_id=product.id, type="out", qty=-item.qty,
+            user_id=current_user.id,
             qty_before=before, qty_after=after,
             ref_type="b2b", ref_id=invoice.id,
             note=f"B2B {invoice.invoice_number} (edited)",
         ))
 
-    if data.invoice_type == "cash":
+    if invoice_type == "cash":
         _post_journal(db, f"B2B Cash Sale (edited) - {invoice.invoice_number}", "b2b", [
             ("1000", total, 0),
             ("4000", 0, total),
-        ])
-    elif data.invoice_type in ("full_payment", "consignment"):
-        _post_journal(db, f"B2B {data.invoice_type} Invoice (edited) - {invoice.invoice_number}", "b2b", [
+        ], user_id=current_user.id)
+    elif invoice_type in ("full_payment", "consignment"):
+        _post_journal(db, f"B2B {invoice_type} Invoice (edited) - {invoice.invoice_number}", "b2b", [
             ("1100", total, 0),
             ("2200", 0, total),
-        ])
+        ], user_id=current_user.id)
         if client:
             client.outstanding = Decimal(str(float(client.outstanding) + total))
-        if data.invoice_type == "consignment":
+        if invoice_type == "consignment":
             cons_ref = _next_cons_number(db)
             consignment = Consignment(
                 ref_number=cons_ref, client_id=data.client_id,
-                invoice_id=invoice.id, status="active", notes=data.notes,
+                invoice_id=invoice.id, user_id=current_user.id, status="active", notes=data.notes,
             )
             db.add(consignment); db.flush()
             for item in data.items:
@@ -442,7 +482,7 @@ def delete_invoice(invoice_id: int, db: Session = Depends(get_db)):
 
 
 @router.post("/api/invoices/{invoice_id}/pay")
-def record_payment(invoice_id: int, data: PaymentRecord, db: Session = Depends(get_db)):
+def record_payment(invoice_id: int, data: PaymentRecord, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     """
     Collect payment on a full_payment invoice.
     Moves amount from Deferred Revenue → Sales Revenue, and Cash ← AR.
@@ -467,7 +507,7 @@ def record_payment(invoice_id: int, data: PaymentRecord, db: Session = Depends(g
         ("1100", 0, amount),    # Credit AR
         ("2200", amount, 0),    # Debit Deferred Revenue
         ("4000", 0, amount),    # Credit Sales Revenue
-    ])
+    ], user_id=current_user.id)
 
     db.commit()
     return {"ok": True, "status": invoice.status}
@@ -509,7 +549,7 @@ def get_consignments(db: Session = Depends(get_db)):
     ]
 
 @router.post("/api/consignments/{cons_id}/settle")
-def settle_consignment(cons_id: int, data: ConsignmentSettle, db: Session = Depends(get_db)):
+def settle_consignment(cons_id: int, data: ConsignmentSettle, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     """
     Settle consignment — for each qty sold, move from Deferred Revenue → Sales Revenue.
     Returned items restore stock.
@@ -538,6 +578,7 @@ def settle_consignment(cons_id: int, data: ConsignmentSettle, db: Session = Depe
             product.stock = after
             db.add(StockMove(
                 product_id=product.id, type="in",
+                user_id=current_user.id,
                 qty=qty_returned, qty_before=before, qty_after=after,
                 ref_type="consignment_return", ref_id=cons.id,
                 note=f"Returned from {cons.ref_number}",
@@ -553,7 +594,7 @@ def settle_consignment(cons_id: int, data: ConsignmentSettle, db: Session = Depe
             ("1100", 0, amount),    # Credit AR
             ("2200", amount, 0),    # Debit Deferred Revenue
             ("4000", 0, amount),    # Credit Sales Revenue
-        ])
+        ], user_id=current_user.id)
         cons.client.outstanding = Decimal(str(max(0, float(cons.client.outstanding) - amount)))
 
     all_done = all(
@@ -574,7 +615,7 @@ class ConsignmentPayment(BaseModel):
     notes:       Optional[str] = None
 
 @router.post("/api/invoices/{invoice_id}/consignment-payment")
-def consignment_payment(invoice_id: int, data: ConsignmentPayment, db: Session = Depends(get_db)):
+def consignment_payment(invoice_id: int, data: ConsignmentPayment, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     """
     Record a cash payment from a consignment client.
     Moves amount: Deferred Revenue → Sales Revenue, Cash ← AR.
@@ -606,10 +647,96 @@ def consignment_payment(invoice_id: int, data: ConsignmentPayment, db: Session =
         ("1100", 0, amount),    # Credit AR
         ("2200", amount, 0),    # Debit Deferred Revenue
         ("4000", 0, amount),    # Credit Sales Revenue
-    ])
+    ], user_id=current_user.id)
 
     db.commit()
     return {"ok": True, "invoice_number": invoice.invoice_number, "amount": amount, "status": invoice.status}
+
+@router.post("/api/refunds")
+def create_client_refund(data: ClientRefundCreate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    client = db.query(B2BClient).filter(B2BClient.id == data.client_id, B2BClient.is_active == True).first()
+    if not client:
+        raise HTTPException(status_code=404, detail="Client not found")
+    if not data.items:
+        raise HTTPException(status_code=400, detail="Refund must have at least one item")
+
+    refund_number = _next_refund_number(db)
+    subtotal = 0.0
+    for item in data.items:
+        product = db.query(Product).filter(Product.id == item.product_id).first()
+        if not product:
+            raise HTTPException(status_code=404, detail=f"Product not found: {item.product_id}")
+        if item.qty <= 0:
+            raise HTTPException(status_code=400, detail="Refund quantities must be greater than 0")
+        if item.unit_price < 0:
+            raise HTTPException(status_code=400, detail="Unit price cannot be negative")
+        line_total = round(item.qty * item.unit_price, 2)
+        subtotal += line_total
+
+    subtotal = round(subtotal, 2)
+    discount_pct = _client_discount_pct(client)
+    discount = round(subtotal * (discount_pct / 100), 2)
+    total = round(subtotal - discount, 2)
+    if total <= 0:
+        raise HTTPException(status_code=400, detail="Refund total must be greater than 0")
+    if total > float(client.outstanding) + 0.01:
+        raise HTTPException(status_code=400, detail=f"Refund exceeds client outstanding: {float(client.outstanding):.2f}")
+
+    refund = B2BRefund(
+        refund_number=refund_number,
+        client_id=client.id,
+        user_id=current_user.id,
+        subtotal=subtotal,
+        discount=discount,
+        total=total,
+        notes=(data.notes or "").strip() or None,
+    )
+    db.add(refund); db.flush()
+
+    for item in data.items:
+        product = db.query(Product).filter(Product.id == item.product_id).first()
+        line_total = round(item.qty * item.unit_price, 2)
+        db.add(B2BRefundItem(
+            refund_id=refund.id,
+            product_id=product.id,
+            qty=item.qty,
+            unit_price=item.unit_price,
+            total=line_total,
+        ))
+        before = float(product.stock)
+        after  = before + item.qty
+        product.stock = after
+        db.add(StockMove(
+            product_id=product.id, type="in", qty=float(item.qty),
+            user_id=current_user.id,
+            qty_before=before, qty_after=after,
+            ref_type="b2b_refund", ref_id=refund.id,
+            note=f"B2B refund {refund_number} - {client.name}",
+        ))
+
+    client.outstanding = Decimal(str(max(0, float(client.outstanding) - total)))
+
+    note = (data.notes or "").strip()
+    desc = f"B2B client refund - {refund_number} - {client.name}"
+    if note:
+        desc += f" - {note}"
+    _post_journal(db, desc, "b2b_refund", [
+        ("2200", total, 0),
+        ("1100", 0, total),
+    ], user_id=current_user.id)
+
+    db.commit()
+    return {
+        "ok": True,
+        "refund_id": refund.id,
+        "refund_number": refund_number,
+        "client": client.name,
+        "subtotal": subtotal,
+        "discount": discount,
+        "discount_pct": discount_pct,
+        "amount": total,
+        "outstanding": float(client.outstanding),
+    }
 
 
 # ── STATS ──────────────────────────────────────────────
@@ -618,7 +745,10 @@ def get_stats(db: Session = Depends(get_db)):
     return {
         "total_clients":     db.query(func.count(B2BClient.id)).filter(B2BClient.is_active == True).scalar() or 0,
         "total_outstanding": float(db.query(func.sum(B2BClient.outstanding)).filter(B2BClient.is_active == True).scalar() or 0),
-        "unpaid_invoices":   db.query(func.count(B2BInvoice.id)).filter(B2BInvoice.status.in_(["unpaid","partial"])).scalar() or 0,
+        "unpaid_invoices":   db.query(func.count(B2BInvoice.id)).filter(
+            B2BInvoice.status.in_(["unpaid","partial"]),
+            B2BInvoice.invoice_type.in_(["cash", "full_payment"]),
+        ).scalar() or 0,
         "active_consign":    db.query(func.count(Consignment.id)).filter(Consignment.status == "active").scalar() or 0,
     }
 
@@ -626,6 +756,69 @@ def get_stats(db: Session = Depends(get_db)):
 def products_list(db: Session = Depends(get_db)):
     products = db.query(Product).filter(Product.is_active == True).order_by(Product.name).all()
     return [{"id": p.id, "name": p.name, "sku": p.sku, "price": float(p.price), "stock": float(p.stock), "unit": p.unit} for p in products]
+
+@router.get("/api/refund-products/{client_id}")
+def refund_products(client_id: int, db: Session = Depends(get_db)):
+    client = db.query(B2BClient).filter(B2BClient.id == client_id, B2BClient.is_active == True).first()
+    if not client:
+        raise HTTPException(status_code=404, detail="Client not found")
+
+    latest_prices = {}
+    items = (
+        db.query(B2BInvoiceItem, B2BInvoice)
+        .join(B2BInvoice, B2BInvoice.id == B2BInvoiceItem.invoice_id)
+        .filter(B2BInvoice.client_id == client_id)
+        .order_by(B2BInvoice.created_at.desc(), B2BInvoice.id.desc(), B2BInvoiceItem.id.desc())
+        .all()
+    )
+    for item, invoice in items:
+        if item.product_id not in latest_prices:
+            latest_prices[item.product_id] = float(item.unit_price)
+
+    products = db.query(Product).filter(Product.is_active == True).order_by(Product.name).all()
+    return [
+        {
+            "id": p.id,
+            "name": p.name,
+            "sku": p.sku,
+            "price": latest_prices.get(p.id, float(p.price)),
+            "stock": float(p.stock),
+            "unit": p.unit,
+        }
+        for p in products
+    ]
+
+@router.get("/api/refunds")
+def get_refunds(client_id: int = None, db: Session = Depends(get_db)):
+    query = db.query(B2BRefund)
+    if client_id:
+        query = query.filter(B2BRefund.client_id == client_id)
+    refunds = query.order_by(B2BRefund.created_at.desc(), B2BRefund.id.desc()).all()
+    return [
+        {
+            "id": r.id,
+            "refund_number": r.refund_number,
+            "client": r.client.name if r.client else "—",
+            "client_id": r.client_id,
+            "subtotal": float(r.subtotal),
+            "discount": float(r.discount),
+            "discount_pct": round(float(r.discount) / float(r.subtotal) * 100, 1) if float(r.subtotal) > 0 else 0,
+            "total": float(r.total),
+            "notes": r.notes or "",
+            "created_at": r.created_at.strftime("%Y-%m-%d %H:%M") if r.created_at else "—",
+            "items": [
+                {
+                    "product": item.product.name if item.product else "—",
+                    "sku": item.product.sku if item.product else "—",
+                    "qty": float(item.qty),
+                    "unit_price": float(item.unit_price),
+                    "total": float(item.total),
+                }
+                for item in r.items
+            ],
+        }
+        for r in refunds
+    ]
 
 
 @router.get("/invoice/{invoice_id}/print", response_class=HTMLResponse)
@@ -827,8 +1020,8 @@ table.totals .amount {{ text-align: right; font-family: monospace; font-weight: 
     </table>
 
     <div class="logo-block">
-        <div class="company-name">🌿 HABIBA</div>
-        <div class="company-sub">Organic Farm</div>
+        <img src="/static/Logo.png" alt="Habiba" style="height:120px;object-fit:contain;">
+        <div class="company-name">Habiba Organic Farm</div>
         <div class="company-sub" style="margin-top:4px">Commercial registry: 126278</div>
         <div class="company-sub">Tax ID: 560042604</div>
     </div>
@@ -907,6 +1100,274 @@ table.totals .amount {{ text-align: right; font-family: monospace; font-weight: 
 </html>"""
 
 
+@router.get("/refund/{refund_id}/print", response_class=HTMLResponse)
+def print_refund(refund_id: int, db: Session = Depends(get_db)):
+    refund = db.query(B2BRefund).filter(B2BRefund.id == refund_id).first()
+    if not refund:
+        raise HTTPException(status_code=404, detail="Refund not found")
+
+    client = refund.client
+    rows_html = ""
+    for item in refund.items:
+        product_name = item.product.name if item.product else "—"
+        sku = item.product.sku if item.product else "—"
+        rows_html += f"""
+        <tr>
+            <td>{product_name}<div style='font-size:11px;color:#666'>{sku}</div></td>
+            <td class="center">{float(item.qty):.0f}</td>
+            <td class="center">{float(item.unit_price):.2f}</td>
+            <td class="right">{float(item.total):.2f}</td>
+        </tr>"""
+
+    subtotal = float(refund.subtotal)
+    discount = float(refund.discount)
+    total = float(refund.total)
+    discount_pct = round(discount / subtotal * 100, 1) if subtotal > 0 else 0
+    client_name = client.name if client else "—"
+    client_code = f"C{str(client.id).zfill(4)}" if client else "—"
+
+    return f"""<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<title>Refund {refund.refund_number}</title>
+<style>
+* {{ box-sizing: border-box; margin: 0; padding: 0; }}
+body {{
+    font-family: Arial, sans-serif;
+    font-size: 13px;
+    color: #111;
+    background: white;
+    padding: 30px;
+    max-width: 800px;
+    margin: 0 auto;
+}}
+.header-top {{
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    margin-bottom: 16px;
+}}
+.inv-meta {{ font-size: 13px; }}
+.inv-meta td {{ padding: 2px 8px 2px 0; }}
+.inv-meta .label {{ color: #555; }}
+.logo-block {{
+    text-align: center;
+    flex: 1;
+}}
+.logo-block img {{
+    height: 70px;
+    object-fit: contain;
+}}
+.company-name {{
+    font-size: 18px;
+    font-weight: 900;
+    color: #2a7a2a;
+    letter-spacing: 1px;
+    margin-bottom: 2px;
+}}
+.company-sub {{
+    font-size: 11px;
+    color: #555;
+}}
+.customer-block {{
+    margin-bottom: 16px;
+    font-size: 13px;
+}}
+.customer-block td {{ padding: 2px 12px 2px 0; }}
+table.items {{
+    width: 100%;
+    border-collapse: collapse;
+    margin-bottom: 0;
+}}
+table.items th {{
+    background: #2a7a2a;
+    color: white;
+    padding: 8px 12px;
+    text-align: left;
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: .5px;
+}}
+table.items th.center {{ text-align: center; }}
+table.items th.right  {{ text-align: right; }}
+table.items td {{
+    padding: 9px 12px;
+    border-bottom: 1px solid #e0e0e0;
+    font-size: 13px;
+}}
+table.items td.center {{ text-align: center; }}
+table.items td.right  {{ text-align: right; font-family: monospace; }}
+table.items tbody tr:nth-child(even) {{ background: #f7f7f7; }}
+.totals-wrap {{
+    display: flex;
+    justify-content: flex-end;
+    margin-top: 0;
+}}
+table.totals {{
+    border-collapse: collapse;
+    min-width: 280px;
+    border: 1px solid #ddd;
+}}
+table.totals td {{
+    padding: 8px 14px;
+    font-size: 13px;
+    border-bottom: 1px solid #eee;
+}}
+table.totals .label {{ color: #444; }}
+table.totals .amount {{ text-align: right; font-family: monospace; font-weight: 600; }}
+.total-final {{ background: #2a7a2a; color: white; font-weight: 700; font-size: 15px; }}
+.total-final .amount {{ color: white; }}
+.discount-row {{ color: #c0392b; }}
+.footer-sign {{
+    display: flex;
+    justify-content: space-between;
+    margin-top: 40px;
+    padding-top: 16px;
+    border-top: 1px solid #ddd;
+    font-size: 12px;
+    color: #555;
+}}
+.sign-block {{ min-width: 180px; }}
+.sign-line {{
+    border-bottom: 1px solid #aaa;
+    margin-top: 30px;
+    margin-bottom: 4px;
+}}
+.page-footer {{
+    text-align: center;
+    margin-top: 30px;
+    font-size: 11px;
+    color: #888;
+    border-top: 1px solid #eee;
+    padding-top: 10px;
+    font-style: italic;
+}}
+.status-stamp {{
+    display: inline-block;
+    border: 2px solid #fb923c;
+    color: #fb923c;
+    padding: 3px 10px;
+    border-radius: 4px;
+    font-weight: 700;
+    font-size: 11px;
+    letter-spacing: 1px;
+    transform: rotate(-5deg);
+    margin-left: 10px;
+    vertical-align: middle;
+}}
+.print-btn {{
+    display: inline-flex; align-items: center; gap: 8px;
+    background: #2a7a2a; color: white; border: none;
+    padding: 10px 20px; border-radius: 8px;
+    font-size: 14px; font-weight: 700; cursor: pointer;
+    margin-right: 8px;
+}}
+.back-btn {{
+    display: inline-flex; align-items: center; gap: 8px;
+    background: #eee; color: #333; border: none;
+    padding: 10px 20px; border-radius: 8px;
+    font-size: 14px; font-weight: 700; cursor: pointer;
+}}
+.no-print {{ margin-bottom: 20px; }}
+@media print {{
+    .no-print {{ display: none; }}
+    body {{ padding: 15px; }}
+}}
+</style>
+</head>
+<body>
+
+<div class="no-print">
+    <button class="print-btn" onclick="window.print()">🖨 Print Refund</button>
+    <button class="back-btn" onclick="history.back()">← Back</button>
+</div>
+
+<div class="header-top">
+    <table class="inv-meta">
+        <tr><td class="label">Refund No:</td><td><b>{refund.refund_number}</b></td></tr>
+        <tr><td class="label">Date:</td><td>{refund.created_at.strftime('%d-%b-%y') if refund.created_at else '—'}</td></tr>
+        <tr><td class="label">Status:</td><td><b>POSTED</b><span class="status-stamp">REFUND</span></td></tr>
+    </table>
+
+    <div class="logo-block">
+        <img src="/static/Logo.png" alt="Habiba" style="height:120px;object-fit:contain;">
+        <div class="company-name">Habiba Organic Farm</div>
+        <div class="company-sub" style="margin-top:4px">Commercial registry: 126278</div>
+        <div class="company-sub">Tax ID: 560042604</div>
+    </div>
+</div>
+
+<table class="customer-block">
+    <tr>
+        <td class="label" style="color:#555">Customer Code:</td>
+        <td><b>{client_code}</b></td>
+        <td width="40"></td>
+        <td class="label" style="color:#555">Document:</td>
+        <td><b>Client Refund</b></td>
+    </tr>
+    <tr>
+        <td class="label" style="color:#555">Customer Name:</td>
+        <td><b>{client_name}</b></td>
+        <td></td>
+        <td class="label" style="color:#555">Reference:</td>
+        <td>{refund.refund_number}</td>
+    </tr>
+</table>
+
+<div style="height:12px"></div>
+
+<table class="items">
+    <thead>
+        <tr>
+            <th>Item Description</th>
+            <th class="center">QTY</th>
+            <th class="center">Price</th>
+            <th class="right">Total</th>
+        </tr>
+    </thead>
+    <tbody>
+        {rows_html}
+    </tbody>
+</table>
+
+<div class="totals-wrap">
+    <table class="totals">
+        <tr>
+            <td class="label">Subtotal</td>
+            <td class="amount">ج.م. {subtotal:,.2f}</td>
+        </tr>
+        {f'<tr class="discount-row"><td class="label">Discount &nbsp; {discount_pct:.2f}%</td><td class="amount">ج.م. {discount:,.2f}</td></tr>' if discount > 0 else ""}
+        <tr class="total-final">
+            <td class="label">Refund Total</td>
+            <td class="amount">ج.م. {total:,.2f}</td>
+        </tr>
+    </table>
+</div>
+
+{f'<div style="margin-top:18px;font-size:12px;color:#555"><b>Notes:</b> {refund.notes}</div>' if refund.notes else ""}
+
+<div class="footer-sign">
+    <div class="sign-block">
+        <div class="sign-line"></div>
+        <div>Received by</div>
+    </div>
+    <div class="sign-block" style="text-align:right">
+        <div class="sign-line"></div>
+        <div>Approval</div>
+    </div>
+</div>
+
+<div class="page-footer">
+    Desert going green &nbsp;|&nbsp;
+    📷 habibaorganicfarm &nbsp;|&nbsp;
+    🌐 habibacommunity.com
+</div>
+
+</body>
+</html>"""
+
+
 # ── UI ─────────────────────────────────────────────────
 @router.get("/", response_class=HTMLResponse)
 def b2b_ui():
@@ -925,10 +1386,26 @@ def b2b_ui():
     --text:#f0f4ff;--sub:#8899bb;--muted:#445066;
     --sans:'Outfit',sans-serif;--mono:'JetBrains Mono',monospace;--r:12px;
 }
+body.light{
+    --bg:#f4f5ef;--surface:#f1f3eb;--card:#eceee6;--card2:#e4e6de;
+    --border:rgba(0,0,0,0.08);--border2:rgba(0,0,0,0.14);
+    --text:#1a1e14;--sub:#4a5040;--muted:#7b816f;
+}
+body.light nav{background:rgba(244,245,239,.92);}
+body.light .nav-link:hover{background:rgba(0,0,0,.05);}
+body.light tr:hover td{background:rgba(0,0,0,.03);}
+.mode-btn{display:flex;align-items:center;justify-content:center;width:36px;height:36px;border-radius:10px;border:1px solid var(--border);background:var(--card);color:var(--sub);font-size:16px;cursor:pointer;transition:all .2s;font-family:var(--sans);}
+.mode-btn:hover{border-color:var(--border2);transform:scale(1.06);}
+.topbar-right{display:flex;align-items:center;gap:12px;}
+.user-pill{display:flex;align-items:center;gap:10px;background:var(--card);border:1px solid var(--border);border-radius:40px;padding:7px 16px 7px 10px;}
+.user-avatar{width:28px;height:28px;background:linear-gradient(135deg,#7ecb6f,#d4a256);border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;color:#0a0c08;}
+.user-name{font-size:13px;font-weight:500;color:var(--sub);}
+.logout-btn{background:transparent;border:1px solid var(--border);color:var(--muted);font-family:var(--sans);font-size:12px;font-weight:500;padding:8px 16px;border-radius:8px;cursor:pointer;transition:all .2s;letter-spacing:.3px;}
+.logout-btn:hover{border-color:#c97a7a;color:#c97a7a;}
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0;}
 body{font-family:var(--sans);background:var(--bg);color:var(--text);min-height:100vh;font-size:14px;}
 nav{position:sticky;top:0;z-index:100;display:flex;align-items:center;gap:8px;padding:0 24px;height:58px;background:rgba(10,13,24,.92);backdrop-filter:blur(20px);border-bottom:1px solid var(--border);flex-wrap:wrap;}
-.logo{font-size:17px;font-weight:900;background:linear-gradient(135deg,#f59e0b,#fbbf24);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;margin-right:10px;text-decoration:none;display:flex;align-items:center;gap:8px;}
+.logo{font-size:17px;font-weight:900;background:linear-gradient(135deg,var(--green),var(--blue));-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;margin-right:10px;text-decoration:none;display:flex;align-items:center;gap:8px;}
 .nav-link{padding:7px 12px;border-radius:8px;color:var(--sub);font-size:12px;font-weight:600;text-decoration:none;transition:all .2s;white-space:nowrap;}
 .nav-link:hover{background:rgba(255,255,255,.05);color:var(--text);}
 .nav-link.active{background:rgba(77,159,255,.1);color:var(--blue);}
@@ -1057,6 +1534,14 @@ td.name{color:var(--text);font-weight:600;}
     <a href="/production/"class="nav-link">Production</a>
     <a href="/accounting/"class="nav-link">Accounting</a>
     <span class="nav-spacer"></span>
+    <div class="topbar-right">
+        <button class="mode-btn" id="mode-btn" onclick="toggleMode()" title="Toggle color mode">??</button>
+        <div class="user-pill">
+            <div class="user-avatar" id="user-avatar">A</div>
+            <span class="user-name" id="user-name">Admin</span>
+        </div>
+        <button class="logout-btn" onclick="logout()">Sign out</button>
+    </div>
 </nav>
 
 <div class="content">
@@ -1081,6 +1566,7 @@ td.name{color:var(--text);font-weight:600;}
         <div class="tabs">
             <button class="tab active" id="tab-clients"  onclick="switchTab('clients')">Clients</button>
             <button class="tab"        id="tab-invoices" onclick="switchTab('invoices')">Invoices</button>
+            <button class="tab"        id="tab-refunds"  onclick="switchTab('refunds')">Client Refund</button>
         </div>
         <div style="display:flex;gap:10px;">
             <button class="btn btn-blue"  id="btn-add-client"  onclick="openClientModal()">+ Add Client</button>
@@ -1133,6 +1619,62 @@ td.name{color:var(--text);font-weight:600;}
         </div>
     </div>
 
+    <!-- REFUNDS -->
+    <div id="section-refunds" style="display:none">
+        <div class="table-wrap" style="padding:18px">
+            <div class="modal-title" style="margin-bottom:4px">Client Refund</div>
+            <div class="modal-sub" style="margin-bottom:16px">Select a client, add returned products, and the total will be calculated automatically.</div>
+
+            <div class="form-row">
+                <div class="fld">
+                    <label>Client *</label>
+                    <select id="refund-client" onchange="onRefundClientChange()"></select>
+                </div>
+                <div class="fld">
+                    <label>Current Outstanding</label>
+                    <input id="refund-outstanding" readonly value="0.00">
+                </div>
+            </div>
+
+            <div style="font-size:11px;font-weight:700;letter-spacing:1px;text-transform:uppercase;color:var(--muted);margin-bottom:8px">Returned Products</div>
+            <div style="display:grid;grid-template-columns:2fr 80px 100px 30px;gap:8px;margin-bottom:6px;">
+                <span style="font-size:10px;color:var(--muted);font-weight:700;text-transform:uppercase;letter-spacing:1px">Product</span>
+                <span style="font-size:10px;color:var(--muted);font-weight:700;text-transform:uppercase;letter-spacing:1px">Qty</span>
+                <span style="font-size:10px;color:var(--muted);font-weight:700;text-transform:uppercase;letter-spacing:1px">Unit Price</span>
+                <span></span>
+            </div>
+            <div id="refund-items"></div>
+            <button class="add-item-btn" onclick="addRefundItem()">+ Add Product</button>
+
+            <div class="invoice-summary">
+                <div class="inv-row"><span style="color:var(--muted)">Subtotal</span><span style="font-family:var(--mono)" id="refund-subtotal">0.00</span></div>
+                <div class="inv-row"><span style="color:var(--muted)">Discount (<span id="refund-pct">0</span>%)</span><span style="font-family:var(--mono);color:var(--danger)" id="refund-discount">-0.00</span></div>
+                <div class="inv-row total"><span>Refund Total</span><span style="font-family:var(--mono);color:var(--warn)" id="refund-total">0.00</span></div>
+                <div class="inv-row"><span style="color:var(--muted)">Outstanding After Refund</span><span style="font-family:var(--mono);color:var(--green)" id="refund-after">0.00</span></div>
+            </div>
+
+            <div class="fld"><label>Notes</label><input id="refund-notes" placeholder="Optional return notes"></div>
+            <div class="modal-actions" style="padding:0;margin-top:8px">
+                <button class="btn-cancel" onclick="resetRefundForm()">Reset</button>
+                <button class="btn btn-warn" onclick="saveRefund()">Record Refund</button>
+            </div>
+        </div>
+
+        <div class="table-wrap" style="margin-top:18px">
+            <div style="padding:16px 18px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap">
+                <div>
+                    <div class="modal-title" style="margin-bottom:2px">Refund Records</div>
+                    <div class="modal-sub">Recent client refunds with discount, notes, and print access.</div>
+                </div>
+                <button class="btn btn-outline" onclick="loadRefundRecords()">Refresh Records</button>
+            </div>
+            <table>
+                <thead><tr><th>Refund #</th><th>Client</th><th>Subtotal</th><th>Discount</th><th>Total</th><th>Date</th><th>Actions</th></tr></thead>
+                <tbody id="refund-records-body"><tr><td colspan="7" style="text-align:center;color:var(--muted);padding:28px">Loading refunds...</td></tr></tbody>
+            </table>
+        </div>
+    </div>
+
     <!-- CONSIGNMENT SETTLE (inline cards, no separate tab) -->
     <div id="section-consignments" style="display:none"></div>
 </div>
@@ -1171,29 +1713,18 @@ td.name{color:var(--text);font-weight:600;}
 <div class="modal-bg" id="invoice-modal">
     <div class="modal">
         <div class="modal-title" id="inv-modal-title">New B2B Invoice</div>
-        <div class="modal-sub">Select client, deal type, and products</div>
+        <div class="modal-sub">Select client and products. Deal type and discount come from the client profile.</div>
         <div class="fld"><label>Client *</label>
             <select id="inv-client" onchange="onClientChange()"></select>
         </div>
-        <div style="font-size:11px;font-weight:700;letter-spacing:1px;text-transform:uppercase;color:var(--muted);margin-bottom:10px">Deal Type *</div>
-        <div class="type-selector">
-            <div class="type-opt cash selected" id="type-cash" onclick="selectType('cash')">
-                <div class="type-icon">💵</div>
-                <div class="type-label">Cash</div>
-                <div class="type-desc">Pay on delivery</div>
-                <div class="type-accounting">→ Revenue immediately</div>
+        <div class="form-row" style="margin-bottom:16px">
+            <div class="fld">
+                <label>Deal Type</label>
+                <input id="inv-deal-type" readonly>
             </div>
-            <div class="type-opt full_payment" id="type-full_payment" onclick="selectType('full_payment')">
-                <div class="type-icon">📋</div>
-                <div class="type-label">Full Payment</div>
-                <div class="type-desc">Invoice, pay later</div>
-                <div class="type-accounting">→ Deferred until paid</div>
-            </div>
-            <div class="type-opt consignment" id="type-consignment" onclick="selectType('consignment')">
-                <div class="type-icon">🔄</div>
-                <div class="type-label">Consignment</div>
-                <div class="type-desc">Pay what you sell</div>
-                <div class="type-accounting">→ Deferred until settled</div>
+            <div class="fld">
+                <label>Discount %</label>
+                <input id="inv-discount-pct" type="number" readonly value="0">
             </div>
         </div>
         <div style="font-size:11px;font-weight:700;letter-spacing:1px;text-transform:uppercase;color:var(--muted);margin-bottom:8px">Products</div>
@@ -1205,10 +1736,6 @@ td.name{color:var(--text);font-weight:600;}
         </div>
         <div id="inv-items"></div>
         <button class="add-item-btn" onclick="addInvItem()">+ Add Product</button>
-        <div class="fld">
-            <label>Discount % <span style="color:var(--muted);font-size:10px;font-weight:400">(auto-filled from client)</span></label>
-            <input id="inv-discount-pct" type="number" placeholder="0" min="0" max="100" step="0.5" value="0" oninput="updateSummary()">
-        </div>
         <div class="invoice-summary">
             <div class="inv-row"><span style="color:var(--muted)">Subtotal</span><span style="font-family:var(--mono)" id="s-subtotal">0.00</span></div>
             <div class="inv-row"><span style="color:var(--muted)">Discount (<span id="s-pct">0</span>%)</span><span style="font-family:var(--mono);color:var(--danger)" id="s-discount">-0.00</span></div>
@@ -1288,9 +1815,120 @@ td.name{color:var(--text);font-weight:600;}
 <div class="toast" id="toast"></div>
 
 <script>
+  const __erpToken = localStorage.getItem("token");
+  const __erpUserRole = localStorage.getItem("user_role") || "";
+  const __erpUserPermissions = new Set(
+      (localStorage.getItem("user_permissions") || "")
+          .split(",")
+          .map(p => p.trim())
+          .filter(Boolean)
+  );
+  const __erpFetch = window.fetch.bind(window);
+  window.fetch = (input, init = {}) => {
+      const url = typeof input === "string" ? input : (input && input.url) || "";
+      const isRelativeUrl = typeof url === "string" && !(url.startsWith("http://") || url.startsWith("https://"));
+      const headers = new Headers(init.headers || (input instanceof Request ? input.headers : undefined));
+      if(__erpToken && isRelativeUrl && !headers.has("Authorization")){
+          headers.set("Authorization", "Bearer " + __erpToken);
+      }
+      return __erpFetch(input, {...init, headers});
+  };
+  function setModeButton(isLight){
+    const btn = document.getElementById("mode-btn");
+    if(btn) btn.innerText = isLight ? "☀️" : "🌙";
+}
+function toggleMode(){
+    const isLight = document.body.classList.toggle("light");
+    localStorage.setItem("colorMode", isLight ? "light" : "dark");
+    setModeButton(isLight);
+}
+function initializeColorMode(){
+    const isLight = localStorage.getItem("colorMode") === "light";
+    document.body.classList.toggle("light", isLight);
+    setModeButton(isLight);
+}
+function setUserInfo(){
+    const name = localStorage.getItem("user_name") || "Admin";
+    const avatar = document.getElementById("user-avatar");
+    const userName = document.getElementById("user-name");
+    if(avatar) avatar.innerText = name.charAt(0).toUpperCase();
+    if(userName) userName.innerText = name;
+}
+function logout(){
+    localStorage.removeItem("token");
+    localStorage.removeItem("user_name");
+    localStorage.removeItem("user_role");
+    localStorage.removeItem("user_permissions");
+    window.location.href = "/";
+}
+  function requirePageAccess(permission){
+      if(!__erpToken){
+          window.location.href = "/";
+          throw new Error("Not authenticated");
+      }
+      if(__erpUserRole === "admin" || __erpUserPermissions.has(permission)) return;
+      document.body.innerHTML = `<div style="display:flex;align-items:center;justify-content:center;height:100vh;flex-direction:column;gap:16px;color:#445066;font-family:'Outfit',sans-serif;background:#060810"><div style="font-size:48px">🔒</div><div style="font-size:20px;font-weight:800;color:#f0f4ff">Access Restricted</div><div style="font-size:14px">You do not have permission to open this page.</div><a href="/home" style="color:#00ff9d;text-decoration:none;font-weight:700">Back to Home</a></div>`;
+      throw new Error("Access denied");
+  }
+  function applyNavPermissions(){
+      const navPermissions = {
+          "/home": null,
+          "/dashboard": "page_dashboard",
+          "/pos": "page_pos",
+          "/b2b/": "page_b2b",
+          "/inventory/": "page_inventory",
+          "/products/": "page_products",
+          "/customers-mgmt/": "page_customers",
+          "/suppliers/": "page_suppliers",
+          "/production/": "page_production",
+          "/farm/": "page_farm",
+          "/hr/": "page_hr",
+          "/accounting/": "page_accounting",
+          "/reports/": "page_reports",
+          "/import": "page_import",
+          "/users/": "admin_only"
+      };
+      document.querySelectorAll("a.nav-link[href]").forEach(link => {
+          const href = link.getAttribute("href");
+          const requirement = navPermissions[href];
+          if(requirement === undefined || requirement === null) return;
+          if(requirement === "admin_only"){
+              if(__erpUserRole !== "admin") link.style.display = "none";
+              return;
+          }
+          if(__erpUserRole !== "admin" && !__erpUserPermissions.has(requirement)){
+              link.style.display = "none";
+          }
+      });
+  }
+  function hasPermission(permission){
+      return __erpUserRole === "admin" || __erpUserPermissions.has(permission);
+  }
+  function configureB2BPermissions(){
+      if(!hasPermission("tab_b2b_clients")){
+          let el = document.getElementById("tab-clients");
+          if(el) el.style.display = "none";
+      }
+    if(!hasPermission("tab_b2b_invoices")){
+          let el = document.getElementById("tab-invoices");
+          if(el) el.style.display = "none";
+          let refundEl = document.getElementById("tab-refunds");
+          if(refundEl) refundEl.style.display = "none";
+      }
+      if(!hasPermission("tab_b2b_clients") && hasPermission("tab_b2b_invoices")){
+          setTimeout(() => switchTab("invoices"), 0);
+      }
+  }
+  requirePageAccess("page_b2b");
+  applyNavPermissions();
+  initializeColorMode();
+  setUserInfo();
+  configureB2BPermissions();
 let allProducts   = [];
+let refundProducts = [];
 let allClients    = [];
 let allInvoices   = [];
+let allRefunds    = [];
 let selectedType  = "cash";
 let editingClientId  = null;
 let editingInvoiceId = null;
@@ -1318,7 +1956,14 @@ async function loadStats(){
 
 /* ── TABS ── */
 function switchTab(tab){
-    ["clients","invoices","consignments"].forEach(t=>{
+    const required = {
+        clients: "tab_b2b_clients",
+        invoices: "tab_b2b_invoices",
+        refunds: "tab_b2b_invoices",
+        consignments: "tab_b2b_consignment",
+    };
+    if(required[tab] && !hasPermission(required[tab])) return;
+    ["clients","invoices","refunds","consignments"].forEach(t=>{
         let el = document.getElementById("section-"+t);
         if(el) el.style.display = t===tab?"":"none";
         let tb = document.getElementById("tab-"+t);
@@ -1327,6 +1972,7 @@ function switchTab(tab){
     document.getElementById("btn-add-client").style.display  = tab==="clients" ?"":"none";
     document.getElementById("btn-new-invoice").style.display = tab==="invoices"?"":"none";
     if(tab==="invoices") loadInvoices();
+    if(tab==="refunds")  prepareRefundTab();
 }
 
 /* ── CLIENTS ── */
@@ -1351,9 +1997,9 @@ async function loadClients(){
                 ${c.outstanding>0?c.outstanding.toFixed(2):"—"}
             </td>
             <td style="display:flex;gap:6px">
-                <button class="action-btn green" onclick="quickInvoice(${c.id})">+ Invoice</button>
+                ${hasPermission("tab_b2b_invoices")?`<button class="action-btn green" onclick="quickInvoice(${c.id})">+ Invoice</button>`:""}
                 <button class="action-btn" onclick="openEditClient(${c.id})">Edit</button>
-                <button class="action-btn danger" onclick="deleteClient(${c.id},'${c.name.replace(/'/g,"\\'")}')">Remove</button>
+                ${hasPermission("action_b2b_delete")?`<button class="action-btn danger" onclick="deleteClient(${c.id},'${c.name.replace(/'/g,"\\'")}')">Remove</button>`:""}
             </td>
         </tr>`).join("");
 }
@@ -1421,7 +2067,7 @@ function openInvoiceModal(preClientId=null){
     document.getElementById("inv-save-btn").innerText    = "Create Invoice";
     let sel = document.getElementById("inv-client");
     sel.innerHTML = allClients.map(c=>
-        `<option value="${c.id}" data-terms="${c.payment_terms}" data-discount="${c.credit_limit}" ${c.id===preClientId?"selected":""}>${c.name}</option>`
+        `<option value="${c.id}" data-terms="${c.payment_terms}" data-discount="${c.discount_pct}" ${c.id===preClientId?"selected":""}>${c.name}</option>`
     ).join("");
     document.getElementById("inv-items").innerHTML = "";
     document.getElementById("inv-notes").value = "";
@@ -1447,16 +2093,22 @@ function onClientChange(){
     let terms    = opt.dataset.terms    || "cash";
     let discount = parseFloat(opt.dataset.discount) || 0;
     selectType(terms);
+    document.getElementById("inv-deal-type").value = formatDealType(terms);
     document.getElementById("inv-discount-pct").value = discount;
     updateSummary();
 }
 
+function formatDealType(type){
+    const labels = {
+        cash: "Cash",
+        full_payment: "Full Payment",
+        consignment: "Consignment",
+    };
+    return labels[type] || type;
+}
+
 function selectType(type){
     selectedType = type;
-    ["cash","full_payment","consignment"].forEach(t=>{
-        let el = document.getElementById("type-"+t);
-        if(el) el.classList.toggle("selected", t===type);
-    });
 }
 
 function buildB2BProductDatalist(){
@@ -1483,6 +2135,90 @@ function resolveB2BProduct(inputEl){
         p.name.toLowerCase().includes(val)
     );
     return match||null;
+}
+
+function productLabel(product){
+    return `${product.sku} — ${product.name}`;
+}
+
+function productMatches(products, query){
+    let q = (query || "").trim().toLowerCase();
+    if(!q) return products.slice(0, 8);
+    let starts = [];
+    let contains = [];
+    products.forEach(p=>{
+        let sku  = (p.sku || "").toLowerCase();
+        let name = (p.name || "").toLowerCase();
+        if(sku.startsWith(q) || name.startsWith(q)) starts.push(p);
+        else if(sku.includes(q) || name.includes(q)) contains.push(p);
+    });
+    return starts.concat(contains).slice(0, 8);
+}
+
+function attachProductDropdown(inputEl, hiddenEl, hintEl, products, accent, onPick){
+    let box = document.createElement("div");
+    box.style.position = "absolute";
+    box.style.left = "0";
+    box.style.right = "0";
+    box.style.top = "calc(100% + 6px)";
+    box.style.background = "var(--card)";
+    box.style.border = "1px solid var(--border2)";
+    box.style.borderRadius = "10px";
+    box.style.boxShadow = "0 18px 40px rgba(0,0,0,.35)";
+    box.style.maxHeight = "240px";
+    box.style.overflowY = "auto";
+    box.style.zIndex = "35";
+    box.style.display = "none";
+    inputEl.parentElement.appendChild(box);
+
+    function hideBox(){
+        box.style.display = "none";
+    }
+
+    function draw(items){
+        if(!items.length){
+            box.innerHTML = `<div style="padding:10px 12px;color:var(--muted);font-size:12px">No matching products</div>`;
+            box.style.display = "block";
+            return;
+        }
+        box.innerHTML = items.map((p, i)=>`
+            <button type="button" data-idx="${i}" style="width:100%;text-align:left;background:transparent;border:none;padding:10px 12px;cursor:pointer;border-bottom:${i < items.length-1 ? "1px solid var(--border)" : "none"};font-family:var(--sans);">
+                <div style="display:flex;justify-content:space-between;gap:10px;align-items:center">
+                    <div>
+                        <div style="font-size:13px;font-weight:700;color:var(--text)">${p.name}</div>
+                        <div style="font-family:var(--mono);font-size:11px;color:var(--muted)">${p.sku}</div>
+                    </div>
+                    <div style="text-align:right">
+                        <div style="font-family:var(--mono);font-size:12px;color:${accent}">${p.price.toFixed(2)}</div>
+                        <div style="font-size:10px;color:var(--muted)">stock ${p.stock.toFixed(0)} ${p.unit}</div>
+                    </div>
+                </div>
+            </button>
+        `).join("");
+        box.querySelectorAll("button[data-idx]").forEach(btn=>{
+            btn.addEventListener("mousedown", function(e){
+                e.preventDefault();
+                let p = items[parseInt(this.dataset.idx)];
+                inputEl.value = productLabel(p);
+                hiddenEl.value = p.id;
+                hintEl.innerText = `stock: ${p.stock.toFixed(0)} ${p.unit}`;
+                inputEl.style.borderColor = accent;
+                onPick(p);
+                hideBox();
+            });
+        });
+        box.style.display = "block";
+    }
+
+    inputEl.addEventListener("focus", function(){
+        draw(productMatches(products, this.value));
+    });
+    inputEl.addEventListener("input", function(){
+        draw(productMatches(products, this.value));
+    });
+    inputEl.addEventListener("blur", function(){
+        setTimeout(hideBox, 120);
+    });
 }
 
 function addInvItem(selectedId=null, qty=1, price=null){
@@ -1563,6 +2299,210 @@ function updateSummary(){
     document.getElementById("s-total").innerText    = total.toFixed(2);
 }
 
+/* ── REFUNDS ── */
+async function prepareRefundTab(){
+    let refundClients = await (await fetch("/b2b/api/clients")).json();
+    let sel = document.getElementById("refund-client");
+    if(!sel) return;
+    sel.innerHTML = refundClients.map(c=>
+        `<option value="${c.id}" data-outstanding="${c.outstanding}">${c.name}</option>`
+    ).join("");
+    if(!refundClients.length){
+        document.getElementById("refund-outstanding").value = "0.00";
+        document.getElementById("refund-pct").innerText = "0";
+        document.getElementById("refund-subtotal").innerText = "0.00";
+        document.getElementById("refund-discount").innerText = "-0.00";
+        document.getElementById("refund-total").innerText = "0.00";
+        document.getElementById("refund-after").innerText = "0.00";
+        document.getElementById("refund-items").innerHTML = "";
+        return;
+    }
+    await loadRefundProducts(parseInt(sel.value));
+    if(!document.getElementById("refund-items").children.length){
+        addRefundItem();
+    }
+    await onRefundClientChange();
+    loadRefundRecords();
+}
+
+async function onRefundClientChange(){
+    let sel = document.getElementById("refund-client");
+    let opt = sel.options[sel.selectedIndex];
+    let outstanding = opt ? (parseFloat(opt.dataset.outstanding) || 0) : 0;
+    let client = allClients.find(c => c.id === parseInt(opt?.value || "0"));
+    let discountPct = client ? (parseFloat(client.discount_pct) || 0) : 0;
+    document.getElementById("refund-outstanding").value = outstanding.toFixed(2);
+    document.getElementById("refund-pct").innerText = discountPct.toFixed(1);
+    if(opt && opt.value){
+        await loadRefundProducts(parseInt(opt.value));
+    }
+    updateRefundSummary();
+    loadRefundRecords();
+}
+
+async function loadRefundProducts(clientId){
+    let res = await fetch(`/b2b/api/refund-products/${clientId}`);
+    let data = await res.json();
+    refundProducts = Array.isArray(data) ? data : [];
+}
+
+function addRefundItem(selectedId=null, qty=1, price=null){
+    let div = document.createElement("div");
+    div.className = "item-row";
+    div.innerHTML = `
+        <div style="position:relative;flex:1;">
+            <input type="text" list="b2b-product-datalist"
+                class="b2b-prod-search"
+                placeholder="Search by name or SKU..."
+                autocomplete="off"
+                style="width:100%;background:var(--card2);border:1px solid var(--border2);border-radius:8px;padding:8px 10px;color:var(--text);font-family:var(--sans);font-size:13px;outline:none;transition:border-color .2s;">
+            <input type="hidden" class="b2b-prod-id">
+            <span class="b2b-stock-hint" style="position:absolute;right:8px;top:50%;transform:translateY(-50%);font-size:10px;color:var(--muted);pointer-events:none;"></span>
+        </div>
+        <input type="number" placeholder="1" min="0.001" step="any" value="${qty}" oninput="updateRefundSummary()"
+            style="background:var(--card2);border:1px solid var(--border2);border-radius:8px;padding:8px 10px;color:var(--text);font-family:var(--mono);font-size:13px;outline:none;width:80px;">
+        <input type="number" placeholder="0.00" min="0" step="any" value="${price||""}" oninput="updateRefundSummary()"
+            style="background:var(--card2);border:1px solid var(--border2);border-radius:8px;padding:8px 10px;color:var(--text);font-family:var(--mono);font-size:13px;outline:none;width:100px;">
+        <button class="rm-btn" onclick="this.closest('.item-row').remove();updateRefundSummary()">x</button>
+    `;
+    let searchInp = div.querySelector(".b2b-prod-search");
+    let hiddenId  = div.querySelector(".b2b-prod-id");
+    let stockHint = div.querySelector(".b2b-stock-hint");
+
+    if(selectedId){
+        let p = allProducts.find(x=>x.id===selectedId);
+        if(p){
+            searchInp.value = productLabel(p);
+            hiddenId.value  = p.id;
+            stockHint.innerText = `stock: ${p.stock.toFixed(0)} ${p.unit}`;
+            searchInp.style.borderColor = "rgba(255,181,71,.45)";
+        }
+    }
+
+    let priceInp = div.querySelectorAll("input[type=number]")[1];
+    attachProductDropdown(
+        searchInp,
+        hiddenId,
+        stockHint,
+        refundProducts,
+        "rgba(255,181,71,.45)",
+        function(p){
+            priceInp.value = p.price.toFixed(2);
+            updateRefundSummary();
+        }
+    );
+    searchInp.addEventListener("input", function(){
+        let p = refundProducts.find(x=>
+            productLabel(x).toLowerCase() === this.value.trim().toLowerCase() ||
+            (x.sku || "").toLowerCase() === this.value.trim().toLowerCase() ||
+            (x.name || "").toLowerCase() === this.value.trim().toLowerCase()
+        );
+        if(p){
+            hiddenId.value = p.id;
+            stockHint.innerText = `stock: ${p.stock.toFixed(0)} ${p.unit}`;
+            priceInp.value = p.price.toFixed(2);
+            this.style.borderColor = "rgba(255,181,71,.45)";
+        } else {
+            hiddenId.value = "";
+            stockHint.innerText = "";
+        }
+        updateRefundSummary();
+    });
+    searchInp.addEventListener("blur", function(){
+        if(!hiddenId.value && this.value.trim()) this.style.borderColor = "rgba(255,77,109,.5)";
+    });
+
+    document.getElementById("refund-items").appendChild(div);
+    buildB2BProductDatalist();
+    if(price) updateRefundSummary();
+}
+
+function updateRefundSummary(){
+    let rows = document.querySelectorAll("#refund-items .item-row");
+    let subtotal = 0;
+    rows.forEach(row=>{
+        let qty   = parseFloat(row.querySelectorAll("input[type=number]")[0].value)||0;
+        let price = parseFloat(row.querySelectorAll("input[type=number]")[1].value)||0;
+        subtotal += qty * price;
+    });
+    let pct = parseFloat(document.getElementById("refund-pct").innerText)||0;
+    let discount = subtotal * pct / 100;
+    let total = Math.max(0, subtotal - discount);
+    let outstanding = parseFloat(document.getElementById("refund-outstanding").value)||0;
+    let after = Math.max(0, outstanding - total);
+    document.getElementById("refund-subtotal").innerText = subtotal.toFixed(2);
+    document.getElementById("refund-discount").innerText = "-" + discount.toFixed(2);
+    document.getElementById("refund-total").innerText = total.toFixed(2);
+    document.getElementById("refund-after").innerText = after.toFixed(2);
+}
+
+function resetRefundForm(){
+    document.getElementById("refund-notes").value = "";
+    document.getElementById("refund-items").innerHTML = "";
+    addRefundItem();
+    onRefundClientChange();
+}
+
+async function saveRefund(){
+    let client_id = parseInt(document.getElementById("refund-client").value);
+    if(!client_id){ showToast("Select a client"); return; }
+    let rows = document.querySelectorAll("#refund-items .item-row");
+    let items = [];
+    for(let row of rows){
+        let product_id = parseInt(row.querySelector(".b2b-prod-id").value)||0;
+        let qty        = parseFloat(row.querySelectorAll("input[type=number]")[0].value)||0;
+        let unit_price = parseFloat(row.querySelectorAll("input[type=number]")[1].value)||0;
+        if(!product_id){ showToast("Select a product for all rows"); return; }
+        if(qty<=0){ showToast("Refund quantity must be greater than 0"); return; }
+        items.push({product_id, qty, unit_price});
+    }
+    if(!items.length){ showToast("Add at least one returned product"); return; }
+    let res = await fetch("/b2b/api/refunds", {
+        method: "POST",
+        headers: {"Content-Type":"application/json"},
+        body: JSON.stringify({
+            client_id,
+            notes: document.getElementById("refund-notes").value.trim() || null,
+            items,
+        }),
+    });
+    let data = await res.json();
+    if(data.detail){ showToast("Error: " + data.detail); return; }
+    showToast(`${data.refund_number} recorded for ${data.client} - ${data.amount.toFixed(2)} EGP`);
+    resetRefundForm();
+    await loadClients();
+    await loadStats();
+    await prepareRefundTab();
+}
+
+async function loadRefundRecords(){
+    let sel = document.getElementById("refund-client");
+    let clientId = parseInt(sel?.value || "0");
+    let url = `/b2b/api/refunds${clientId ? "?client_id="+clientId : ""}`;
+    allRefunds = await (await fetch(url)).json();
+    renderRefundRecords(allRefunds);
+}
+
+function renderRefundRecords(refunds){
+    let body = document.getElementById("refund-records-body");
+    if(!body) return;
+    if(!refunds.length){
+        body.innerHTML = `<tr><td colspan="7" style="text-align:center;color:var(--muted);padding:28px">No refund records yet.</td></tr>`;
+        return;
+    }
+    body.innerHTML = refunds.map(r=>`
+        <tr>
+            <td style="font-family:var(--mono);font-size:12px;color:var(--warn)">${r.refund_number}</td>
+            <td class="name">${r.client}</td>
+            <td style="font-family:var(--mono)">${r.subtotal.toFixed(2)}</td>
+            <td style="font-family:var(--mono);color:${r.discount>0?"var(--danger)":"var(--muted)"}">${r.discount>0?`${r.discount.toFixed(2)} (${r.discount_pct.toFixed(1)}%)`:"—"}</td>
+            <td style="font-family:var(--mono);font-weight:700;color:var(--warn)">${r.total.toFixed(2)}</td>
+            <td style="font-size:12px;color:var(--muted)">${r.created_at}</td>
+            <td><div style="display:flex;gap:6px;flex-wrap:wrap"><button class="action-btn" onclick="window.open('/b2b/refund/${r.id}/print','_blank')">Print</button></div></td>
+        </tr>
+    `).join("");
+}
+
 async function openEditInvoice(id){
     let data=await (await fetch("/b2b/api/invoices?limit=500")).json();
     let invoice=data.invoices.find(i=>i.id===id);
@@ -1572,10 +2512,9 @@ async function openEditInvoice(id){
     document.getElementById("inv-save-btn").innerText    = "Save Changes";
     let sel = document.getElementById("inv-client");
     sel.innerHTML = allClients.map(c=>
-        `<option value="${c.id}" data-terms="${c.payment_terms}" data-discount="${c.credit_limit}" ${c.id===invoice.client_id?"selected":""}>${c.name}</option>`
+        `<option value="${c.id}" data-terms="${c.payment_terms}" data-discount="${c.discount_pct}" ${c.id===invoice.client_id?"selected":""}>${c.name}</option>`
     ).join("");
-    selectType(invoice.invoice_type);
-    document.getElementById("inv-discount-pct").value = invoice.discount_pct;
+    onClientChange();
     document.getElementById("inv-notes").value        = invoice.notes;
     document.getElementById("inv-items").innerHTML = "";
     invoice.items.forEach(item=>{ addInvItem(item.product_id, item.qty, item.unit_price); });
@@ -1598,7 +2537,8 @@ async function saveInvoice(){
     }
     if(!items.length){ showToast("Add at least one product"); return; }
     let body={
-        client_id, invoice_type:selectedType,
+        client_id,
+        invoice_type:selectedType,
         payment_method:selectedType,
         discount_pct:parseFloat(document.getElementById("inv-discount-pct").value)||0,
         notes:document.getElementById("inv-notes").value.trim()||null,
@@ -1652,7 +2592,7 @@ function renderInvoices(invoices){
     document.getElementById("invoices-body").innerHTML = invoices.map(i=>{
         let actionBtns=`<div style="display:flex;gap:5px;flex-wrap:wrap">
             <button class="action-btn" onclick="window.open('/b2b/invoice/${i.id}/print','_blank')">🖨 Print</button>
-            ${isAdmin?`<button class="action-btn danger" onclick="deleteInvoice(${i.id},'${i.invoice_number}')">Delete</button>`:""}
+            ${(isAdmin || hasPermission("action_b2b_delete"))?`<button class="action-btn danger" onclick="deleteInvoice(${i.id},'${i.invoice_number}')">Delete</button>`:""}
         </div>`;
         return `<tr>
             <td style="font-family:var(--mono);font-size:12px;color:var(--blue)">${i.invoice_number}</td>
@@ -1857,3 +2797,5 @@ init();
 </script>
 </body>
 </html>"""
+
+

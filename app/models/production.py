@@ -52,12 +52,14 @@ class ProductionBatch(Base):
     id           = Column(Integer, primary_key=True, index=True)
     batch_number = Column(String(30), unique=True, index=True)
     recipe_id    = Column(Integer, ForeignKey("recipes.id"), nullable=True)
+    user_id      = Column(Integer, ForeignKey("users.id"), nullable=True)
     status       = Column(String(20), default="completed")
     waste_pct    = Column(Numeric(5, 2), default=0)
     notes        = Column(Text)
     created_at   = Column(DateTime(timezone=True), server_default=func.now())
 
     recipe  = relationship("Recipe", back_populates="batches")
+    user    = relationship("User")
     inputs  = relationship("BatchInput",  back_populates="batch", cascade="all, delete-orphan")
     outputs = relationship("BatchOutput", back_populates="batch", cascade="all, delete-orphan")
 

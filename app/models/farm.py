@@ -23,6 +23,7 @@ class FarmDelivery(Base):
     id             = Column(Integer, primary_key=True, index=True)
     delivery_number= Column(String(30), unique=True, index=True)
     farm_id        = Column(Integer, ForeignKey("farms.id"), nullable=False)
+    user_id        = Column(Integer, ForeignKey("users.id"), nullable=True)
     delivery_date  = Column(Date, nullable=False)
     received_by    = Column(String(150))
     quality_notes  = Column(Text)
@@ -30,6 +31,7 @@ class FarmDelivery(Base):
     created_at     = Column(DateTime(timezone=True), server_default=func.now())
 
     farm  = relationship("Farm", back_populates="deliveries")
+    user  = relationship("User")
     items = relationship("FarmDeliveryItem", back_populates="delivery",
                          cascade="all, delete-orphan")
 

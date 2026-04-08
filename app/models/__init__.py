@@ -7,6 +7,6 @@ from app.models.inventory  import StockMove
 from app.models.hr         import Employee, Attendance, Payroll
 from app.models.accounting import Account, Journal, JournalEntry
 from app.models.production import Recipe, RecipeInput, RecipeOutput, ProductionBatch, BatchInput, BatchOutput
-from app.models.b2b        import B2BClient, B2BInvoice, B2BInvoiceItem, Consignment, ConsignmentItem
+from app.models.b2b        import B2BClient, B2BInvoice, B2BInvoiceItem, Consignment, ConsignmentItem, B2BRefund, B2BRefundItem
 from app.models.farm import Farm, FarmDelivery, FarmDeliveryItem
 from app.models.spoilage import SpoilageRecord
