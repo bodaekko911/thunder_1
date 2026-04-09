@@ -8,6 +8,8 @@ from pydantic import BaseModel
 from app.database import get_db
 from app.models.customer import Customer
 from app.models.invoice import Invoice
+from app.models.refund import RetailRefund
+from app.core.log import record
 
 router = APIRouter(prefix="/customers-mgmt", tags=["Customers"])
 
@@ -50,14 +52,18 @@ def get_customers(
         inv_total = db.query(func.sum(Invoice.total)).filter(
             Invoice.customer_id == c.id, Invoice.status == "paid"
         ).scalar() or 0
+        ref_total = db.query(func.sum(RetailRefund.total)).filter(
+            RetailRefund.customer_id == c.id
+        ).scalar() or 0
         result.append({
-            "id":        c.id,
-            "name":      c.name,
-            "phone":     c.phone or "—",
-            "email":     c.email or "—",
-            "address":   c.address or "—",
-            "invoices":  inv_count,
-            "total_spent": float(inv_total),
+            "id":          c.id,
+            "name":        c.name,
+            "phone":       c.phone or "—",
+            "email":       c.email or "—",
+            "address":     c.address or "—",
+            "invoices":    inv_count,
+            "total_spent": max(0.0, float(inv_total) - float(ref_total)),
+            "ref_total":   float(ref_total),
         })
 
     return {"total": total, "items": result}
@@ -69,20 +75,42 @@ def get_customer_invoices(customer_id: int, db: Session = Depends(get_db)):
         db.query(Invoice)
         .filter(Invoice.customer_id == customer_id)
         .order_by(Invoice.created_at.desc())
+        .limit(30)
+        .all()
+    )
+    refunds = (
+        db.query(RetailRefund)
+        .filter(RetailRefund.customer_id == customer_id)
+        .order_by(RetailRefund.created_at.desc())
         .limit(20)
         .all()
     )
-    return [
-        {
+    rows = []
+    for i in invoices:
+        rows.append({
+            "type":           "invoice",
             "id":             i.id,
-            "invoice_number": i.invoice_number,
+            "ref_number":     i.invoice_number or f"#{i.id}",
             "total":          float(i.total),
             "status":         i.status,
-            "payment_method": i.payment_method,
+            "payment_method": i.payment_method or "cash",
             "created_at":     i.created_at.strftime("%Y-%m-%d %H:%M") if i.created_at else "—",
-        }
-        for i in invoices
-    ]
+            "sort_key":       i.created_at.isoformat() if i.created_at else "",
+        })
+    for r in refunds:
+        rows.append({
+            "type":           "refund",
+            "id":             r.id,
+            "ref_number":     r.refund_number,
+            "total":          -float(r.total),
+            "status":         "refunded",
+            "payment_method": r.refund_method,
+            "reason":         r.reason or "—",
+            "created_at":     r.created_at.strftime("%Y-%m-%d %H:%M") if r.created_at else "—",
+            "sort_key":       r.created_at.isoformat() if r.created_at else "",
+        })
+    rows.sort(key=lambda x: x["sort_key"], reverse=True)
+    return rows
 
 
 @router.post("/api/add")
@@ -90,7 +118,11 @@ def add_customer(data: CustomerCreate, db: Session = Depends(get_db)):
     if data.phone and db.query(Customer).filter(Customer.phone == data.phone).first():
         raise HTTPException(status_code=400, detail="Phone number already exists")
     c = Customer(**data.model_dump())
-    db.add(c); db.commit(); db.refresh(c)
+    db.add(c); db.flush()
+    record(db, "Customers", "add_customer",
+           f"Added customer: {c.name}" + (f" — {c.phone}" if c.phone else ""),
+           ref_type="customer", ref_id=c.id)
+    db.commit(); db.refresh(c)
     return {"id": c.id, "name": c.name}
 
 
@@ -101,6 +133,9 @@ def edit_customer(customer_id: int, data: CustomerUpdate, db: Session = Depends(
         raise HTTPException(status_code=404, detail="Customer not found")
     for k, v in data.model_dump(exclude_unset=True).items():
         setattr(c, k, v)
+    record(db, "Customers", "edit_customer",
+           f"Edited customer: {c.name}",
+           ref_type="customer", ref_id=customer_id)
     db.commit()
     return {"ok": True}
 
@@ -110,6 +145,9 @@ def delete_customer(customer_id: int, db: Session = Depends(get_db)):
     c = db.query(Customer).filter(Customer.id == customer_id).first()
     if not c:
         raise HTTPException(status_code=404, detail="Customer not found")
+    record(db, "Customers", "delete_customer",
+           f"Deleted customer: {c.name}",
+           ref_type="customer", ref_id=customer_id)
     db.delete(c); db.commit()
     return {"ok": True}
 
@@ -667,28 +705,44 @@ async function openHistory(id, name, invCount, totalSpent){
     document.getElementById("side-bg").classList.add("open");
     document.getElementById("side-panel").classList.add("open");
 
-    let invoices = await (await fetch(`/customers-mgmt/api/invoices/${id}`)).json();
+    let rows = await (await fetch(`/customers-mgmt/api/invoices/${id}`)).json();
 
-    if(!invoices.length){
+    if(!rows.length){
         document.getElementById("side-body").innerHTML =
-            `<div style="color:var(--muted);font-size:13px;padding:20px 0">No invoices yet</div>`;
+            `<div style="color:var(--muted);font-size:13px;padding:20px 0">No activity yet</div>`;
         return;
     }
 
-    document.getElementById("side-body").innerHTML = invoices.map(i => `
-        <a class="inv-card" href="/invoice/${i.id}" target="_blank">
+    document.getElementById("side-body").innerHTML = rows.map(i => {
+        const isRefund = i.type === "refund";
+        const numColor = isRefund ? "var(--danger)" : "var(--green)";
+        const numText  = isRefund ? "−" + Math.abs(i.total).toFixed(2) : i.total.toFixed(2);
+        const statusColor = i.status === "paid" ? "var(--green)"
+            : i.status === "refunded" ? "var(--danger)"
+            : "var(--warn)";
+        const cardStyle = isRefund
+            ? "border-color:rgba(255,77,109,.25);background:rgba(255,77,109,.04);"
+            : "";
+        const refundBadge = isRefund
+            ? `<div style="font-size:10px;font-weight:700;color:var(--danger);letter-spacing:.5px;margin-top:2px">↩ REFUND${i.reason && i.reason !== "—" ? " · "+i.reason : ""}</div>`
+            : "";
+        const href = isRefund
+            ? `/refunds/print/${i.id}`
+            : `/invoice/${i.id}`;
+        return `
+        <a class="inv-card" href="${href}" target="_blank" style="${cardStyle}">
             <div>
-                <div class="inv-num">${i.invoice_number || "#"+i.id}</div>
+                <div class="inv-num" style="color:${isRefund ? "var(--danger)" : ""}">${i.ref_number}</div>
                 <div class="inv-date">${i.created_at}</div>
                 <div class="inv-method">${i.payment_method}</div>
+                ${refundBadge}
             </div>
             <div style="text-align:right">
-                <div class="inv-total">${i.total.toFixed(2)}</div>
-                <div style="font-size:11px;color:${i.status==='paid'?'var(--green)':'var(--warn)'};margin-top:4px">
-                    ${i.status}
-                </div>
+                <div class="inv-total" style="color:${numColor}">${numText}</div>
+                <div style="font-size:11px;color:${statusColor};margin-top:4px">${i.status}</div>
             </div>
-        </a>`).join("");
+        </a>`;
+    }).join("");
 }
 
 function closeSide(){
@@ -714,5 +768,3 @@ load();
 </body>
 </html>
 """
-
-

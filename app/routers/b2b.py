@@ -9,6 +9,7 @@ from datetime import date, datetime
 
 from app.database import get_db
 from app.core.permissions import get_current_user
+from app.core.log import record
 from app.models.b2b import B2BClient, B2BInvoice, B2BInvoiceItem, Consignment, ConsignmentItem, B2BRefund, B2BRefundItem
 from app.models.product import Product
 from app.models.inventory import StockMove
@@ -361,6 +362,9 @@ def create_invoice(data: InvoiceCreate, db: Session = Depends(get_db), current_u
                 unit_price=item.unit_price,
             ))
 
+    record(db, "B2B", "create_invoice",
+           f"B2B invoice {invoice_number} — {client.name} — {total:.2f} — {invoice_type}",
+           user=current_user, ref_type="b2b_invoice", ref_id=invoice.id)
     db.commit(); db.refresh(invoice)
     return {"id": invoice.id, "invoice_number": invoice_number, "total": total}
 
@@ -460,6 +464,9 @@ def edit_invoice(invoice_id: int, data: InvoiceCreate, db: Session = Depends(get
                     unit_price=item.unit_price,
                 ))
 
+    record(db, "B2B", "edit_invoice",
+           f"Edited B2B invoice {invoice.invoice_number} — {total:.2f}",
+           user=current_user, ref_type="b2b_invoice", ref_id=invoice_id)
     db.commit()
     return {"ok": True, "invoice_number": invoice.invoice_number, "total": total}
 
@@ -469,6 +476,7 @@ def delete_invoice(invoice_id: int, db: Session = Depends(get_db)):
     invoice = db.query(B2BInvoice).filter(B2BInvoice.id == invoice_id).first()
     if not invoice:
         raise HTTPException(status_code=404, detail="Invoice not found")
+    inv_num = invoice.invoice_number
     _reverse_invoice_stock(invoice, db)
     _reverse_invoice_journal(invoice, db)
     cons = db.query(Consignment).filter(Consignment.invoice_id == invoice_id).first()
@@ -477,6 +485,9 @@ def delete_invoice(invoice_id: int, db: Session = Depends(get_db)):
             db.delete(ci)
         db.delete(cons)
     db.delete(invoice)
+    record(db, "B2B", "delete_invoice",
+           f"Deleted B2B invoice {inv_num} — stock and journal reversed",
+           ref_type="b2b_invoice", ref_id=invoice_id)
     db.commit()
     return {"ok": True}
 
@@ -2797,5 +2808,3 @@ init();
 </script>
 </body>
 </html>"""
-
-

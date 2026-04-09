@@ -9,24 +9,9 @@ from typing import Optional
 from app.database import get_db, Base
 from app.models.user import User
 from app.core.security import hash_password, verify_password, decode_token
+from app.core.log import ActivityLog, record as log_record
 
 router = APIRouter(prefix="/users", tags=["Users"])
-
-
-# ── Activity Log Model ──────────────────────────────────
-class ActivityLog(Base):
-    __tablename__ = "activity_logs"
-    __table_args__ = {"extend_existing": True}
-    id          = Column(Integer, primary_key=True, index=True)
-    user_id     = Column(Integer, nullable=True)
-    user_name   = Column(String(150))
-    user_role   = Column(String(50))
-    action      = Column(String(100))
-    module      = Column(String(50))
-    description = Column(Text)
-    ref_type    = Column(String(50))
-    ref_id      = Column(String(50))
-    created_at  = Column(DateTime(timezone=True), server_default=func.now())
 
 
 # ── Schemas ─────────────────────────────────────────────
@@ -339,11 +324,21 @@ td.name{color:var(--text);font-weight:600;}
 .lm-POS{background:rgba(0,255,157,.1);color:var(--green);}
 .lm-B2B{background:rgba(77,159,255,.1);color:var(--blue);}
 .lm-HR{background:rgba(168,85,247,.1);color:var(--purple);}
+.lm-Accounting{background:rgba(255,181,71,.1);color:var(--warn);}
 .lm-ACCOUNTING{background:rgba(255,181,71,.1);color:var(--warn);}
+.lm-Inventory{background:rgba(45,212,191,.1);color:var(--teal);}
 .lm-INVENTORY{background:rgba(45,212,191,.1);color:var(--teal);}
+.lm-Production{background:rgba(132,204,22,.1);color:var(--lime);}
 .lm-PRODUCTION{background:rgba(132,204,22,.1);color:var(--lime);}
+.lm-Users{background:rgba(255,77,109,.1);color:var(--danger);}
 .lm-USERS{background:rgba(255,77,109,.1);color:var(--danger);}
+.lm-Products{background:rgba(255,181,71,.1);color:var(--warn);}
 .lm-PRODUCTS{background:rgba(255,181,71,.1);color:var(--warn);}
+.lm-Suppliers{background:rgba(251,146,60,.1);color:#fb923c;}
+.lm-Customers{background:rgba(236,72,153,.1);color:#ec4899;}
+.lm-Farm{background:rgba(34,197,94,.1);color:#22c55e;}
+.lm-Refunds{background:rgba(255,77,109,.15);color:var(--danger);}
+.lm-Auth{background:rgba(99,102,241,.1);color:#818cf8;}
 .modal-bg{position:fixed;inset:0;z-index:500;background:rgba(0,0,0,.75);backdrop-filter:blur(4px);display:none;align-items:center;justify-content:center;}
 .modal-bg.open{display:flex;}
 .modal{background:var(--card);border:1px solid var(--border2);border-radius:16px;padding:28px;width:620px;max-width:95vw;max-height:90vh;overflow-y:auto;animation:modalIn .2s ease;}
@@ -445,14 +440,19 @@ td.name{color:var(--text);font-weight:600;}
             </div>
             <select class="sel" id="log-module" onchange="loadLogs()">
                 <option value="">All Modules</option>
+                <option value="Auth">Auth</option>
                 <option value="POS">POS</option>
+                <option value="Refunds">Refunds</option>
                 <option value="B2B">B2B</option>
+                <option value="Customers">Customers</option>
+                <option value="Suppliers">Suppliers</option>
+                <option value="Products">Products</option>
+                <option value="Inventory">Inventory</option>
+                <option value="Production">Production</option>
+                <option value="Farm">Farm</option>
                 <option value="HR">HR</option>
-                <option value="ACCOUNTING">Accounting</option>
-                <option value="INVENTORY">Inventory</option>
-                <option value="PRODUCTION">Production</option>
-                <option value="PRODUCTS">Products</option>
-                <option value="USERS">Users</option>
+                <option value="Accounting">Accounting</option>
+                <option value="Users">Users</option>
             </select>
             <select class="sel" id="log-user" onchange="loadLogs()">
                 <option value="">All Users</option>
@@ -986,4 +986,3 @@ loadUsers();
 </script>
 </body>
 </html>"""
-

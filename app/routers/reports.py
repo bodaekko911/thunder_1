@@ -13,6 +13,7 @@ from app.models.b2b import B2BClient, B2BInvoice, B2BInvoiceItem
 from app.models.inventory import StockMove
 from app.models.farm import Farm, FarmDelivery, FarmDeliveryItem
 from app.models.spoilage import SpoilageRecord
+from app.models.refund import RetailRefund
 from app.models.production import ProductionBatch, BatchInput, BatchOutput
 from app.models.accounting import Account, Journal, JournalEntry
 
@@ -75,18 +76,28 @@ def sales_report(date_from: Optional[str] = None, date_to: Optional[str] = None,
     d_from, d_to = parse_dates(date_from, date_to)
     pos_invoices = db.query(Invoice).filter(Invoice.created_at >= d_from, Invoice.created_at <= d_to, Invoice.status == "paid").all()
     b2b_invoices = db.query(B2BInvoice).filter(B2BInvoice.created_at >= d_from, B2BInvoice.created_at <= d_to).all()
-    pos_total = sum(float(i.total) for i in pos_invoices)
-    b2b_total = sum(float(i.amount_paid) for i in b2b_invoices)
+    refunds      = db.query(RetailRefund).filter(RetailRefund.created_at >= d_from, RetailRefund.created_at <= d_to).all()
+
+    pos_total    = sum(float(i.total) for i in pos_invoices)
+    b2b_total    = sum(float(i.amount_paid) for i in b2b_invoices)
+    refund_total = sum(float(r.total) for r in refunds)
+    pos_total    = max(0, pos_total - refund_total)
+
     daily = {}
     for i in pos_invoices:
         d = i.created_at.strftime("%Y-%m-%d")
-        daily.setdefault(d, {"pos": 0, "b2b": 0})
+        daily.setdefault(d, {"pos": 0, "b2b": 0, "refunds": 0})
         daily[d]["pos"] += float(i.total)
     for i in b2b_invoices:
         d = i.created_at.strftime("%Y-%m-%d")
-        daily.setdefault(d, {"pos": 0, "b2b": 0})
+        daily.setdefault(d, {"pos": 0, "b2b": 0, "refunds": 0})
         daily[d]["b2b"] += float(i.amount_paid)
-    daily_list = [{"date": k, "pos": round(v["pos"],2), "b2b": round(v["b2b"],2), "total": round(v["pos"]+v["b2b"],2)} for k,v in sorted(daily.items())]
+    for r in refunds:
+        d = r.created_at.strftime("%Y-%m-%d")
+        daily.setdefault(d, {"pos": 0, "b2b": 0, "refunds": 0})
+        daily[d]["refunds"] += float(r.total)
+    daily_list = [{"date": k, "pos": round(max(0, v["pos"] - v["refunds"]), 2), "b2b": round(v["b2b"], 2), "refunds": round(v["refunds"], 2), "total": round(max(0, v["pos"] - v["refunds"]) + v["b2b"], 2)} for k, v in sorted(daily.items())]
+
     product_sales = {}
     for inv in pos_invoices:
         for item in db.query(InvoiceItem).filter(InvoiceItem.invoice_id == inv.id).all():
@@ -127,10 +138,25 @@ def sales_report(date_from: Optional[str] = None, date_to: Optional[str] = None,
             "balance_due": float(inv.total) - float(inv.amount_paid),
         })
 
-    return {"pos_total": round(pos_total,2), "b2b_total": round(b2b_total,2),
-            "grand_total": round(pos_total+b2b_total,2), "pos_count": len(pos_invoices), "b2b_count": len(b2b_invoices),
-            "daily": daily_list, "top_products": [{"name":k,"qty":round(v["qty"],2),"revenue":round(v["revenue"],2)} for k,v in top],
-            "pos_records": pos_records, "b2b_records": b2b_records,
+    # Detailed refund records
+    refund_records = []
+    for r in sorted(refunds, key=lambda x: x.created_at, reverse=True):
+        refund_records.append({
+            "refund_number":  r.refund_number,
+            "customer":       r.customer.name if r.customer else "—",
+            "datetime":       r.created_at.strftime("%Y-%m-%d %H:%M") if r.created_at else "—",
+            "processed_by":   r.user.name if r.user else "—",
+            "reason":         r.reason or "—",
+            "refund_method":  r.refund_method,
+            "total":          float(r.total),
+        })
+
+    return {"pos_total": round(pos_total, 2), "b2b_total": round(b2b_total, 2),
+            "refund_total": round(refund_total, 2),
+            "grand_total": round(pos_total + b2b_total, 2),
+            "pos_count": len(pos_invoices), "b2b_count": len(b2b_invoices), "refund_count": len(refunds),
+            "daily": daily_list, "top_products": [{"name": k, "qty": round(v["qty"], 2), "revenue": round(v["revenue"], 2)} for k, v in top],
+            "pos_records": pos_records, "b2b_records": b2b_records, "refund_records": refund_records,
             "date_from": d_from.strftime("%Y-%m-%d"), "date_to": d_to.strftime("%Y-%m-%d")}
 
 @router.get("/export/sales")
@@ -656,6 +682,7 @@ def transactions_report(
                     "payment_method": inv.payment_method or "cash",
                     "invoice_total":  float(inv.total),
                     "status":         inv.status,
+                    "row_type":       "sale",
                 })
 
     # B2B
@@ -684,15 +711,50 @@ def transactions_report(
                     "payment_method": inv.payment_method or inv.invoice_type,
                     "invoice_total":  float(inv.total),
                     "status":         inv.status,
+                    "row_type":       "sale",
+                })
+
+    # Refunds
+    if not source or source == "refund":
+        from app.models.refund import RetailRefund, RetailRefundItem
+        from app.models.user import User
+        for ref in db.query(RetailRefund).filter(RetailRefund.created_at >= d_from, RetailRefund.created_at <= d_to).order_by(RetailRefund.created_at.desc()).all():
+            customer = db.query(Customer).filter(Customer.id == ref.customer_id).first()
+            cname    = customer.name if customer else "—"
+            user     = db.query(User).filter(User.id == ref.user_id).first() if ref.user_id else None
+            items    = db.query(RetailRefundItem).filter(RetailRefundItem.refund_id == ref.id).all()
+            for item in items:
+                product = db.query(Product).filter(Product.id == item.product_id).first()
+                rows.append({
+                    "date":           ref.created_at.strftime("%Y-%m-%d %H:%M") if ref.created_at else "—",
+                    "invoice_number": ref.refund_number,
+                    "user_name":      user.name if user else "—",
+                    "source":         "Refund",
+                    "customer":       cname,
+                    "sku":            product.sku if product else "—",
+                    "product":        product.name if product else "—",
+                    "qty":            -float(item.qty),
+                    "unit_price":     float(item.unit_price),
+                    "line_total":     -float(item.total),
+                    "discount":       0,
+                    "discount_pct":   0,
+                    "payment_method": ref.refund_method,
+                    "invoice_total":  -float(ref.total),
+                    "status":         "refunded",
+                    "row_type":       "refund",
+                    "reason":         ref.reason or "—",
                 })
 
     rows.sort(key=lambda x: x["date"], reverse=True)
+    total_revenue  = sum(r["line_total"] for r in rows)
+    total_qty      = sum(r["qty"]        for r in rows)
+    total_discount = sum(r["discount"]   for r in rows)
     return {
         "rows":           rows,
         "total_rows":     len(rows),
-        "total_revenue":  round(sum(r["line_total"] for r in rows), 2),
-        "total_qty":      round(sum(r["qty"]        for r in rows), 2),
-        "total_discount": round(sum(r["discount"]   for r in rows), 2),
+        "total_revenue":  round(total_revenue,  2),
+        "total_qty":      round(total_qty,       2),
+        "total_discount": round(total_discount,  2),
     }
 
 @router.get("/export/transactions")
@@ -919,15 +981,20 @@ td.mono{font-family:var(--mono);}
             <button class="btn btn-print" onclick="window.print()">🖨 Print</button>
         </div>
         <div class="stats-row">
-            <div class="stat-card sc-green"><div class="stat-label">Total Revenue</div><div class="stat-value sv-green" id="s-total">—</div></div>
+            <div class="stat-card sc-green"><div class="stat-label">Net Revenue</div><div class="stat-value sv-green" id="s-total">—</div></div>
             <div class="stat-card sc-blue" ><div class="stat-label">POS Revenue</div> <div class="stat-value sv-blue"  id="s-pos">—</div></div>
             <div class="stat-card sc-orange"><div class="stat-label">B2B Revenue</div><div class="stat-value sv-orange" id="s-b2b">—</div></div>
-            <div class="stat-card sc-teal" ><div class="stat-label">POS Orders</div>  <div class="stat-value sv-teal"  id="s-orders">—</div></div>
+            <div class="stat-card" style="border-color:rgba(255,77,109,.3);background:rgba(255,77,109,.04);position:relative;overflow:hidden;">
+                <div style="position:absolute;top:0;left:0;right:0;height:2px;background:linear-gradient(90deg,#ff4d6d,transparent)"></div>
+                <div class="stat-label" style="color:#ff4d6d">↩ Refunds</div>
+                <div class="stat-value" style="color:#ff4d6d;font-family:var(--mono)" id="s-refunds">—</div>
+                <div style="font-size:11px;color:rgba(255,77,109,.6);margin-top:4px" id="s-refund-count">— refunds</div>
+            </div>
         </div>
         <div class="two-col">
             <div class="table-wrap">
                 <div class="table-title">Daily Breakdown</div>
-                <table><thead><tr><th>Date</th><th>POS</th><th>B2B</th><th>Total</th></tr></thead>
+                <table><thead><tr><th>Date</th><th>POS</th><th>B2B</th><th style="color:#ff4d6d">Refunds</th><th>Net Total</th></tr></thead>
                 <tbody id="sales-daily"></tbody></table>
             </div>
             <div class="chart-card">
@@ -958,6 +1025,7 @@ td.mono{font-family:var(--mono);}
                 <option value="">All Sources</option>
                 <option value="pos">POS Only</option>
                 <option value="b2b">B2B Only</option>
+                <option value="refund">Refunds Only</option>
             </select>
             <button class="btn btn-lime" onclick="loadTransactions()">Apply</button>
             <div class="filter-sep"></div>
@@ -1358,34 +1426,42 @@ async function loadTransactions(){
         if(m.includes("cash"))                        return "var(--green)";
         if(m.includes("consign"))                     return "var(--teal)";
         if(m.includes("transfer"))                    return "var(--purple)";
+        if(m.includes("credit") || m.includes("exchange") || m.includes("refund")) return "var(--danger)";
         return "var(--sub)";
     };
     const statusColor = (s) => {
-        if(s==="paid")        return "var(--green)";
-        if(s==="unpaid")      return "var(--warn)";
-        if(s==="partial")     return "var(--blue)";
+        if(s==="paid")      return "var(--green)";
+        if(s==="unpaid")    return "var(--warn)";
+        if(s==="partial")   return "var(--blue)";
         if(s==="consignment") return "var(--teal)";
+        if(s==="refunded")  return "var(--danger)";
         return "var(--muted)";
     };
 
     document.getElementById("tx-body").innerHTML = data.rows.length
-        ? data.rows.map(r => `<tr>
-            <td class="mono" style="font-size:11px;white-space:nowrap">${r.date}</td>
-            <td class="mono" style="font-size:11px;color:var(--lime)">${r.invoice_number}</td>
-            <td style="font-size:11px;color:var(--sub)">${r.source}</td>
-            <td class="name" style="white-space:nowrap">${r.customer}</td>
-            <td style="font-size:12px;color:var(--muted);white-space:nowrap">${r.user_name}</td>
-            <td class="mono" style="font-size:11px;color:var(--muted)">${r.sku}</td>
-            <td style="font-weight:600;white-space:nowrap">${r.product}</td>
-            <td class="mono" style="color:var(--blue);font-weight:700">${r.qty.toFixed(2)}</td>
-            <td class="mono">${r.unit_price.toFixed(2)}</td>
-            <td class="mono" style="color:var(--green);font-weight:700">${r.line_total.toFixed(2)}</td>
-            <td class="mono" style="color:${r.discount>0?"var(--warn)":"var(--muted)"}">${r.discount>0?"-"+r.discount.toFixed(2):"—"}</td>
-            <td class="mono" style="color:${r.discount_pct>0?"var(--warn)":"var(--muted)"}">${r.discount_pct>0?r.discount_pct.toFixed(1)+"%":"—"}</td>
-            <td style="font-size:12px;font-weight:700;color:${payColor(r.payment_method)}">${r.payment_method}</td>
-            <td class="mono" style="font-weight:700">${r.invoice_total.toFixed(2)}</td>
-            <td><span style="font-size:11px;font-weight:700;padding:2px 8px;border-radius:20px;background:rgba(0,0,0,.2);color:${statusColor(r.status)}">${r.status}</span></td>
-          </tr>`).join("")
+        ? data.rows.map(r => {
+            const isRef = r.row_type === "refund";
+            const rowStyle = isRef ? 'style="background:rgba(255,77,109,.04);"' : '';
+            const numColor = isRef ? "var(--danger)" : "var(--green)";
+            const refBadge = isRef ? `<br><span style="font-size:9px;font-weight:800;letter-spacing:.5px;color:var(--danger);background:rgba(255,77,109,.15);padding:1px 5px;border-radius:4px">↩ REFUND</span>` : "";
+            return `<tr ${rowStyle}>
+                <td class="mono" style="font-size:11px;white-space:nowrap">${r.date}</td>
+                <td class="mono" style="font-size:11px;color:${isRef?"var(--danger)":"var(--lime)"}">${r.invoice_number}${refBadge}</td>
+                <td style="font-size:11px;color:${isRef?"var(--danger)":"var(--sub)"}">${r.source}</td>
+                <td class="name" style="white-space:nowrap">${r.customer}</td>
+                <td style="font-size:12px;color:var(--muted);white-space:nowrap">${r.user_name}</td>
+                <td class="mono" style="font-size:11px;color:var(--muted)">${r.sku}</td>
+                <td style="font-weight:600;white-space:nowrap">${r.product}${isRef&&r.reason?`<br><span style="font-size:10px;color:var(--muted);font-weight:400">${r.reason}</span>`:""}</td>
+                <td class="mono" style="color:${isRef?"var(--danger)":"var(--blue)"};font-weight:700">${r.qty.toFixed(2)}</td>
+                <td class="mono">${r.unit_price.toFixed(2)}</td>
+                <td class="mono" style="color:${numColor};font-weight:700">${isRef?"−":""}${Math.abs(r.line_total).toFixed(2)}</td>
+                <td class="mono" style="color:${r.discount>0?"var(--warn)":"var(--muted)"}">${r.discount>0?"-"+r.discount.toFixed(2):"—"}</td>
+                <td class="mono" style="color:${r.discount_pct>0?"var(--warn)":"var(--muted)"}">${r.discount_pct>0?r.discount_pct.toFixed(1)+"%":"—"}</td>
+                <td style="font-size:12px;font-weight:700;color:${payColor(r.payment_method)}">${r.payment_method}</td>
+                <td class="mono" style="font-weight:700;color:${isRef?"var(--danger)":"inherit"}">${isRef?"−":""}${Math.abs(r.invoice_total).toFixed(2)}</td>
+                <td><span style="font-size:11px;font-weight:700;padding:2px 8px;border-radius:20px;background:rgba(0,0,0,.2);color:${statusColor(r.status)}">${r.status}</span></td>
+              </tr>`;
+        }).join("")
         : `<tr><td colspan="15" style="text-align:center;color:var(--muted);padding:40px">No transactions in this period</td></tr>`;
 }
 
@@ -1393,21 +1469,23 @@ async function loadTransactions(){
 async function loadSales(){
     let r = getRange("sales-from","sales-to");
     let data = await (await fetch(`/reports/api/sales?date_from=${r.from}&date_to=${r.to}`)).json();
-    document.getElementById("s-total").innerText  = data.grand_total.toFixed(2);
-    document.getElementById("s-pos").innerText    = data.pos_total.toFixed(2);
-    document.getElementById("s-b2b").innerText    = data.b2b_total.toFixed(2);
-    document.getElementById("s-orders").innerText = data.pos_count;
+    document.getElementById("s-total").innerText   = data.grand_total.toFixed(2);
+    document.getElementById("s-pos").innerText     = data.pos_total.toFixed(2);
+    document.getElementById("s-b2b").innerText     = data.b2b_total.toFixed(2);
+    document.getElementById("s-refunds").innerText = data.refund_total > 0 ? "−" + data.refund_total.toFixed(2) : "0.00";
+    document.getElementById("s-refund-count").innerText = data.refund_count + " refund" + (data.refund_count !== 1 ? "s" : "") + "  ·  " + data.pos_count + " POS orders";
     setPrintDates("ph-sales-dates", data.date_from, data.date_to);
 
-    // Daily breakdown
+    // Daily breakdown with refund column
     document.getElementById("sales-daily").innerHTML = data.daily.length
         ? data.daily.map(d=>`<tr>
             <td class="mono">${d.date}</td>
             <td class="mono" style="color:var(--blue)">${d.pos.toFixed(2)}</td>
             <td class="mono" style="color:var(--orange)">${d.b2b.toFixed(2)}</td>
+            <td class="mono" style="color:#ff4d6d;font-weight:${d.refunds>0?700:400}">${d.refunds>0?"−"+d.refunds.toFixed(2):"—"}</td>
             <td class="mono" style="color:var(--green);font-weight:700">${d.total.toFixed(2)}</td>
           </tr>`).join("")
-        : `<tr><td colspan="4" style="text-align:center;color:var(--muted);padding:30px">No sales in this period</td></tr>`;
+        : `<tr><td colspan="5" style="text-align:center;color:var(--muted);padding:30px">No sales in this period</td></tr>`;
 
     // Top products
     let maxR = data.top_products.length ? data.top_products[0].revenue : 1;
@@ -1432,7 +1510,7 @@ async function loadSales(){
                 <td style="font-size:12px;color:var(--muted);white-space:nowrap">${inv.user_name}</td>
                 <td style="font-size:12px">${inv.payment}</td>
                 <td style="font-size:12px;color:var(--sub)">
-                    ${inv.items.map(it=>`<span style="display:inline-block;background:var(--card2);border:1px solid var(--border2);border-radius:5px;padding:1px 7px;margin:2px;white-space:nowrap">${it.qty % 1===0?it.qty.toFixed(0):it.qty.toFixed(2)} × ${it.name} <span style="color:var(--muted)">${it.total.toFixed(2)}</span></span>`).join("")}
+                    ${inv.items.map(it=>`<span style="display:inline-block;background:var(--card2);border:1px solid var(--border2);border-radius:5px;padding:1px 7px;margin:2px;white-space:nowrap">${it.qty%1===0?it.qty.toFixed(0):it.qty.toFixed(2)} × ${it.name} <span style="color:var(--muted)">${it.total.toFixed(2)}</span></span>`).join("")}
                 </td>
                 <td class="mono" style="text-align:right;font-weight:700;color:var(--green)">${inv.total.toFixed(2)}</td>
             </tr>`).join("");
@@ -1456,18 +1534,58 @@ async function loadSales(){
                 <td style="font-size:12px;color:var(--muted);white-space:nowrap">${inv.user_name}</td>
                 <td style="font-size:12px">${typeLabel[inv.invoice_type]||inv.invoice_type}</td>
                 <td style="font-size:12px;color:var(--sub)">
-                    ${inv.items.map(it=>`<span style="display:inline-block;background:var(--card2);border:1px solid var(--border2);border-radius:5px;padding:1px 7px;margin:2px;white-space:nowrap">${it.qty % 1===0?it.qty.toFixed(0):it.qty.toFixed(2)} × ${it.name} <span style="color:var(--muted)">${it.total.toFixed(2)}</span></span>`).join("")}
+                    ${inv.items.map(it=>`<span style="display:inline-block;background:var(--card2);border:1px solid var(--border2);border-radius:5px;padding:1px 7px;margin:2px;white-space:nowrap">${it.qty%1===0?it.qty.toFixed(0):it.qty.toFixed(2)} × ${it.name} <span style="color:var(--muted)">${it.total.toFixed(2)}</span></span>`).join("")}
                 </td>
                 <td class="mono" style="text-align:right;font-weight:700">${inv.total.toFixed(2)}</td>
                 <td class="mono" style="text-align:right;color:var(--green)">${inv.amount_paid.toFixed(2)}</td>
-                <td class="mono" style="text-align:right;color:${inv.balance_due>0?"var(--warn)":"var(--muted)"}">${inv.balance_due>0?inv.balance_due.toFixed(2):"—"}</td>
+                <td class="mono" style="text-align:right;color:${inv.balance_due>0?"var(--warn)":"var(--muted)"};font-weight:${inv.balance_due>0?700:400}">${inv.balance_due>0?inv.balance_due.toFixed(2):"—"}</td>
             </tr>`).join("");
     } else {
         b2bHtml += `<tr><td colspan="9" style="text-align:center;color:var(--muted);padding:24px">No B2B invoices</td></tr>`;
     }
     b2bHtml += `</tbody></table></div>`;
 
-    document.getElementById("sales-records").innerHTML = posHtml + b2bHtml;
+    // Refund records — red section
+    let refHtml = "";
+    if(data.refund_records && data.refund_records.length){
+        refHtml = `
+        <div style="margin-top:28px;display:flex;align-items:center;gap:14px;padding:14px 18px;background:rgba(255,77,109,.06);border:1px solid rgba(255,77,109,.2);border-radius:12px;">
+            <span style="font-size:22px">↩</span>
+            <div>
+                <div style="font-size:13px;font-weight:700;color:#ff4d6d;letter-spacing:.3px">Refunds — ${data.refund_records.length} refund${data.refund_records.length!==1?"s":""}</div>
+                <div style="font-size:11px;color:rgba(255,77,109,.6);margin-top:2px">Deducted from POS revenue</div>
+            </div>
+            <div style="margin-left:auto;font-family:var(--mono);font-size:22px;font-weight:800;color:#ff4d6d">−${data.refund_total.toFixed(2)}</div>
+        </div>
+        <div class="table-wrap" style="border-color:rgba(255,77,109,.18);">
+        <table>
+            <thead style="background:rgba(255,77,109,.05)">
+                <tr>
+                    <th style="color:#ff4d6d">Ref #</th>
+                    <th>Customer</th>
+                    <th>Date / Time</th>
+                    <th>Processed By</th>
+                    <th>Reason</th>
+                    <th>Method</th>
+                    <th style="text-align:right;color:#ff4d6d">Amount</th>
+                </tr>
+            </thead>
+            <tbody>
+            ${data.refund_records.map(r=>`
+                <tr>
+                    <td class="mono" style="font-size:11px;color:#ff4d6d;font-weight:700">${r.refund_number}</td>
+                    <td class="name">${r.customer}</td>
+                    <td class="mono" style="font-size:12px;color:var(--muted)">${r.datetime}</td>
+                    <td style="font-size:12px;color:var(--muted)">${r.processed_by}</td>
+                    <td style="font-size:12px;color:var(--sub)">${r.reason}</td>
+                    <td style="font-size:12px">${r.refund_method}</td>
+                    <td class="mono" style="text-align:right;font-weight:700;color:#ff4d6d">−${r.total.toFixed(2)}</td>
+                </tr>`).join("")}
+            </tbody>
+        </table></div>`;
+    }
+
+    document.getElementById("sales-records").innerHTML = posHtml + b2bHtml + refHtml;
 }
 
 /* ── B2B ── */
@@ -1713,6 +1831,3 @@ loadSales();
 </script>
 </body>
 </html>"""
-
-
-

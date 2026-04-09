@@ -15,7 +15,12 @@ app = FastAPI(title=settings.APP_NAME)
 
 app.mount("/static", StaticFiles(directory="app/static"), name="static")
 
-from app.routers import auth, pos, import_data, dashboard, products, customers, suppliers, inventory, hr, accounting, production, home, b2b
+from app.routers import (
+    auth, pos, import_data, dashboard, products, customers,
+    suppliers, inventory, hr, accounting, production, home,
+    b2b, farm, reports, users, refunds
+)
+
 app.include_router(auth.router)
 app.include_router(home.router)
 app.include_router(pos.router)
@@ -29,14 +34,11 @@ app.include_router(hr.router)
 app.include_router(accounting.router)
 app.include_router(production.router)
 app.include_router(b2b.router)
+app.include_router(farm.router)
+app.include_router(reports.router)
+app.include_router(users.router)
+app.include_router(refunds.router)
 
 @app.get("/health")
 def health():
     return {"status": "ok", "app": settings.APP_NAME}
-from app.routers import auth, pos, import_data, dashboard, products, customers, suppliers, inventory, hr, accounting, production, home, b2b, farm
-
-app.include_router(farm.router)
-from app.routers import reports
-app.include_router(reports.router)
-from app.routers import users
-app.include_router(users.router)

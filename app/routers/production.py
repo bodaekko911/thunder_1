@@ -8,6 +8,7 @@ from datetime import date as date_type
 
 from app.database import get_db
 from app.core.permissions import get_current_user
+from app.core.log import record as log_record
 from app.models.product import Product
 from app.models.inventory import StockMove
 from app.models.user import User
@@ -157,6 +158,9 @@ def create_batch(data: BatchCreate, db: Session = Depends(get_db), current_user:
         db.add(BatchOutput(batch_id=batch.id, product_id=product.id, qty=item.qty))
         db.add(StockMove(product_id=product.id, type="in", user_id=current_user.id, qty=item.qty, qty_before=before, qty_after=after, ref_type="production", ref_id=batch.id, note=f"Produced in {batch_number}"))
 
+    log_record(db, "Production", "create_batch",
+           f"Batch {batch_number} — {len(data.inputs)} input(s), {len(data.outputs)} output(s), waste {float(batch.waste_pct):.1f}%",
+           user=current_user, ref_type="production_batch", ref_id=batch.id)
     db.commit(); db.refresh(batch)
     return {"id": batch.id, "batch_number": batch_number, "waste_pct": float(batch.waste_pct)}
 
@@ -204,6 +208,9 @@ def edit_batch(batch_id: int, data: BatchCreate, db: Session = Depends(get_db), 
         before = float(product.stock); after = before + item.qty; product.stock = after
         db.add(BatchOutput(batch_id=batch.id, product_id=product.id, qty=item.qty))
         db.add(StockMove(product_id=product.id, type="in", user_id=current_user.id, qty=item.qty, qty_before=before, qty_after=after, ref_type="production", ref_id=batch.id, note=f"Produced in {batch.batch_number} (edited)"))
+    log_record(db, "Production", "edit_batch",
+           f"Edited batch {batch.batch_number} — waste {float(batch.waste_pct):.1f}%",
+           user=current_user, ref_type="production_batch", ref_id=batch.id)
     db.commit()
     return {"ok": True, "batch_number": batch.batch_number, "waste_pct": float(batch.waste_pct)}
 
@@ -223,6 +230,9 @@ def delete_batch(batch_id: int, db: Session = Depends(get_db)):
         if product:
             before = float(product.stock); after = before - float(item.qty); product.stock = after
             db.add(StockMove(product_id=product.id, type="out", qty=-float(item.qty), qty_before=before, qty_after=after, ref_type="production_reversal", ref_id=batch.id, note=f"Deleted batch — {batch.batch_number}"))
+    log_record(db, "Production", "delete_batch",
+           f"Deleted batch {batch.batch_number} — stock reversed",
+           ref_type="production_batch", ref_id=batch_id)
     db.delete(batch); db.commit()
     return {"ok": True}
 
@@ -282,6 +292,11 @@ def create_spoilage(data: SpoilageCreate, db: Session = Depends(get_db), current
                 db.add(JournalEntry(journal_id=journal.id, account_id=acc.id, debit=debit, credit=credit))
                 acc.balance += Decimal(str(debit)) - Decimal(str(credit))
     db.commit()
+    log_record(db, "Production", "create_spoilage",
+               f"Spoilage {ref} — {product.name} — qty: {data.qty}"
+               + (f" — {data.reason}" if data.reason else ""),
+               user=current_user, ref_type="spoilage", ref_id=record.id)
+    db.commit()
     return {"id": record.id, "ref_number": ref, "qty": data.qty, "product": product.name}
 
 @router.delete("/api/spoilage/{record_id}")
@@ -293,8 +308,12 @@ def delete_spoilage(record_id: int, db: Session = Depends(get_db)):
     if product:
         before = float(product.stock); after = before + float(record.qty); product.stock = after
         db.add(StockMove(product_id=product.id, type="in", qty=float(record.qty), qty_before=before, qty_after=after, ref_type="spoilage_reversal", ref_id=record.id, note=f"Spoilage deleted — {record.ref_number}"))
+    log_record(db, "Production", "delete_spoilage",
+               f"Deleted spoilage {record.ref_number} — stock restored",
+               ref_type="spoilage", ref_id=record_id)
     db.delete(record); db.commit()
     return {"ok": True}
+
 
 @router.get("/api/products-list")
 def products_list(db: Session = Depends(get_db)):
@@ -1430,5 +1449,3 @@ init();
 </script>
 </body>
 </html>"""
-
-

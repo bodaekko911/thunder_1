@@ -353,6 +353,17 @@ body {
                     <span class="card-arrow">↗</span>
                 </div>
             </a>
+<a href="/refunds/" class="module-card c-rose" data-permission="page_pos">
+                <div class="card-icon">↩</div>
+                <div class="card-body">
+                    <div class="card-name">Retail Refunds</div>
+                    <div class="card-desc">Process returns, restore stock, reverse accounting</div>
+                </div>
+                <div class="card-footer">
+                    <span class="card-tag">Returns</span>
+                    <span class="card-arrow">↗</span>
+                </div>
+            </a>
 
             <a href="/production/" class="module-card c-amber" data-permission="page_production">
                 <div class="card-icon">🏭</div>

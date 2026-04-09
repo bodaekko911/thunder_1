@@ -7,6 +7,7 @@ from pydantic import BaseModel
 from datetime import date
 
 from app.database import get_db
+from app.core.log import record
 from app.core.permissions import get_current_user
 from app.models.farm import Farm, FarmDelivery, FarmDeliveryItem
 from app.models.product import Product
@@ -147,6 +148,9 @@ def create_delivery(data: DeliveryCreate, db: Session = Depends(get_db), current
             note=f"{farm.name} — {number}",
         ))
 
+    record(db, "Farm", "create_delivery",
+           f"Delivery {number} from {farm.name} — {len(data.items)} product(s)",
+           user=current_user, ref_type="farm_delivery", ref_id=delivery.id)
     db.commit(); db.refresh(delivery)
     return {"id": delivery.id, "delivery_number": number, "items_count": len(data.items)}
 
@@ -207,6 +211,9 @@ def edit_delivery(delivery_id: int, data: DeliveryCreate, db: Session = Depends(
             note=f"{farm.name} — {delivery.delivery_number} (edited)",
         ))
 
+    record(db, "Farm", "edit_delivery",
+           f"Edited delivery {delivery.delivery_number}",
+           user=current_user, ref_type="farm_delivery", ref_id=delivery.id)
     db.commit()
     return {"ok": True, "delivery_number": delivery.delivery_number}
 
@@ -227,6 +234,9 @@ def delete_delivery(delivery_id: int, db: Session = Depends(get_db)):
                 ref_type="farm_intake_reversal", ref_id=delivery.id,
                 note=f"Deleted — {delivery.delivery_number}",
             ))
+    record(db, "Farm", "delete_delivery",
+           f"Deleted delivery {delivery.delivery_number} — stock reversed",
+           ref_type="farm_delivery", ref_id=delivery_id)
     db.delete(delivery)
     db.commit()
     return {"ok": True}
@@ -1034,5 +1044,3 @@ init();
 </body>
 </html>
 """
-
-

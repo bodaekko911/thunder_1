@@ -139,8 +139,9 @@ def create_purchase(data: PurchaseCreate, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="Supplier not found")
 
     # Generate purchase number
-    count = db.query(Purchase).count()
-    purchase_number = f"PO-{str(count + 1).zfill(5)}"
+    from sqlalchemy import func as sqlfunc
+    max_id = db.query(sqlfunc.max(Purchase.id)).scalar() or 0
+    purchase_number = f"PO-{str(max_id + 1).zfill(5)}"
 
     subtotal = 0
     line_items = []
@@ -953,5 +954,3 @@ init();
 </body>
 </html>
 """
-
-

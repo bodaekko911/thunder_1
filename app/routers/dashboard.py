@@ -12,6 +12,7 @@ from app.models.b2b import B2BClient, B2BInvoice
 from app.models.farm import FarmDelivery
 from app.models.spoilage import SpoilageRecord
 from app.models.production import ProductionBatch
+from app.models.refund import RetailRefund
 
 router = APIRouter(tags=["Dashboard"])
 
@@ -31,6 +32,17 @@ def dashboard_data(db: Session = Depends(get_db)):
         func.date(Invoice.created_at) >= month_s, Invoice.status == "paid").scalar() or 0)
     pos_year  = float(db.query(func.sum(Invoice.total)).filter(
         func.date(Invoice.created_at) >= year_s, Invoice.status == "paid").scalar() or 0)
+
+    # Subtract retail refunds from POS revenue
+    ref_today = float(db.query(func.sum(RetailRefund.total)).filter(
+        func.date(RetailRefund.created_at) == today).scalar() or 0)
+    ref_month = float(db.query(func.sum(RetailRefund.total)).filter(
+        func.date(RetailRefund.created_at) >= month_s).scalar() or 0)
+    ref_year  = float(db.query(func.sum(RetailRefund.total)).filter(
+        func.date(RetailRefund.created_at) >= year_s).scalar() or 0)
+    pos_today = max(0, pos_today - ref_today)
+    pos_month = max(0, pos_month - ref_month)
+    pos_year  = max(0, pos_year  - ref_year)
 
     invoices_today = db.query(func.count(Invoice.id)).filter(
         func.date(Invoice.created_at) == today).scalar() or 0
@@ -105,10 +117,13 @@ def dashboard_data(db: Session = Depends(get_db)):
         d = today - timedelta(days=i)
         pos = float(db.query(func.sum(Invoice.total)).filter(
             func.date(Invoice.created_at) == d, Invoice.status == "paid").scalar() or 0)
+        ref = float(db.query(func.sum(RetailRefund.total)).filter(
+            func.date(RetailRefund.created_at) == d).scalar() or 0)
+        pos = max(0, pos - ref)
         d_start = dt.combine(d, dt.min.time())
         d_end   = dt.combine(d, dt.max.time())
         b2b = journal_revenue(d_start, d_end)
-        last7.append({"date": str(d), "pos": round(pos,2), "b2b": round(b2b,2), "total": round(pos+b2b,2)})
+        last7.append({"date": str(d), "pos": round(pos,2), "b2b": round(b2b,2), "refunds": round(ref,2), "total": round(pos+b2b,2)})
 
     # ── TOP 10 PRODUCTS THIS MONTH ────────────────────
     top_products = (
@@ -131,9 +146,38 @@ def dashboard_data(db: Session = Depends(get_db)):
         .group_by(Invoice.payment_method).all()
     )
 
-    # ── RECENT TRANSACTIONS ───────────────────────────
-    recent = db.query(Invoice).filter(Invoice.status == "paid").order_by(
-        Invoice.created_at.desc()).limit(8).all()
+    # ── RECENT TRANSACTIONS (sales + refunds mixed, sorted by time) ──────────
+    recent_invoices = db.query(Invoice).filter(Invoice.status == "paid").order_by(
+        Invoice.created_at.desc()).limit(12).all()
+    recent_refunds = db.query(RetailRefund).order_by(
+        RetailRefund.created_at.desc()).limit(6).all()
+
+    recent_sales = []
+    for i in recent_invoices:
+        cust = db.query(Customer).filter(Customer.id == i.customer_id).first()
+        recent_sales.append({
+            "type":           "sale",
+            "invoice_number": i.invoice_number,
+            "customer":       cust.name if cust else "Walk-in",
+            "total":          float(i.total),
+            "method":         i.payment_method or "cash",
+            "time":           i.created_at.strftime("%H:%M") if i.created_at else "—",
+            "date":           i.created_at.strftime("%Y-%m-%d") if i.created_at else "",
+        })
+    for r in recent_refunds:
+        cust = db.query(Customer).filter(Customer.id == r.customer_id).first()
+        recent_sales.append({
+            "type":           "refund",
+            "invoice_number": r.refund_number,
+            "customer":       cust.name if cust else "—",
+            "total":          -float(r.total),
+            "method":         r.refund_method,
+            "time":           r.created_at.strftime("%H:%M") if r.created_at else "—",
+            "date":           r.created_at.strftime("%Y-%m-%d") if r.created_at else "",
+        })
+    # Sort combined list by date+time descending, take top 10
+    recent_sales.sort(key=lambda x: x["date"] + x["time"], reverse=True)
+    recent_sales = recent_sales[:10]
 
     return {
         # Revenue
@@ -147,6 +191,13 @@ def dashboard_data(db: Session = Depends(get_db)):
         "total_month":  round(total_month, 2),
         "total_year":   round(total_year, 2),
         "b2b_outstanding": round(b2b_outstanding, 2),
+        # Refunds
+        "ref_today":   round(ref_today, 2),
+        "ref_month":   round(ref_month, 2),
+        "ref_count_today": db.query(func.count(RetailRefund.id)).filter(
+            func.date(RetailRefund.created_at) == today).scalar() or 0,
+        "ref_count_month": db.query(func.count(RetailRefund.id)).filter(
+            func.date(RetailRefund.created_at) >= month_s).scalar() or 0,
         # Counts
         "invoices_today":   invoices_today,
         "invoices_month":   invoices_month,
@@ -167,16 +218,7 @@ def dashboard_data(db: Session = Depends(get_db)):
         "last7": last7,
         "top_products": [{"name":r.name,"qty":float(r.qty_sold),"revenue":float(r.revenue)} for r in top_products],
         "pay_methods":  [{"method":r.payment_method or "cash","count":r.count,"total":float(r.total)} for r in pay_methods],
-        "recent_sales": [
-            {
-                "invoice_number": i.invoice_number,
-                "customer": db.query(Customer).filter(Customer.id == i.customer_id).first().name if i.customer_id else "Walk-in",
-                "total": float(i.total),
-                "method": i.payment_method or "cash",
-                "time": i.created_at.strftime("%H:%M") if i.created_at else "—",
-            }
-            for i in recent
-        ],
+        "recent_sales": recent_sales,
     }
 
 
@@ -389,11 +431,12 @@ tr:hover td{background:rgba(255,255,255,.02);}
             <div class="stat-value orange" id="s-b2b-out">—</div>
             <div class="stat-sub" id="s-b2b-clients">— clients</div>
         </div>
-        <div class="stat purple">
-            <div class="stat-icon">👥</div>
-            <div class="stat-label">Total Customers</div>
-            <div class="stat-value purple" id="s-customers">—</div>
-            <div class="stat-sub">B2C clients</div>
+        <div class="stat" style="border-color:rgba(255,77,109,.25);background:rgba(255,77,109,.04);">
+            <div style="position:absolute;top:0;left:0;right:0;height:2px;background:linear-gradient(90deg,var(--danger),transparent);"></div>
+            <div class="stat-icon">↩</div>
+            <div class="stat-label" style="color:var(--danger)">Refunds This Month</div>
+            <div class="stat-value" style="color:var(--danger)" id="s-ref-month">—</div>
+            <div class="stat-sub" id="s-ref-sub" style="color:rgba(255,77,109,.6)">— refunds today: —</div>
         </div>
     </div>
 
@@ -432,6 +475,7 @@ tr:hover td{background:rgba(255,255,255,.02);}
             <div class="chart-legend">
                 <span><span class="legend-dot" style="background:var(--green)"></span>POS</span>
                 <span><span class="legend-dot" style="background:var(--blue)"></span>B2B</span>
+                <span><span class="legend-dot" style="background:var(--danger)"></span>Refunds</span>
             </div>
         </div>
         <div class="chart-wrap" id="chart-wrap"></div>
@@ -586,12 +630,17 @@ async function load(){
 
         // ── REVENUE STATS ──
         document.getElementById("s-today").innerText      = d.total_today.toFixed(2);
-        document.getElementById("s-today-orders").innerText = "POS " + d.pos_today.toFixed(0) + "  +  B2B " + d.b2b_today.toFixed(0);
+        document.getElementById("s-today-orders").innerText = "POS " + d.pos_today.toFixed(0) + "  +  B2B " + d.b2b_today.toFixed(0)
+            + (d.ref_today > 0 ? "  −  " + d.ref_today.toFixed(0) + " refunds" : "");
         document.getElementById("s-month").innerText      = d.total_month.toFixed(2);
-        document.getElementById("s-month-orders").innerText = "POS " + d.pos_month.toFixed(0) + "  +  B2B " + d.b2b_month.toFixed(0);
+        document.getElementById("s-month-orders").innerText = "POS " + d.pos_month.toFixed(0) + "  +  B2B " + d.b2b_month.toFixed(0)
+            + (d.ref_month > 0 ? "  −  " + d.ref_month.toFixed(0) + " refunds" : "");
         document.getElementById("s-b2b-out").innerText    = d.b2b_outstanding.toFixed(2);
         document.getElementById("s-b2b-clients").innerText= d.b2b_clients + " B2B clients";
-        document.getElementById("s-customers").innerText  = d.total_customers;
+
+        // ── REFUND CARD ──
+        document.getElementById("s-ref-month").innerText = d.ref_month > 0 ? "−" + d.ref_month.toFixed(2) : "0.00";
+        document.getElementById("s-ref-sub").innerText   = d.ref_count_month + " refunds this month  ·  today: −" + d.ref_today.toFixed(2);
 
         // ── OPERATIONS STATS ──
         document.getElementById("s-oos").innerText        = d.out_of_stock_count;
@@ -607,6 +656,7 @@ async function load(){
         document.getElementById("chart-wrap").innerHTML = d.last7.map(x => {
             let posH  = Math.round((x.pos / maxVal) * chartH);
             let b2bH  = Math.round((x.b2b / maxVal) * chartH);
+            let refH  = x.refunds ? Math.round((x.refunds / maxVal) * chartH) : 0;
             let dayLbl = new Date(x.date + "T12:00:00").toLocaleDateString("en-GB",{weekday:"short"});
             let isToday = x.date === new Date().toISOString().split("T")[0];
             return `<div class="bar-col">
@@ -614,6 +664,7 @@ async function load(){
                 <div class="bar-outer">
                     ${b2bH>0?`<div class="bar" style="height:${b2bH}px;background:var(--blue);opacity:.85;border-radius:3px 3px 0 0"></div>`:""}
                     ${posH>0?`<div class="bar" style="height:${posH}px;background:linear-gradient(180deg,var(--green),var(--lime));border-radius:3px 3px 0 0;${isToday?"box-shadow:0 0 12px rgba(0,255,157,.4)":""}"></div>`:""}
+                    ${refH>0?`<div class="bar" style="height:${refH}px;background:var(--danger);opacity:.7;border-radius:3px 3px 0 0;margin-top:2px;" title="Refunds: ${x.refunds}"></div>`:""}
                     ${posH===0&&b2bH===0?`<div style="height:2px;width:100%;background:var(--border2);border-radius:2px"></div>`:""}
                 </div>
                 <div class="bar-day" style="color:${isToday?"var(--green)":"var(--muted)"}">${dayLbl}</div>
@@ -651,13 +702,24 @@ async function load(){
 
         // ── RECENT SALES ──
         document.getElementById("recent-body").innerHTML = d.recent_sales.length
-            ? d.recent_sales.map(s=>`<tr>
-                <td class="mono" style="font-size:11px;color:var(--lime)">${s.invoice_number}</td>
-                <td class="bold">${s.customer}</td>
-                <td class="mono" style="color:var(--green);font-weight:700">${s.total.toFixed(2)}</td>
-                <td><span class="badge ${s.method?.toLowerCase().includes("visa")?"badge-visa":"badge-cash"}">${s.method||"cash"}</span></td>
-                <td class="mono" style="font-size:11px;color:var(--muted)">${s.time}</td>
-              </tr>`).join("")
+            ? d.recent_sales.map(s => {
+                const isRefund = s.type === "refund";
+                const numColor = isRefund ? "var(--danger)" : "var(--green)";
+                const numText  = isRefund ? "−" + Math.abs(s.total).toFixed(2) : s.total.toFixed(2);
+                const badge    = isRefund
+                    ? `<span class="badge" style="background:rgba(255,77,109,.12);color:var(--danger);border:1px solid rgba(255,77,109,.3)">↩ ${s.method}</span>`
+                    : `<span class="badge ${s.method?.toLowerCase().includes("visa")?"badge-visa":"badge-cash"}">${s.method||"cash"}</span>`;
+                const refLabel = isRefund
+                    ? `<span style="font-size:10px;color:var(--danger);font-weight:700;letter-spacing:.5px">REFUND</span>`
+                    : "";
+                return `<tr>
+                    <td class="mono" style="font-size:11px;color:${isRefund?"var(--danger)":"var(--lime)"}">${s.invoice_number}${refLabel?`<br>${refLabel}`:""}</td>
+                    <td class="bold">${s.customer}</td>
+                    <td class="mono" style="color:${numColor};font-weight:700">${numText}</td>
+                    <td>${badge}</td>
+                    <td class="mono" style="font-size:11px;color:var(--muted)">${s.time}</td>
+                  </tr>`;
+            }).join("")
             : `<tr><td colspan="5" style="color:var(--muted);padding:20px;text-align:center">No sales yet today</td></tr>`;
 
         // ── OUT OF STOCK ──
@@ -693,5 +755,3 @@ load();
 </script>
 </body>
 </html>"""
-
-

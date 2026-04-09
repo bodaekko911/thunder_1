@@ -7,6 +7,7 @@ from pydantic import BaseModel
 from datetime import date
 
 from app.database import get_db
+from app.core.log import record
 from app.models.hr import Employee, Attendance, Payroll
 
 router = APIRouter(prefix="/hr", tags=["HR"])
@@ -78,7 +79,11 @@ def add_employee(data: EmployeeCreate, db: Session = Depends(get_db)):
         position=data.position, department=data.department,
         hire_date=hire, base_salary=data.base_salary,
     )
-    db.add(e); db.commit(); db.refresh(e)
+    db.add(e); db.flush()
+    record(db, "HR", "add_employee",
+           f"Added employee: {e.name} — {e.position or ''} / {e.department or ''} — salary: {float(e.base_salary):.2f}",
+           ref_type="employee", ref_id=e.id)
+    db.commit(); db.refresh(e)
     return {"id": e.id, "name": e.name}
 
 @router.put("/api/employees/{emp_id}")
@@ -88,6 +93,9 @@ def edit_employee(emp_id: int, data: EmployeeUpdate, db: Session = Depends(get_d
         raise HTTPException(status_code=404, detail="Employee not found")
     for k, v in data.model_dump(exclude_unset=True).items():
         setattr(e, k, v)
+    record(db, "HR", "edit_employee",
+           f"Edited employee: {e.name}",
+           ref_type="employee", ref_id=emp_id)
     db.commit()
     return {"ok": True}
 
@@ -97,6 +105,9 @@ def deactivate_employee(emp_id: int, db: Session = Depends(get_db)):
     if not e:
         raise HTTPException(status_code=404, detail="Employee not found")
     e.is_active = False
+    record(db, "HR", "deactivate_employee",
+           f"Deactivated employee: {e.name}",
+           ref_type="employee", ref_id=emp_id)
     db.commit()
     return {"ok": True}
 
@@ -338,6 +349,9 @@ def run_payroll(data: PayrollRun, db: Session = Depends(get_db)):
         db.add(p)
         created += 1
 
+    record(db, "HR", "run_payroll",
+           f"Payroll run for {data.period} — {created} created, {skipped} updated",
+           ref_type="payroll", ref_id=data.period)
     db.commit()
     return {"created": created, "skipped": skipped, "period": data.period}
 
@@ -347,11 +361,20 @@ def update_payroll(payroll_id: int, data: PayrollUpdate, db: Session = Depends(g
     p = db.query(Payroll).filter(Payroll.id == payroll_id).first()
     if not p:
         raise HTTPException(status_code=404, detail="Payroll record not found")
+    # Back-calculate the attendance-earned amount from the previously stored values
+    # before applying the new bonuses/deductions
+    old_bonuses    = float(p.bonuses    or 0)
+    old_deductions = float(p.deductions or 0)
+    earned         = float(p.net_salary) - old_bonuses + old_deductions
+
     p.bonuses    = data.bonuses
     p.deductions = data.deductions
-    p.net_salary = float(p.base_salary) + data.bonuses - data.deductions
+    p.net_salary = round(earned + data.bonuses - data.deductions, 2)
     if data.notes:
         p.notes = data.notes
+    record(db, "HR", "update_payroll",
+           f"Updated payroll #{payroll_id} — bonuses: {data.bonuses}, deductions: {data.deductions}, net: {p.net_salary:.2f}",
+           ref_type="payroll", ref_id=payroll_id)
     db.commit()
     return {"ok": True, "net_salary": float(p.net_salary)}
 
@@ -363,6 +386,9 @@ def mark_paid(payroll_id: int, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="Payroll record not found")
     p.paid    = True
     p.paid_at = datetime.utcnow()
+    record(db, "HR", "mark_payroll_paid",
+           f"Marked payroll #{payroll_id} as paid — net: {float(p.net_salary):.2f}",
+           ref_type="payroll", ref_id=payroll_id)
     db.commit()
     return {"ok": True}
 
@@ -1233,5 +1259,3 @@ init();
 </body>
 </html>
 """
-
-

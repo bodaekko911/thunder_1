@@ -171,7 +171,9 @@ def login_page():
                 })
             });
             let data = await res.json();
-            if (data.error) {
+            if (!res.ok) {
+                const msg = data.detail || "Invalid email or password";
+                document.getElementById("error").textContent = msg;
                 document.getElementById("error").style.display = "block";
                 return;
             }
@@ -196,12 +198,21 @@ def login_page():
 
 @router.post("/auth/login")
 def login(data: UserLogin, db: Session = Depends(get_db)):
+    from app.core.log import record
     user = db.query(User).filter(User.email == data.email).first()
     if not user or not verify_password(data.password, user.password):
-        return {"error": "Invalid email or password"}
+        # Log failed attempt (no user object, store email)
+        record(db, "Auth", "login_failed",
+               f"Failed login attempt for email: {data.email}")
+        db.commit()
+        raise HTTPException(status_code=401, detail="Invalid email or password")
     if not user.is_active:
-        return {"error": "Account is disabled"}
+        raise HTTPException(status_code=403, detail="Account is disabled")
     token = create_access_token({"sub": str(user.id), "role": user.role})
+    record(db, "Auth", "login",
+           f"User logged in: {user.name} ({user.role})",
+           user=user, ref_type="user", ref_id=user.id)
+    db.commit()
     return {
         "access_token": token,
         "token_type": "bearer",

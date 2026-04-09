@@ -64,7 +64,14 @@ def checkout(
     user=Depends(get_current_user),
 ):
     user_id = int(user.get("sub"))
-    return create_invoice(db=db, data=data, user_id=user_id)
+    invoice = create_invoice(db=db, data=data, user_id=user_id)
+    return {
+        "id": invoice.id,
+        "invoice_number": invoice.invoice_number,
+        "status": invoice.status,
+        "payment_method": invoice.payment_method,
+        "total": float(invoice.total),
+    }
 
 
 @router.get("/unpaid-invoices")
@@ -130,6 +137,10 @@ def collect_payment(invoice_id: int, data: dict, db: Session = Depends(get_db)):
             ))
             acc.balance += Decimal(str(debit)) - Decimal(str(credit))
 
+    from app.core.log import record as log_record
+    log_record(db, "POS", "collect_payment",
+               f"Payment collected — {invoice.invoice_number} — {total:.2f} — {payment_method}",
+               ref_type="invoice", ref_id=invoice_id)
     db.commit()
     return {"ok": True, "invoice_number": invoice.invoice_number}
 
@@ -449,6 +460,7 @@ body.light .toast{background:var(--card);}
     </div>
 
     <div class="topbar-right">
+        <a href="/refunds/" style="display:flex;align-items:center;gap:6px;background:rgba(255,77,109,.08);border:1px solid rgba(255,77,109,.25);color:#ff4d6d;font-family:var(--sans);font-size:12px;font-weight:700;padding:8px 14px;border-radius:9px;cursor:pointer;text-decoration:none;transition:all .2s;" onmouseover="this.style.background='rgba(255,77,109,.18)'" onmouseout="this.style.background='rgba(255,77,109,.08)'">↩ Refunds</a>
         <button class="mode-btn" id="mode-btn" onclick="toggleMode()" title="Toggle color mode">??</button>
         <div class="user-pill">
             <div class="user-avatar" id="user-avatar">A</div>
@@ -910,6 +922,10 @@ async function checkout(settleLater=false){
             clearCustomer(); cart=[]; drawCart();
             checkUnpaidCount();
         } else {
+            if(!Number.isInteger(data.id)){
+                showToast("Error: checkout did not return a valid invoice id");
+                return;
+            }
             window.location.href="/invoice/"+data.id;
         }
     } catch(e){ showToast("Network error"); }

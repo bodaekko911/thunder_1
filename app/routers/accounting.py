@@ -7,6 +7,7 @@ from pydantic import BaseModel
 
 from app.database import get_db
 from app.core.permissions import get_current_user
+from app.core.log import record
 from app.models.accounting import Account, Journal, JournalEntry
 from app.models.b2b import B2BClient, B2BInvoice, B2BInvoiceItem, Consignment
 from app.models.product import Product
@@ -186,6 +187,9 @@ def create_journal(data: JournalCreate, db: Session = Depends(get_db), current_u
         # Update account balance
         acc.balance += entry.debit - entry.credit
 
+    record(db, "Accounting", "create_journal",
+           f"Manual journal: {data.description or '—'} — debit total: {total_debit:.2f}",
+           user=current_user, ref_type="journal", ref_id=journal.id)
     db.commit(); db.refresh(journal)
     return {"id": journal.id, "ok": True}
 
@@ -220,6 +224,8 @@ def trial_balance(db: Session = Depends(get_db)):
 
 @router.get("/api/profit-loss")
 def profit_loss(db: Session = Depends(get_db)):
+    from app.models.refund import RetailRefund
+    from sqlalchemy import func as sqlfunc
     revenue_accounts = db.query(Account).filter(Account.type == "revenue").order_by(Account.code).all()
     expense_accounts = db.query(Account).filter(Account.type == "expense").order_by(Account.code).all()
 
@@ -230,12 +236,18 @@ def profit_loss(db: Session = Depends(get_db)):
     total_expense = sum(e["amount"] for e in expenses)
     net_profit    = total_revenue - total_expense
 
+    # Retail refund total for display as a deduction note
+    total_refunds = float(db.query(sqlfunc.sum(RetailRefund.total)).scalar() or 0)
+    refund_count  = db.query(sqlfunc.count(RetailRefund.id)).scalar() or 0
+
     return {
         "revenues":      revenues,
         "expenses":      expenses,
         "total_revenue": total_revenue,
         "total_expense": total_expense,
         "net_profit":    net_profit,
+        "total_refunds": total_refunds,
+        "refund_count":  refund_count,
     }
 
 
@@ -306,11 +318,11 @@ def collect_b2b_payment(invoice_id: int, data: dict, db: Session = Depends(get_d
         if acc:
             db.add(JournalEntry(journal_id=journal.id, account_id=acc.id, debit=debit, credit=credit))
             acc.balance += Decimal(str(debit)) - Decimal(str(credit))
+    record(db, "Accounting", "collect_b2b_payment",
+           f"B2B payment collected — {invoice.invoice_number} — amount: {amount:.2f} — status: {invoice.status}",
+           ref_type="b2b_invoice", ref_id=invoice_id)
     db.commit()
     return {"ok": True, "status": invoice.status, "invoice_number": invoice.invoice_number}
-
-@router.post("/api/b2b-invoices/{invoice_id}/consignment-payment")
-def consignment_b2b_payment(invoice_id: int, data: dict, db: Session = Depends(get_db)):
     invoice = db.query(B2BInvoice).filter(B2BInvoice.id == invoice_id).first()
     if not invoice:
         raise HTTPException(status_code=404, detail="Invoice not found")
@@ -476,6 +488,7 @@ td.cr { font-family:var(--mono); color:var(--blue); }
 .type-equity    { background:rgba(168,85,247,.1); color:var(--purple); }
 .type-revenue   { background:rgba(77,159,255,.1); color:var(--blue);   }
 .type-expense   { background:rgba(255,181,71,.1); color:var(--warn);   }
+.type-refund    { background:rgba(255,77,109,.15); color:var(--danger); border:1px solid rgba(255,77,109,.3); }
 .action-btn { background:transparent; border:1px solid var(--border2); color:var(--sub); font-size:12px; font-weight:600; padding:5px 10px; border-radius:7px; cursor:pointer; transition:all .15s; font-family:var(--sans); }
 .action-btn:hover { border-color:var(--blue); color:var(--blue); }
 .action-btn.danger:hover { border-color:var(--danger); color:var(--danger); }
@@ -1028,16 +1041,25 @@ async function loadJournals(){
             `<tr><td colspan="7" style="text-align:center;color:var(--muted);padding:40px">No journal entries yet</td></tr>`;
         return;
     }
-    document.getElementById("journals-body").innerHTML = data.journals.map(j=>`
-        <tr>
+    document.getElementById("journals-body").innerHTML = data.journals.map(j=>{
+        const isRefund = j.ref_type === "retail_refund" || j.ref_type === "retail_refund_void";
+        const badgeClass = isRefund ? "type-refund"
+            : j.ref_type === "manual" ? "type-equity"
+            : j.ref_type.includes("b2b_refund") ? "type-refund"
+            : "type-revenue";
+        const rowStyle = isRefund ? 'style="background:rgba(255,77,109,.03);"' : '';
+        const amtColor = isRefund ? "var(--danger)" : "var(--green)";
+        const amtPrefix = isRefund ? "−" : "";
+        return `<tr ${rowStyle}>
             <td style="font-family:var(--mono);color:var(--muted);font-size:12px">#${j.id}</td>
-            <td><span class="type-badge type-${j.ref_type==='manual'?'equity':'revenue'}">${j.ref_type}</span></td>
+            <td><span class="type-badge ${badgeClass}">${j.ref_type}</span></td>
             <td class="name">${j.description}</td>
             <td style="color:var(--sub)">${j.entries_count} lines</td>
-            <td class="dr">${j.total_debit.toFixed(2)}</td>
+            <td class="dr" style="color:${amtColor}">${amtPrefix}${j.total_debit.toFixed(2)}</td>
             <td style="font-size:12px;color:var(--muted)">${j.created_at}</td>
             <td><button class="action-btn green" onclick="viewJournal(${j.id})">View</button></td>
-        </tr>`).join("");
+        </tr>`;
+    }).join("");
 }
 
 function openJEModal(){
@@ -1156,6 +1178,12 @@ function closeSide(){
 async function loadPL(){
     let d = await (await fetch("/accounting/api/profit-loss")).json();
     let profitColor = d.net_profit>=0?"var(--green)":"var(--danger)";
+    const refundLine = d.total_refunds > 0
+        ? `<div class="pl-row" style="background:rgba(255,77,109,.04);border-left:3px solid rgba(255,77,109,.4);">
+               <span style="color:var(--danger)">↩ Retail Refunds (${d.refund_count} refunds — already deducted from revenue above)</span>
+               <span style="font-family:var(--mono);color:var(--danger)">−${d.total_refunds.toFixed(2)}</span>
+           </div>`
+        : "";
     document.getElementById("pl-content").innerHTML = `
         <div class="pl-section">
             <div class="pl-header">Revenue</div>
@@ -1164,8 +1192,9 @@ async function loadPL(){
                     <span style="color:var(--sub)">${r.code} — ${r.name}</span>
                     <span style="font-family:var(--mono);color:var(--green)">${Math.abs(r.amount).toFixed(2)}</span>
                 </div>`).join("") || `<div class="pl-row" style="color:var(--muted)">No revenue recorded yet</div>`}
+            ${refundLine}
             <div class="pl-total">
-                <span>Total Revenue</span>
+                <span>Net Revenue (after refunds)</span>
                 <span style="font-family:var(--mono);color:var(--green)">${Math.abs(d.total_revenue).toFixed(2)}</span>
             </div>
         </div>
@@ -1492,5 +1521,3 @@ init();
 </body>
 </html>
 """
-
-

@@ -8,11 +8,13 @@ from app.models.customer import Customer
 from app.models.inventory import StockMove
 from app.models.accounting import Account, Journal, JournalEntry
 from app.schemas.invoice import InvoiceCreate
+from app.core.log import record
 
 
 def _next_invoice_number(db: Session) -> str:
-    count = db.query(Invoice).count()
-    return f"INV-{str(count + 1).zfill(5)}"
+    from sqlalchemy import func
+    max_id = db.query(func.max(Invoice.id)).scalar() or 0
+    return f"INV-{str(max_id + 1).zfill(5)}"
 
 
 def _post_journal(db, description, entries, user_id=None):
@@ -117,4 +119,13 @@ def create_invoice(db: Session, data: InvoiceCreate, user_id: int) -> Invoice:
 
     db.commit()
     db.refresh(invoice)
+    # Log the sale
+    from app.models.user import User as UserModel
+    user_obj    = db.query(UserModel).filter(UserModel.id == user_id).first()
+    cust_obj    = db.query(Customer).filter(Customer.id == invoice.customer_id).first()
+    cust_name   = cust_obj.name if cust_obj else "Walk-in"
+    record(db, "POS", "sale",
+           f"Invoice {invoice.invoice_number} — {cust_name} — {float(invoice.total):.2f} — {payment_method}",
+           user=user_obj, ref_type="invoice", ref_id=invoice.id)
+    db.commit()
     return invoice

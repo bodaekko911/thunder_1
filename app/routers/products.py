@@ -7,6 +7,7 @@ from pydantic import BaseModel
 
 from app.database import get_db
 from app.models.product import Product
+from app.core.log import record
 
 router = APIRouter(prefix="/products", tags=["Products"])
 
@@ -114,10 +115,13 @@ def add_product(data: ProductCreate, db: Session = Depends(get_db)):
         cost=data.cost, stock=data.stock, min_stock=data.min_stock,
         unit=data.unit,
     )
-    # Set optional fields safely
     if hasattr(p, 'category'):  p.category  = data.category
     if hasattr(p, 'item_type'): p.item_type = data.item_type
-    db.add(p); db.commit(); db.refresh(p)
+    db.add(p); db.flush()
+    record(db, "Products", "add_product",
+           f"Added product: [{p.sku}] {p.name} — price: {float(p.price):.2f}",
+           ref_type="product", ref_id=p.id)
+    db.commit(); db.refresh(p)
     return {"id": p.id, "sku": p.sku, "name": p.name}
 
 
@@ -129,6 +133,9 @@ def edit_product(product_id: int, data: ProductUpdate, db: Session = Depends(get
     for k, v in data.model_dump(exclude_unset=True).items():
         if hasattr(p, k):
             setattr(p, k, v)
+    record(db, "Products", "edit_product",
+           f"Edited product: [{p.sku}] {p.name}",
+           ref_type="product", ref_id=product_id)
     db.commit(); db.refresh(p)
     return {"ok": True}
 
@@ -139,6 +146,9 @@ def delete_product(product_id: int, db: Session = Depends(get_db)):
     if not p:
         raise HTTPException(status_code=404, detail="Product not found")
     p.is_active = False
+    record(db, "Products", "deactivate_product",
+           f"Deactivated product: [{p.sku}] {p.name}",
+           ref_type="product", ref_id=product_id)
     db.commit()
     return {"ok": True}
 
@@ -792,5 +802,3 @@ init();
 </script>
 </body>
 </html>"""
-
-

@@ -8,6 +8,7 @@ from datetime import datetime, date
 import io
 
 from app.database import get_db
+from app.core.log import record
 from app.models.product import Product
 from app.models.inventory import StockMove
 
@@ -194,6 +195,10 @@ def adjust_stock(data: StockAdjustment, db: Session = Depends(get_db)):
         note=data.note or "Manual adjustment",
     )
     db.add(move)
+    record(db, "Inventory", "adjust_stock",
+           f"Stock adjusted: {product.name} — {before:+.3g} → {after:.3g} (Δ{data.qty:+.3g})"
+           + (f" — {data.note}" if data.note else ""),
+           ref_type="stock_move", ref_id=move.id if hasattr(move, 'id') else None)
     db.commit()
     return {"ok": True, "new_stock": after}
 
@@ -957,5 +962,3 @@ init();
 </body>
 </html>
 """
-
-
