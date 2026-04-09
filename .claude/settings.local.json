@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(dir \"C:\\\\Users\\\\Abdallah Abo zaid\\\\erp\")",
+      "Bash(python -c ':*)",
+      "Bash(python \"c:/Users/Abdallah Abo zaid/erp/fix_light.py\")",
+      "Bash(where python:*)",
+      "Bash(wc -l \"/c/Users/Abdallah Abo zaid/erp/app/routers\"/*.py)",
+      "Bash(find \"c:/Users/Abdallah Abo zaid/erp/app/routers\" -name \"*.py\" -type f -exec wc -l {} +)",
+      "Bash(python3 -c ':*)",
+      "Bash(python \"c:/Users/Abdallah Abo zaid/erp/check_pos.py\")",
+      "Bash(python3 -c \"f=open\\('c:/Users/Abdallah Abo zaid/erp/app/routers/pos.py'\\);c=f.read\\(\\);f.close\\(\\);print\\(len\\(c\\),c.count\\(chr\\(10\\)\\),'returns-panel' in c,'submitRefund' in c\\)\")"
+    ]
+  }
+}
