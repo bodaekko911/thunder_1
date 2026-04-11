@@ -49,8 +49,8 @@ async def preview_file(file: UploadFile = File(...)):
 
 # ── PRODUCTS ───────────────────────────────────────────
 @router.post("/api/products")
-async def import_products(file: UploadFile = File(...), db: Session = Depends(get_db)):
-    contents = await file.read()
+def import_products(file: UploadFile = File(...), db: Session = Depends(get_db)):
+    contents = file.file.read()
     wb = openpyxl.load_workbook(io.BytesIO(contents), data_only=True)
     ws = wb.active
     hdrs = [str(ws.cell(1, c).value or "").strip().lower() for c in range(1, ws.max_column + 2)]
@@ -136,8 +136,8 @@ async def import_products(file: UploadFile = File(...), db: Session = Depends(ge
 
 # ── STOCK ──────────────────────────────────────────────
 @router.post("/api/stock")
-async def import_stock(file: UploadFile = File(...), db: Session = Depends(get_db)):
-    contents = await file.read()
+def import_stock(file: UploadFile = File(...), db: Session = Depends(get_db)):
+    contents = file.file.read()
     wb = openpyxl.load_workbook(io.BytesIO(contents), data_only=True)
     ws = wb.active
     hdrs = [str(ws.cell(1, c).value or "").strip().lower() for c in range(1, ws.max_column + 2)]
@@ -200,8 +200,8 @@ async def import_stock(file: UploadFile = File(...), db: Session = Depends(get_d
 
 # ── CUSTOMERS ──────────────────────────────────────────
 @router.post("/api/customers")
-async def import_customers(file: UploadFile = File(...), db: Session = Depends(get_db)):
-    contents = await file.read()
+def import_customers(file: UploadFile = File(...), db: Session = Depends(get_db)):
+    contents = file.file.read()
     wb = openpyxl.load_workbook(io.BytesIO(contents), data_only=True)
     ws = wb.active
     hdrs = [str(ws.cell(1, c).value or "").strip().lower() for c in range(1, ws.max_column + 2)]

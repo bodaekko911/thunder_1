@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, Response
 from fastapi.responses import HTMLResponse
 from sqlalchemy.orm import Session
 
+from app.core.config import settings
 from app.core.permission_catalog import get_permission_catalog
 from app.core.permissions import (
     get_effective_permissions,
@@ -258,7 +259,7 @@ def login(
         value=token,
         httponly=True,
         samesite="lax",
-        secure=False,
+        secure=settings.COOKIE_SECURE,
         path="/",
     )
     record(db, "Auth", "login",

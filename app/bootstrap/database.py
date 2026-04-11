@@ -1,9 +1,10 @@
-from sqlalchemy import inspect
+from sqlalchemy import inspect, select
 
 import app.models  # noqa: F401
 from app.core.config import settings
 from app.core.security import hash_password
-from app.database import Base, SessionLocal, engine
+from app.db.base import Base
+from app.db.session import AsyncSessionLocal, engine
 from app.models.accounting import Account
 from app.models.expense import ExpenseCategory
 from app.models.user import User
@@ -30,7 +31,7 @@ _SAFE_COLUMNS = {
     "payroll": {
         "days_worked": "INTEGER",
         "working_days": "INTEGER",
-        "paid_at": "DATETIME",
+        "paid_at": "TIMESTAMP",
     },
     "expenses": {
         "farm_id": "INTEGER",
@@ -54,59 +55,69 @@ _DEFAULT_EXPENSE_CATEGORIES = (
 )
 
 
-def _ensure_schema() -> None:
-    Base.metadata.create_all(bind=engine)
+async def _ensure_schema() -> None:
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
 
 
-def _run_safe_alterations() -> None:
-    inspector = inspect(engine)
-    with engine.begin() as conn:
-        for table_name, columns in _SAFE_COLUMNS.items():
-            if not inspector.has_table(table_name):
-                continue
-            existing_columns = {
-                column["name"] for column in inspector.get_columns(table_name)
-            }
-            for column_name, definition in columns.items():
-                if column_name in existing_columns:
+async def _run_safe_alterations() -> None:
+    async with engine.begin() as conn:
+        def run(sync_conn):
+            inspector = inspect(sync_conn)
+            for table_name, columns in _SAFE_COLUMNS.items():
+                if not inspector.has_table(table_name):
                     continue
-                conn.exec_driver_sql(
-                    f"ALTER TABLE {table_name} ADD COLUMN {column_name} {definition}"
-                )
+                existing_columns = {
+                    column["name"] for column in inspector.get_columns(table_name)
+                }
+                for column_name, definition in columns.items():
+                    if column_name in existing_columns:
+                        continue
+                    sync_conn.exec_driver_sql(
+                        f"ALTER TABLE {table_name} ADD COLUMN {column_name} {definition}"
+                    )
+
+        await conn.run_sync(run)
 
 
-def _seed_expense_categories() -> None:
-    with SessionLocal() as db:
+async def _seed_expense_categories() -> None:
+    async with AsyncSessionLocal() as session:
         for code, name in _DEFAULT_EXPENSE_CATEGORIES:
-            if not db.query(Account).filter(Account.code == code).first():
-                db.add(Account(code=code, name=name, type="expense", balance=0))
+            account = await session.scalar(select(Account).where(Account.code == code))
+            if not account:
+                session.add(Account(code=code, name=name, type="expense", balance=0))
 
-            if not db.query(ExpenseCategory).filter(ExpenseCategory.name == name).first():
-                db.add(ExpenseCategory(name=name, account_code=code))
+            category = await session.scalar(
+                select(ExpenseCategory).where(ExpenseCategory.name == name)
+            )
+            if not category:
+                session.add(ExpenseCategory(name=name, account_code=code))
 
-        db.commit()
+        await session.commit()
 
 
-def _seed_default_admin() -> None:
-    with SessionLocal() as db:
-        admin = db.query(User).filter(User.email == settings.DEFAULT_ADMIN_EMAIL).first()
+async def _seed_default_admin() -> None:
+    async with AsyncSessionLocal() as session:
+        admin = await session.scalar(
+            select(User).where(User.email == settings.DEFAULT_ADMIN_EMAIL)
+        )
         if admin:
             return
 
-        db.add(
+        session.add(
             User(
                 name=settings.DEFAULT_ADMIN_NAME,
                 email=settings.DEFAULT_ADMIN_EMAIL,
-                password=hash_password(settings.DEFAULT_ADMIN_PASSWORD),
+                password=hash_password(settings.ADMIN_PASSWORD),
                 role="admin",
                 is_active=True,
             )
         )
-        db.commit()
+        await session.commit()
 
 
-def initialize_database() -> None:
-    _ensure_schema()
-    _run_safe_alterations()
-    _seed_expense_categories()
-    _seed_default_admin()
+async def initialize_database() -> None:
+    await _ensure_schema()
+    await _run_safe_alterations()
+    await _seed_expense_categories()
+    await _seed_default_admin()

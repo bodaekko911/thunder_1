@@ -4,12 +4,11 @@ from typing import Optional
 from fastapi import Cookie, Depends, Header, HTTPException, status
 from jose import JWTError, jwt
 from passlib.context import CryptContext
-from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.database import get_db
 
-pwd_context = CryptContext(schemes=["pbkdf2_sha256"], deprecated="auto")
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 
 def hash_password(password: str) -> str:
@@ -19,21 +18,11 @@ def hash_password(password: str) -> str:
 def verify_password(plain: str, hashed: str) -> bool:
     if not hashed:
         return False
-
-    if hashed.startswith("$2"):
-        try:
-            import bcrypt
-        except ImportError:
-            return False
-        return bcrypt.checkpw(plain.encode("utf-8"), hashed.encode("utf-8"))
-
     return pwd_context.verify(plain, hashed)
 
 
 def password_needs_rehash(hashed: str) -> bool:
     if not hashed:
-        return True
-    if hashed.startswith("$2"):
         return True
     return pwd_context.needs_update(hashed)
 
@@ -81,7 +70,7 @@ def extract_bearer_token(authorization: Optional[str]) -> str:
 def get_current_user(
     authorization: Optional[str] = Header(None),
     access_token: Optional[str] = Cookie(None),
-    db: Session = Depends(get_db),
+    db=Depends(get_db),
 ):
     from app.models.user import User
 
