@@ -1,24 +1,44 @@
-from sqlalchemy import text
+from sqlalchemy import inspect
 
 import app.models  # noqa: F401
+from app.core.config import settings
+from app.core.security import hash_password
 from app.database import Base, SessionLocal, engine
 from app.models.accounting import Account
 from app.models.expense import ExpenseCategory
+from app.models.user import User
 
-_SAFE_TABLES_WITH_USER_ID = (
-    "b2b_invoices",
-    "consignments",
-    "b2b_refunds",
-    "farm_deliveries",
-    "production_batches",
-    "spoilage_records",
-)
-
-_PAYROLL_COLUMNS = (
-    "days_worked  INTEGER",
-    "working_days INTEGER",
-    "paid_at      TIMESTAMPTZ",
-)
+_SAFE_COLUMNS = {
+    "b2b_invoices": {
+        "user_id": "INTEGER",
+    },
+    "consignments": {
+        "user_id": "INTEGER",
+    },
+    "b2b_refunds": {
+        "user_id": "INTEGER",
+    },
+    "farm_deliveries": {
+        "user_id": "INTEGER",
+    },
+    "production_batches": {
+        "user_id": "INTEGER",
+    },
+    "spoilage_records": {
+        "user_id": "INTEGER",
+    },
+    "payroll": {
+        "days_worked": "INTEGER",
+        "working_days": "INTEGER",
+        "paid_at": "DATETIME",
+    },
+    "expenses": {
+        "farm_id": "INTEGER",
+    },
+    "b2b_clients": {
+        "discount_pct": "NUMERIC(6,2) DEFAULT 0",
+    },
+}
 
 _DEFAULT_EXPENSE_CATEGORIES = (
     ("5001", "Water"),
@@ -39,22 +59,20 @@ def _ensure_schema() -> None:
 
 
 def _run_safe_alterations() -> None:
+    inspector = inspect(engine)
     with engine.begin() as conn:
-        for table_name in _SAFE_TABLES_WITH_USER_ID:
-            conn.execute(
-                text(f"ALTER TABLE {table_name} ADD COLUMN IF NOT EXISTS user_id INTEGER")
-            )
-
-        for col_def in _PAYROLL_COLUMNS:
-            conn.execute(text(f"ALTER TABLE payroll ADD COLUMN IF NOT EXISTS {col_def}"))
-
-        conn.execute(text("ALTER TABLE expenses ADD COLUMN IF NOT EXISTS farm_id INTEGER"))
-        conn.execute(
-            text(
-                "ALTER TABLE b2b_clients "
-                "ADD COLUMN IF NOT EXISTS discount_pct NUMERIC(6,2) DEFAULT 0"
-            )
-        )
+        for table_name, columns in _SAFE_COLUMNS.items():
+            if not inspector.has_table(table_name):
+                continue
+            existing_columns = {
+                column["name"] for column in inspector.get_columns(table_name)
+            }
+            for column_name, definition in columns.items():
+                if column_name in existing_columns:
+                    continue
+                conn.exec_driver_sql(
+                    f"ALTER TABLE {table_name} ADD COLUMN {column_name} {definition}"
+                )
 
 
 def _seed_expense_categories() -> None:
@@ -69,7 +87,26 @@ def _seed_expense_categories() -> None:
         db.commit()
 
 
+def _seed_default_admin() -> None:
+    with SessionLocal() as db:
+        admin = db.query(User).filter(User.email == settings.DEFAULT_ADMIN_EMAIL).first()
+        if admin:
+            return
+
+        db.add(
+            User(
+                name=settings.DEFAULT_ADMIN_NAME,
+                email=settings.DEFAULT_ADMIN_EMAIL,
+                password=hash_password(settings.DEFAULT_ADMIN_PASSWORD),
+                role="admin",
+                is_active=True,
+            )
+        )
+        db.commit()
+
+
 def initialize_database() -> None:
     _ensure_schema()
     _run_safe_alterations()
     _seed_expense_categories()
+    _seed_default_admin()

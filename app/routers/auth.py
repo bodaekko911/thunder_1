@@ -13,6 +13,7 @@ from app.core.security import (
     create_access_token,
     get_current_user,
     hash_password,
+    password_needs_rehash,
     verify_password,
 )
 from app.database import get_db
@@ -189,6 +190,7 @@ def login_page():
                 document.getElementById("error").style.display = "block";
                 return;
             }
+            localStorage.setItem("token", data.access_token || "");
             localStorage.setItem("user_name", data.name);
             localStorage.setItem("user_role", data.role);
             localStorage.setItem("user_permissions", data.permissions || "");
@@ -243,6 +245,8 @@ def login(
         raise HTTPException(status_code=401, detail="Invalid email or password")
     if not user.is_active:
         raise HTTPException(status_code=403, detail="Account is disabled")
+    if password_needs_rehash(user.password):
+        user.password = hash_password(data.password)
     permissions = serialize_permissions(
         get_effective_permissions(user.role, user.permissions)
     )
@@ -262,6 +266,7 @@ def login(
            user=user, ref_type="user", ref_id=user.id)
     db.commit()
     return {
+        "access_token": token,
         "role": user.role,
         "name": user.name,
         "permissions": permissions,
