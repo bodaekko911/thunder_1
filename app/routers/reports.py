@@ -25,6 +25,7 @@ def to_xlsx(headers, rows, sheet_name="Report"):
     try:
         import openpyxl
         from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+        from openpyxl.utils import get_column_letter
         wb = openpyxl.Workbook()
         ws = wb.active
         ws.title = sheet_name
@@ -188,9 +189,9 @@ def export_sales(date_from: str = None, date_to: str = None, db: Session = Depen
             ws.row_dimensions[1].height = 22
 
         def auto_width(ws):
-            for col in ws.columns:
+            for ci, col in enumerate(ws.columns, 1):
                 mx = max((len(str(c.value or "")) for c in col), default=10)
-                ws.column_dimensions[col[0].column_letter].width = min(mx + 4, 50)
+                ws.column_dimensions[get_column_letter(ci)].width = min(mx + 4, 50)
 
         def add_row(ws, ri, values, fill=None, font=None, bold=False):
             for ci, val in enumerate(values, 1):
@@ -338,7 +339,7 @@ def farm_intake_report(date_from: Optional[str] = None, date_to: Optional[str] =
         if not farm.name or str(farm.name).strip().lower() in ("none", ""):
             farm.name = default_names[i] if i < len(default_names) else f"Farm {farm.id}"
     try: db.commit()
-    except: db.rollback()
+    except Exception: db.rollback()
     result = []
     delivery_rows = []
     for farm in farms:
@@ -492,6 +493,7 @@ def export_pl(date_from: str = None, date_to: str = None, db: Session = Depends(
     try:
         import openpyxl
         from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+        from openpyxl.utils import get_column_letter
 
         wb = openpyxl.Workbook()
 
@@ -517,9 +519,9 @@ def export_pl(date_from: str = None, date_to: str = None, db: Session = Depends(
             return c
 
         def auto_width(ws):
-            for col in ws.columns:
+            for ci, col in enumerate(ws.columns, 1):
                 mx = max((len(str(c.value or "")) for c in col), default=10)
-                ws.column_dimensions[col[0].column_letter].width = min(mx + 4, 50)
+                ws.column_dimensions[get_column_letter(ci)].width = min(mx + 4, 50)
 
         # ── Sheet 1: P&L Summary ──
         ws1 = wb.active
@@ -1765,7 +1767,7 @@ async function loadPL(){
     }
 
     function renderAccountLine(item, color, expanded=false){
-        let id = "pl-"+item.code.replace(/\W/g,"");
+        let id = "pl-"+item.code.replace(/\\W/g,"");
         return `
             <div class="pl-row" style="cursor:pointer;user-select:none" onclick="togglePLDetail('${id}')">
                 <span style="color:var(--sub);display:flex;align-items:center;gap:8px">

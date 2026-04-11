@@ -57,7 +57,7 @@ def get_accounts(db: Session = Depends(get_db)):
     ]
 
 @router.post("/api/accounts")
-def create_account(data: AccountCreate, db: Session = Depends(get_db)):
+def create_account(data: AccountCreate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     if db.query(Account).filter(Account.code == data.code).first():
         raise HTTPException(status_code=400, detail="Account code already exists")
     a = Account(**data.model_dump())
@@ -65,7 +65,7 @@ def create_account(data: AccountCreate, db: Session = Depends(get_db)):
     return {"id": a.id, "code": a.code, "name": a.name}
 
 @router.delete("/api/accounts/{account_id}")
-def delete_account(account_id: int, db: Session = Depends(get_db)):
+def delete_account(account_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     a = db.query(Account).filter(Account.id == account_id).first()
     if not a:
         raise HTTPException(status_code=404, detail="Account not found")
@@ -288,7 +288,7 @@ def get_b2b_invoices(invoice_type: str = None, status: str = None, db: Session =
     ]
 
 @router.post("/api/b2b-invoices/{invoice_id}/collect")
-def collect_b2b_payment(invoice_id: int, data: dict, db: Session = Depends(get_db)):
+def collect_b2b_payment(invoice_id: int, data: dict, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     invoice = db.query(B2BInvoice).filter(B2BInvoice.id == invoice_id).first()
     if not invoice:
         raise HTTPException(status_code=404, detail="Invoice not found")
@@ -323,9 +323,16 @@ def collect_b2b_payment(invoice_id: int, data: dict, db: Session = Depends(get_d
            ref_type="b2b_invoice", ref_id=invoice_id)
     db.commit()
     return {"ok": True, "status": invoice.status, "invoice_number": invoice.invoice_number}
+
+
+@router.post("/api/b2b-invoices/{invoice_id}/consignment-payment")
+def accounting_consignment_payment(invoice_id: int, data: dict, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    """Record a monthly/partial cash payment against a consignment invoice."""
     invoice = db.query(B2BInvoice).filter(B2BInvoice.id == invoice_id).first()
     if not invoice:
         raise HTTPException(status_code=404, detail="Invoice not found")
+    if invoice.invoice_type != "consignment":
+        raise HTTPException(status_code=400, detail="This endpoint is for consignment invoices only")
     amount      = round(float(data.get("amount", 0)), 2)
     month_label = data.get("month_label", "")
     if amount <= 0:
@@ -355,6 +362,7 @@ def collect_b2b_payment(invoice_id: int, data: dict, db: Session = Depends(get_d
             acc.balance += Decimal(str(debit)) - Decimal(str(credit))
     db.commit()
     return {"ok": True, "status": invoice.status, "invoice_number": invoice.invoice_number}
+
 
 @router.post("/api/b2b-clients/{client_id}/refund")
 def refund_b2b_client_account(client_id: int, data: B2BRefundIn, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):

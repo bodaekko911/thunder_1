@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import HTMLResponse
 from sqlalchemy.orm import Session
+from sqlalchemy import func
 from typing import Optional, List
 from pydantic import BaseModel
 from decimal import Decimal
@@ -69,7 +70,7 @@ def get_recipes(db: Session = Depends(get_db)):
     ]
 
 @router.post("/api/recipes")
-def create_recipe(data: RecipeCreate, db: Session = Depends(get_db)):
+def create_recipe(data: RecipeCreate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     if not data.inputs or not data.outputs:
         raise HTTPException(status_code=400, detail="Recipe must have at least one input and one output")
     recipe = Recipe(name=data.name, description=data.description)
@@ -82,7 +83,7 @@ def create_recipe(data: RecipeCreate, db: Session = Depends(get_db)):
     return {"id": recipe.id, "name": recipe.name}
 
 @router.delete("/api/recipes/{recipe_id}")
-def delete_recipe(recipe_id: int, db: Session = Depends(get_db)):
+def delete_recipe(recipe_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     r = db.query(Recipe).filter(Recipe.id == recipe_id).first()
     if not r:
         raise HTTPException(status_code=404, detail="Recipe not found")
@@ -127,8 +128,8 @@ def create_batch(data: BatchCreate, db: Session = Depends(get_db), current_user:
             raise HTTPException(status_code=400, detail=f"Not enough stock for '{product.name}'. Available: {float(product.stock)}")
 
     prefix = "PKG" if data.batch_type == "packaging" else "BATCH"
-    count  = db.query(ProductionBatch).count()
-    batch_number = f"{prefix}-{str(count + 1).zfill(4)}"
+    max_id = db.query(func.max(ProductionBatch.id)).scalar() or 0
+    batch_number = f"{prefix}-{str(max_id + 1).zfill(4)}"
 
     WEIGHT_UNITS = {"gram","g","kg","ltr","ml","liter","litre"}
     if data.batch_type == "processing":
@@ -216,7 +217,7 @@ def edit_batch(batch_id: int, data: BatchCreate, db: Session = Depends(get_db), 
 
 
 @router.delete("/api/batches/{batch_id}")
-def delete_batch(batch_id: int, db: Session = Depends(get_db)):
+def delete_batch(batch_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     batch = db.query(ProductionBatch).filter(ProductionBatch.id == batch_id).first()
     if not batch:
         raise HTTPException(status_code=404, detail="Batch not found")
@@ -270,8 +271,8 @@ def create_spoilage(data: SpoilageCreate, db: Session = Depends(get_db), current
         raise HTTPException(status_code=404, detail="Product not found")
     if float(product.stock) < data.qty:
         raise HTTPException(status_code=400, detail=f"Not enough stock. Available: {float(product.stock)} {product.unit}")
-    count = db.query(SpoilageRecord).count()
-    ref   = f"SPL-{str(count + 1).zfill(4)}"
+    max_id = db.query(func.max(SpoilageRecord.id)).scalar() or 0
+    ref    = f"SPL-{str(max_id + 1).zfill(4)}"
     record = SpoilageRecord(
         ref_number=ref, product_id=data.product_id, qty=data.qty,
         user_id=current_user.id,
@@ -300,7 +301,7 @@ def create_spoilage(data: SpoilageCreate, db: Session = Depends(get_db), current
     return {"id": record.id, "ref_number": ref, "qty": data.qty, "product": product.name}
 
 @router.delete("/api/spoilage/{record_id}")
-def delete_spoilage(record_id: int, db: Session = Depends(get_db)):
+def delete_spoilage(record_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     record = db.query(SpoilageRecord).filter(SpoilageRecord.id == record_id).first()
     if not record:
         raise HTTPException(status_code=404, detail="Record not found")

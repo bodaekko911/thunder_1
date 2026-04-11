@@ -5,7 +5,9 @@ from typing import Optional, List
 from pydantic import BaseModel
 
 from app.database import get_db
+from app.core.permissions import get_current_user
 from app.models.supplier import Supplier, Purchase, PurchaseItem
+from app.models.user import User
 from app.models.product import Product
 from app.models.inventory import StockMove
 
@@ -56,13 +58,13 @@ def get_suppliers(q: str = "", db: Session = Depends(get_db)):
     ]
 
 @router.post("/api/add")
-def add_supplier(data: SupplierCreate, db: Session = Depends(get_db)):
+def add_supplier(data: SupplierCreate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     s = Supplier(**data.model_dump())
     db.add(s); db.commit(); db.refresh(s)
     return {"id": s.id, "name": s.name}
 
 @router.put("/api/edit/{supplier_id}")
-def edit_supplier(supplier_id: int, data: SupplierUpdate, db: Session = Depends(get_db)):
+def edit_supplier(supplier_id: int, data: SupplierUpdate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     s = db.query(Supplier).filter(Supplier.id == supplier_id).first()
     if not s:
         raise HTTPException(status_code=404, detail="Supplier not found")
@@ -72,7 +74,7 @@ def edit_supplier(supplier_id: int, data: SupplierUpdate, db: Session = Depends(
     return {"ok": True}
 
 @router.delete("/api/delete/{supplier_id}")
-def delete_supplier(supplier_id: int, db: Session = Depends(get_db)):
+def delete_supplier(supplier_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     s = db.query(Supplier).filter(Supplier.id == supplier_id).first()
     if not s:
         raise HTTPException(status_code=404, detail="Supplier not found")
@@ -130,7 +132,7 @@ def get_purchase(purchase_id: int, db: Session = Depends(get_db)):
     }
 
 @router.post("/api/purchase/create")
-def create_purchase(data: PurchaseCreate, db: Session = Depends(get_db)):
+def create_purchase(data: PurchaseCreate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     if not data.items:
         raise HTTPException(status_code=400, detail="Purchase must have at least one item")
 
@@ -602,6 +604,11 @@ td.mono { font-family: var(--mono); color: var(--green); }
           .map(p => p.trim())
           .filter(Boolean)
   );
+  function authHeaders(extraHeaders = {}){
+      return __erpToken
+          ? { ...extraHeaders, "Authorization": "Bearer " + __erpToken }
+          : { ...extraHeaders };
+  }
   function setModeButton(isLight){
     const btn = document.getElementById("mode-btn");
     if(btn) btn.innerText = isLight ? "☀️" : "🌙";
@@ -763,7 +770,11 @@ async function saveSupplier(){
     };
     let url    = editingSupplierId ? `/suppliers/api/edit/${editingSupplierId}` : "/suppliers/api/add";
     let method = editingSupplierId ? "PUT" : "POST";
-    let res    = await fetch(url,{method,headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
+    let res    = await fetch(url,{
+        method,
+        headers:authHeaders({"Content-Type":"application/json"}),
+        body:JSON.stringify(body)
+    });
     let data   = await res.json();
     if(data.detail){ showToast("Error: "+data.detail); return; }
     closeSupplierModal();
@@ -773,7 +784,12 @@ async function saveSupplier(){
 
 async function deleteSupplier(id,name){
     if(!confirm(`Delete "${name}"?`)) return;
-    await fetch(`/suppliers/api/delete/${id}`,{method:"DELETE"});
+    let res = await fetch(`/suppliers/api/delete/${id}`,{
+        method:"DELETE",
+        headers:authHeaders()
+    });
+    let data = await res.json();
+    if(data.detail){ showToast("Error: "+data.detail); return; }
     showToast("Supplier deleted ✓");
     loadSuppliers();
 }
@@ -873,7 +889,7 @@ async function savePO(){
 
     let res  = await fetch("/suppliers/api/purchase/create",{
         method:"POST",
-        headers:{"Content-Type":"application/json"},
+        headers:authHeaders({"Content-Type":"application/json"}),
         body:JSON.stringify({supplier_id, notes, items}),
     });
     let data = await res.json();

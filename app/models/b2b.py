@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Numeric, DateTime, ForeignKey, Text, Boolean, Date
+from sqlalchemy import Column, Integer, String, Numeric, DateTime, ForeignKey, Text, Boolean, Date, UniqueConstraint
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 from app.database import Base
@@ -14,6 +14,7 @@ class B2BClient(Base):
     email           = Column(String(150))
     address         = Column(String(300))
     payment_terms   = Column(String(50), default="immediate")  # immediate | net15 | net30 | net60 | consignment
+    discount_pct    = Column(Numeric(6, 2), default=0)   # client-specific discount percentage
     credit_limit    = Column(Numeric(14,2), default=0)
     outstanding     = Column(Numeric(14,2), default=0)
     notes           = Column(Text)
@@ -124,4 +125,17 @@ class B2BRefundItem(Base):
     total       = Column(Numeric(14,2), nullable=False)
 
     refund      = relationship("B2BRefund", back_populates="items")
+    product     = relationship("Product")
+
+
+class B2BClientPrice(Base):
+    __tablename__ = "b2b_client_prices"
+    __table_args__ = (UniqueConstraint("client_id", "product_id", name="uq_client_product_price"),)
+
+    id          = Column(Integer, primary_key=True, index=True)
+    client_id   = Column(Integer, ForeignKey("b2b_clients.id"), nullable=False)
+    product_id  = Column(Integer, ForeignKey("products.id"), nullable=False)
+    price       = Column(Numeric(14, 2), nullable=False)
+
+    client      = relationship("B2BClient")
     product     = relationship("Product")

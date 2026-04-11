@@ -9,7 +9,7 @@ from datetime import date
 from app.database import get_db
 from app.core.log import record
 from app.core.permissions import get_current_user
-from app.models.farm import Farm, FarmDelivery, FarmDeliveryItem
+from app.models.farm import Farm, FarmDelivery, FarmDeliveryItem, WeatherLog
 from app.models.product import Product
 from app.models.inventory import StockMove
 from app.models.user import User
@@ -37,8 +37,8 @@ class DeliveryCreate(BaseModel):
 def seed_farms(db: Session = Depends(get_db)):
     if db.query(Farm).count() > 0:
         return {"message": "Farms already exist"}
-    db.add(Farm(name="Organic Farm",      location="Habiba, South Sinai"))
-    db.add(Farm(name="Regenerative Farm", location="Habiba, South Sinai"))
+    db.add(Farm(name="Organic Farm",      location="Nuweiba, South Sinai"))
+    db.add(Farm(name="Regenerative Farm", location="Nuweiba, South Sinai"))
     db.commit()
     return {"message": "2 farms created"}
 
@@ -58,7 +58,7 @@ def get_farms(db: Session = Depends(get_db)):
     ]
 
 @router.post("/api/farms")
-def create_farm(name: str, location: str = "", db: Session = Depends(get_db)):
+def create_farm(name: str, location: str = "", db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     if db.query(Farm).filter(Farm.name == name).first():
         raise HTTPException(status_code=400, detail="Farm name already exists")
     f = Farm(name=name, location=location)
@@ -112,8 +112,8 @@ def create_delivery(data: DeliveryCreate, db: Session = Depends(get_db), current
     if not data.items:
         raise HTTPException(status_code=400, detail="Delivery must have at least one item")
 
-    count  = db.query(FarmDelivery).count()
-    number = f"FD-{str(count + 1).zfill(4)}"
+    max_id = db.query(func.max(FarmDelivery.id)).scalar() or 0
+    number = f"FD-{str(max_id + 1).zfill(4)}"
 
     delivery = FarmDelivery(
         delivery_number=number,
@@ -218,7 +218,7 @@ def edit_delivery(delivery_id: int, data: DeliveryCreate, db: Session = Depends(
     return {"ok": True, "delivery_number": delivery.delivery_number}
 
 @router.delete("/api/deliveries/{delivery_id}")
-def delete_delivery(delivery_id: int, db: Session = Depends(get_db)):
+def delete_delivery(delivery_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     delivery = db.query(FarmDelivery).filter(FarmDelivery.id == delivery_id).first()
     if not delivery:
         raise HTTPException(status_code=404, detail="Delivery not found")
@@ -258,6 +258,85 @@ def get_stats(db: Session = Depends(get_db)):
 def products_list(db: Session = Depends(get_db)):
     products = db.query(Product).filter(Product.is_active == True).order_by(Product.name).all()
     return [{"id": p.id, "name": p.name, "sku": p.sku, "stock": float(p.stock), "unit": p.unit} for p in products]
+
+
+# ── Weather Log ────────────────────────────────────────
+class WeatherLogIn(BaseModel):
+    farm_id:      int
+    log_date:     str            # YYYY-MM-DD
+    temp_min:     Optional[float] = None
+    temp_max:     Optional[float] = None
+    rainfall_mm:  Optional[float] = None
+    humidity_pct: Optional[float] = None
+    notes:        Optional[str]  = None
+
+@router.get("/api/weather-logs")
+def get_weather_logs(farm_id: Optional[int] = None, limit: int = 90, db: Session = Depends(get_db)):
+    q = db.query(WeatherLog)
+    if farm_id:
+        q = q.filter(WeatherLog.farm_id == farm_id)
+    logs = q.order_by(WeatherLog.log_date.desc()).limit(limit).all()
+    return [
+        {
+            "id":           w.id,
+            "farm_id":      w.farm_id,
+            "farm_name":    w.farm.name if w.farm else "—",
+            "log_date":     str(w.log_date),
+            "temp_min":     float(w.temp_min)     if w.temp_min     is not None else None,
+            "temp_max":     float(w.temp_max)     if w.temp_max     is not None else None,
+            "rainfall_mm":  float(w.rainfall_mm)  if w.rainfall_mm  is not None else None,
+            "humidity_pct": float(w.humidity_pct) if w.humidity_pct is not None else None,
+            "notes":        w.notes or "",
+        }
+        for w in logs
+    ]
+
+@router.post("/api/weather-logs")
+def create_weather_log(data: WeatherLogIn, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    farm = db.query(Farm).filter(Farm.id == data.farm_id).first()
+    if not farm:
+        raise HTTPException(status_code=404, detail="Farm not found")
+    try:
+        log_date = date.fromisoformat(data.log_date)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid date format — use YYYY-MM-DD")
+    w = WeatherLog(
+        farm_id=data.farm_id,
+        log_date=log_date,
+        temp_min=data.temp_min,
+        temp_max=data.temp_max,
+        rainfall_mm=data.rainfall_mm,
+        humidity_pct=data.humidity_pct,
+        notes=(data.notes or "").strip() or None,
+    )
+    db.add(w); db.commit(); db.refresh(w)
+    return {"id": w.id, "log_date": str(w.log_date)}
+
+@router.put("/api/weather-logs/{log_id}")
+def update_weather_log(log_id: int, data: WeatherLogIn, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    w = db.query(WeatherLog).filter(WeatherLog.id == log_id).first()
+    if not w:
+        raise HTTPException(status_code=404, detail="Log not found")
+    try:
+        w.log_date = date.fromisoformat(data.log_date)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid date format")
+    w.farm_id      = data.farm_id
+    w.temp_min     = data.temp_min
+    w.temp_max     = data.temp_max
+    w.rainfall_mm  = data.rainfall_mm
+    w.humidity_pct = data.humidity_pct
+    w.notes        = (data.notes or "").strip() or None
+    db.commit()
+    return {"ok": True}
+
+@router.delete("/api/weather-logs/{log_id}")
+def delete_weather_log(log_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    w = db.query(WeatherLog).filter(WeatherLog.id == log_id).first()
+    if not w:
+        raise HTTPException(status_code=404, detail="Log not found")
+    db.delete(w); db.commit()
+    return {"ok": True}
 
 
 # ── UI ─────────────────────────────────────────────────
@@ -466,8 +545,12 @@ td.name{color:var(--text);font-weight:600;}
         <div class="tabs">
             <button class="tab active" id="tab-deliveries" onclick="switchTab('deliveries')">Deliveries</button>
             <button class="tab"        id="tab-history"    onclick="switchTab('history')">Farm History</button>
+            <button class="tab"        id="tab-weather"    onclick="switchTab('weather')">Weather Log</button>
+            <button class="tab"        id="tab-season"     onclick="switchTab('season')">Season Analysis</button>
         </div>
-        <button class="btn btn-lime" onclick="openDeliveryModal()">+ Record Delivery</button>
+        <div id="tab-action-area">
+            <button class="btn btn-lime" onclick="openDeliveryModal()">+ Record Delivery</button>
+        </div>
     </div>
 
     <!-- DELIVERIES -->
@@ -509,6 +592,141 @@ td.name{color:var(--text);font-weight:600;}
     <div id="section-history" style="display:none">
         <div id="history-content">
             <div style="color:var(--muted);padding:40px;text-align:center">Loading...</div>
+        </div>
+    </div>
+
+    <!-- WEATHER LOG -->
+    <div id="section-weather" style="display:none">
+        <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px;margin-bottom:14px;">
+            <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
+                <select class="filter-sel" id="weather-farm-filter" onchange="loadWeatherLogs()">
+                    <option value="">All Farms</option>
+                </select>
+            </div>
+            <button class="btn btn-lime" onclick="openWeatherModal()">+ Log Weather</button>
+        </div>
+        <div class="table-wrap">
+            <table>
+                <thead>
+                    <tr>
+                        <th>Date</th>
+                        <th>Farm</th>
+                        <th>Temp Min</th>
+                        <th>Temp Max</th>
+                        <th>Rainfall (mm)</th>
+                        <th>Humidity (%)</th>
+                        <th>Notes</th>
+                        <th></th>
+                    </tr>
+                </thead>
+                <tbody id="weather-body">
+                    <tr><td colspan="8" style="text-align:center;color:var(--muted);padding:40px">Loading...</td></tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <!-- SEASON ANALYSIS -->
+    <div id="section-season" style="display:none">
+        <div style="background:var(--card);border:1px solid var(--border);border-radius:var(--r);padding:20px;margin-bottom:14px;">
+            <div style="font-size:14px;font-weight:700;margin-bottom:14px;">Seasonal Cost Allocation</div>
+            <div class="form-row" style="align-items:flex-end;gap:12px;flex-wrap:wrap;">
+                <div class="fld" style="min-width:180px">
+                    <label>Farm</label>
+                    <select class="filter-sel" id="season-farm" style="width:100%">
+                        <option value="">Select farm...</option>
+                    </select>
+                </div>
+                <div class="fld" style="min-width:140px">
+                    <label>Season Start</label>
+                    <input id="season-from" type="date" style="background:var(--card2);border:1px solid var(--border2);border-radius:10px;padding:10px 12px;color:var(--text);font-family:var(--sans);font-size:14px;outline:none;width:100%">
+                </div>
+                <div class="fld" style="min-width:140px">
+                    <label>Season End</label>
+                    <input id="season-to" type="date" style="background:var(--card2);border:1px solid var(--border2);border-radius:10px;padding:10px 12px;color:var(--text);font-family:var(--sans);font-size:14px;outline:none;width:100%">
+                </div>
+                <button class="btn btn-lime" onclick="loadSeasonAnalysis()">Analyze</button>
+            </div>
+            <div style="font-size:12px;color:var(--muted);margin-top:8px;">
+                Tip: tag expenses to this farm on the <a href="/expenses/" style="color:var(--lime);text-decoration:none">Expenses page</a> for them to appear here.
+            </div>
+        </div>
+        <div id="season-result" style="display:none">
+            <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:14px;margin-bottom:14px;" id="season-summary-cards"></div>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:14px;flex-wrap:wrap;">
+                <div class="history-section" id="season-cost-breakdown">
+                    <div class="history-title">Cost Breakdown by Category</div>
+                </div>
+                <div class="history-section" id="season-product-chart">
+                    <div class="history-title">Harvest by Product (kg)</div>
+                </div>
+            </div>
+            <div class="table-wrap">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Product</th>
+                            <th>Harvested</th>
+                            <th>Share</th>
+                            <th>Allocated Cost</th>
+                            <th>Cost / Unit</th>
+                            <th>Sale Price</th>
+                            <th>Profit / Unit</th>
+                            <th>Margin</th>
+                        </tr>
+                    </thead>
+                    <tbody id="season-body"></tbody>
+                </table>
+            </div>
+        </div>
+        <div id="season-empty" style="color:var(--muted);text-align:center;padding:40px;display:none">Select a farm and date range, then click Analyze.</div>
+    </div>
+</div>
+
+<!-- WEATHER MODAL -->
+<div class="modal-bg" id="weather-modal">
+    <div class="modal" style="width:500px">
+        <div class="modal-title" id="weather-modal-title">Log Weather</div>
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;flex-wrap:wrap;gap:8px;">
+            <div class="modal-sub" style="margin:0">Daily conditions for this farm</div>
+            <button id="autofill-btn" onclick="autoFillWeather()" style="display:flex;align-items:center;gap:7px;background:linear-gradient(135deg,var(--teal),var(--blue));border:none;border-radius:10px;padding:8px 16px;font-family:var(--sans);font-size:12px;font-weight:700;color:#001a1a;cursor:pointer;transition:all .2s">
+                <span id="autofill-icon">⛅</span> Auto-fill from location
+            </button>
+        </div>
+        <div id="weather-fetch-status" style="display:none;font-size:12px;padding:8px 12px;border-radius:8px;margin-bottom:12px;border:1px solid var(--border2);color:var(--sub)"></div>
+        <div class="form-row">
+            <div class="fld">
+                <label>Farm *</label>
+                <select id="w-farm" style="background:var(--card2);border:1px solid var(--border2);border-radius:10px;padding:10px 12px;color:var(--text);font-family:var(--sans);font-size:14px;outline:none;width:100%"></select>
+            </div>
+            <div class="fld">
+                <label>Date *</label>
+                <input id="w-date" type="date">
+            </div>
+            <div class="fld">
+                <label>Temp Min (°C)</label>
+                <input id="w-tmin" type="number" step="0.1" placeholder="e.g. 18">
+            </div>
+            <div class="fld">
+                <label>Temp Max (°C)</label>
+                <input id="w-tmax" type="number" step="0.1" placeholder="e.g. 34">
+            </div>
+            <div class="fld">
+                <label>Rainfall (mm)</label>
+                <input id="w-rain" type="number" step="0.1" min="0" placeholder="e.g. 2.5">
+            </div>
+            <div class="fld">
+                <label>Humidity (%)</label>
+                <input id="w-hum" type="number" step="0.1" min="0" max="100" placeholder="e.g. 65">
+            </div>
+            <div class="fld span2">
+                <label>Notes</label>
+                <input id="w-notes" placeholder="e.g. Sandstorm in the afternoon">
+            </div>
+        </div>
+        <div class="modal-actions">
+            <button class="btn-cancel" onclick="closeWeatherModal()">Cancel</button>
+            <button class="btn btn-lime" onclick="saveWeatherLog()">✓ Save</button>
         </div>
     </div>
 </div>
@@ -668,8 +886,29 @@ async function init(){
     allFarms    = await (await fetch("/farm/api/farms")).json();
     renderFarmCards();
     fillFarmFilter();
+    fillWeatherFarmFilter();
+    fillSeasonFarmSelect();
     await loadStats();
     await loadDeliveries();
+    // Set default season dates (current month)
+    let now = new Date();
+    let y   = now.getFullYear(), m = String(now.getMonth()+1).padStart(2,"0");
+    document.getElementById("season-from").value = `${y}-${m}-01`;
+    document.getElementById("season-to").value   = now.toISOString().split("T")[0];
+}
+
+function fillWeatherFarmFilter(){
+    document.getElementById("weather-farm-filter").innerHTML =
+        `<option value="">All Farms</option>` +
+        allFarms.map(f=>`<option value="${f.id}">${f.name}</option>`).join("");
+    document.getElementById("w-farm").innerHTML =
+        allFarms.map(f=>`<option value="${f.id}">${f.name}</option>`).join("");
+}
+
+function fillSeasonFarmSelect(){
+    document.getElementById("season-farm").innerHTML =
+        `<option value="">Select farm...</option>` +
+        allFarms.map(f=>`<option value="${f.id}">${f.name}</option>`).join("");
 }
 
 /* ── FARMS ── */
@@ -723,11 +962,13 @@ async function loadStats(){
 
 /* ── TABS ── */
 function switchTab(tab){
-    document.getElementById("section-deliveries").style.display = tab==="deliveries"?"":"none";
-    document.getElementById("section-history").style.display    = tab==="history"?"":"none";
-    document.getElementById("tab-deliveries").classList.toggle("active", tab==="deliveries");
-    document.getElementById("tab-history").classList.toggle("active",    tab==="history");
+    ["deliveries","history","weather","season"].forEach(t=>{
+        document.getElementById("section-"+t).style.display = tab===t?"":"none";
+        document.getElementById("tab-"+t).classList.toggle("active", tab===t);
+    });
+    document.getElementById("tab-action-area").style.display = tab==="deliveries"?"":"none";
     if(tab==="history") loadHistory();
+    if(tab==="weather") loadWeatherLogs();
 }
 
 /* ── DELIVERIES TABLE ── */
@@ -1038,6 +1279,224 @@ function showToast(msg){
 document.getElementById("delivery-modal").addEventListener("click",function(e){
     if(e.target===this) closeDeliveryModal();
 });
+document.getElementById("weather-modal").addEventListener("click",function(e){
+    if(e.target===this) closeWeatherModal();
+});
+
+/* ── WEATHER LOG ── */
+let editingWeatherId = null;
+
+async function loadWeatherLogs(){
+    let farmId = document.getElementById("weather-farm-filter").value;
+    let url    = "/farm/api/weather-logs?limit=120" + (farmId ? `&farm_id=${farmId}` : "");
+    let logs   = await (await fetch(url)).json();
+    if(!logs.length){
+        document.getElementById("weather-body").innerHTML =
+            `<tr><td colspan="8" style="text-align:center;color:var(--muted);padding:40px">No weather logs yet. Click <b>+ Log Weather</b>.</td></tr>`;
+        return;
+    }
+    document.getElementById("weather-body").innerHTML = logs.map(w=>`
+        <tr>
+            <td style="font-family:var(--mono);font-size:12px">${w.log_date}</td>
+            <td>${w.farm_name}</td>
+            <td style="font-family:var(--mono);color:var(--blue)">${w.temp_min!=null?w.temp_min+"°":"—"}</td>
+            <td style="font-family:var(--mono);color:var(--orange)">${w.temp_max!=null?w.temp_max+"°":"—"}</td>
+            <td style="font-family:var(--mono);color:var(--teal)">${w.rainfall_mm!=null?w.rainfall_mm+" mm":"—"}</td>
+            <td style="font-family:var(--mono);color:var(--purple)">${w.humidity_pct!=null?w.humidity_pct+"%":"—"}</td>
+            <td style="font-size:12px;color:var(--muted)">${w.notes||"—"}</td>
+            <td>
+                <div style="display:flex;gap:6px">
+                    <button class="action-btn" onclick="openEditWeather(${JSON.stringify(w).replace(/"/g,'&quot;')})">Edit</button>
+                    <button class="action-btn danger" onclick="deleteWeatherLog(${w.id},'${w.log_date}')">Delete</button>
+                </div>
+            </td>
+        </tr>`).join("");
+}
+
+function openWeatherModal(){
+    editingWeatherId = null;
+    document.getElementById("weather-modal-title").innerText = "Log Weather";
+    document.getElementById("w-date").value  = new Date().toISOString().split("T")[0];
+    document.getElementById("w-tmin").value  = "";
+    document.getElementById("w-tmax").value  = "";
+    document.getElementById("w-rain").value  = "";
+    document.getElementById("w-hum").value   = "";
+    document.getElementById("w-notes").value = "";
+    if(allFarms.length) document.getElementById("w-farm").value = allFarms[0].id;
+    document.getElementById("weather-modal").classList.add("open");
+}
+
+function openEditWeather(w){
+    editingWeatherId = w.id;
+    document.getElementById("weather-modal-title").innerText = "Edit Weather Log";
+    document.getElementById("w-farm").value  = w.farm_id;
+    document.getElementById("w-date").value  = w.log_date;
+    document.getElementById("w-tmin").value  = w.temp_min  != null ? w.temp_min  : "";
+    document.getElementById("w-tmax").value  = w.temp_max  != null ? w.temp_max  : "";
+    document.getElementById("w-rain").value  = w.rainfall_mm != null ? w.rainfall_mm : "";
+    document.getElementById("w-hum").value   = w.humidity_pct != null ? w.humidity_pct : "";
+    document.getElementById("w-notes").value = w.notes || "";
+    document.getElementById("weather-modal").classList.add("open");
+}
+
+function closeWeatherModal(){
+    editingWeatherId = null;
+    document.getElementById("weather-modal").classList.remove("open");
+    setWeatherStatus("", false);
+}
+
+function setWeatherStatus(msg, loading){
+    let el = document.getElementById("weather-fetch-status");
+    if(!msg){ el.style.display = "none"; return; }
+    el.style.display = "";
+    el.innerText = msg;
+    let btn = document.getElementById("autofill-btn");
+    let icon = document.getElementById("autofill-icon");
+    btn.disabled = loading;
+    icon.innerText = loading ? "⏳" : "⛅";
+}
+
+async function autoFillWeather(){
+    let farmId = parseInt(document.getElementById("w-farm").value);
+    let farm   = allFarms.find(f => f.id === farmId);
+    if(!farm){ showToast("Select a farm first"); return; }
+
+    let location = farm.location && farm.location !== "—" ? farm.location : farm.name;
+    // Normalize: "Nuweiba, South Sinai" → "Nuweiba+South+Sinai"
+    let query = location.replace(/,\s*/g, "+").replace(/\s+/g, "+");
+    setWeatherStatus(`Fetching weather for "${location}" from wttr.in…`, true);
+
+    try {
+        // wttr.in uses The Weather Channel data — free, no API key
+        let res  = await __erpFetch(`https://wttr.in/${query}?format=j1`);
+        if(!res.ok) throw new Error(`HTTP ${res.status}`);
+        let wx   = await res.json();
+
+        let cur  = wx.current_condition?.[0];
+        let day  = wx.weather?.[0];   // today
+        if(!cur || !day) throw new Error("Unexpected response format");
+
+        let tmin = parseFloat(day.mintempC);
+        let tmax = parseFloat(day.maxtempC);
+        let hum  = parseFloat(cur.humidity);
+
+        // Sum hourly precipMM for total rainfall today
+        let rain = (day.hourly || []).reduce((s, h) => s + parseFloat(h.precipMM || 0), 0);
+
+        document.getElementById("w-tmin").value = tmin.toFixed(1);
+        document.getElementById("w-tmax").value = tmax.toFixed(1);
+        document.getElementById("w-rain").value = rain.toFixed(1);
+        document.getElementById("w-hum").value  = hum.toFixed(0);
+
+        let desc = cur.weatherDesc?.[0]?.value || "";
+        setWeatherStatus(`✓ ${desc} — ${tmin}°C / ${tmax}°C, ${rain.toFixed(1)} mm rain, ${hum}% humidity (wttr.in / The Weather Channel)`, false);
+    } catch(err) {
+        setWeatherStatus(`Could not fetch weather data: ${err.message}. Fill in manually.`, false);
+    }
+}
+
+async function saveWeatherLog(){
+    let body = {
+        farm_id:      parseInt(document.getElementById("w-farm").value),
+        log_date:     document.getElementById("w-date").value,
+        temp_min:     document.getElementById("w-tmin").value  !== "" ? parseFloat(document.getElementById("w-tmin").value)  : null,
+        temp_max:     document.getElementById("w-tmax").value  !== "" ? parseFloat(document.getElementById("w-tmax").value)  : null,
+        rainfall_mm:  document.getElementById("w-rain").value  !== "" ? parseFloat(document.getElementById("w-rain").value)  : null,
+        humidity_pct: document.getElementById("w-hum").value   !== "" ? parseFloat(document.getElementById("w-hum").value)   : null,
+        notes:        document.getElementById("w-notes").value.trim() || null,
+    };
+    if(!body.log_date){ showToast("Date is required"); return; }
+    let url    = editingWeatherId ? `/farm/api/weather-logs/${editingWeatherId}` : "/farm/api/weather-logs";
+    let method = editingWeatherId ? "PUT" : "POST";
+    let res    = await fetch(url, {method, headers:{"Content-Type":"application/json"}, body:JSON.stringify(body)});
+    let data   = await res.json();
+    if(data.detail){ showToast("Error: "+data.detail); return; }
+    closeWeatherModal();
+    showToast(editingWeatherId ? "Weather log updated ✓" : "Weather log saved ✓");
+    loadWeatherLogs();
+}
+
+async function deleteWeatherLog(id, dateStr){
+    if(!confirm(`Delete weather log for ${dateStr}?`)) return;
+    let res  = await fetch(`/farm/api/weather-logs/${id}`, {method:"DELETE"});
+    let data = await res.json();
+    if(data.detail){ showToast("Error: "+data.detail); return; }
+    showToast("Deleted ✓");
+    loadWeatherLogs();
+}
+
+/* ── SEASON ANALYSIS ── */
+async function loadSeasonAnalysis(){
+    let farmId   = document.getElementById("season-farm").value;
+    let dateFrom = document.getElementById("season-from").value;
+    let dateTo   = document.getElementById("season-to").value;
+    if(!farmId)  { showToast("Select a farm first"); return; }
+    if(!dateFrom || !dateTo){ showToast("Set a date range"); return; }
+
+    let res  = await fetch(`/expenses/api/cost-allocation?farm_id=${farmId}&date_from=${dateFrom}&date_to=${dateTo}`);
+    let data = await res.json();
+    if(data.detail){ showToast("Error: "+data.detail); return; }
+
+    document.getElementById("season-empty").style.display  = "none";
+    document.getElementById("season-result").style.display = "";
+
+    // Summary cards
+    document.getElementById("season-summary-cards").innerHTML = `
+        <div class="stat-card green"><div class="stat-label">Total Farm Costs</div><div class="stat-value green" style="font-size:20px">${data.total_cost.toLocaleString(undefined,{minimumFractionDigits:2})} EGP</div></div>
+        <div class="stat-card lime"><div class="stat-label">Total Harvested</div><div class="stat-value lime" style="font-size:20px">${data.total_qty.toFixed(1)} units</div></div>
+        <div class="stat-card teal"><div class="stat-label">Expenses Tagged</div><div class="stat-value teal" style="font-size:20px">${data.expense_count}</div></div>
+        <div class="stat-card" style="border-top:2px solid var(--orange)"><div class="stat-label">Deliveries</div><div class="stat-value" style="font-size:20px;color:var(--orange)">${data.delivery_count}</div></div>
+    `;
+
+    // Cost breakdown chart
+    let maxCost = data.cost_by_category.length ? data.cost_by_category[0].amount : 1;
+    document.getElementById("season-cost-breakdown").innerHTML = `
+        <div class="history-title">Cost Breakdown by Category</div>
+        ${data.cost_by_category.length === 0
+            ? `<div style="color:var(--muted);font-size:13px">No expenses tagged to this farm for this period.<br>Go to <a href="/expenses/" style="color:var(--lime)">Expenses</a> and tag expenses to this farm.</div>`
+            : data.cost_by_category.map(c=>`
+                <div class="history-bar-row">
+                    <div class="history-bar-label">${c.name}</div>
+                    <div class="history-bar-track"><div class="history-bar-fill" style="width:${(c.amount/maxCost*100).toFixed(1)}%;background:linear-gradient(90deg,var(--orange),var(--warn))"></div></div>
+                    <div class="history-bar-val">${c.amount.toLocaleString(undefined,{minimumFractionDigits:0})}</div>
+                </div>`).join("")}
+    `;
+
+    // Product harvest chart
+    let maxQty = data.products.length ? data.products[0].total_qty : 1;
+    document.getElementById("season-product-chart").innerHTML = `
+        <div class="history-title">Harvest by Product</div>
+        ${data.products.length === 0
+            ? `<div style="color:var(--muted);font-size:13px">No deliveries from this farm in this period.</div>`
+            : data.products.map(p=>`
+                <div class="history-bar-row">
+                    <div class="history-bar-label">${p.product_name}</div>
+                    <div class="history-bar-track"><div class="history-bar-fill" style="width:${(p.total_qty/maxQty*100).toFixed(1)}%;background:linear-gradient(90deg,var(--lime),var(--green))"></div></div>
+                    <div class="history-bar-val">${p.total_qty.toFixed(1)}</div>
+                </div>`).join("")}
+    `;
+
+    // Products table
+    if(!data.products.length){
+        document.getElementById("season-body").innerHTML =
+            `<tr><td colspan="8" style="text-align:center;color:var(--muted);padding:40px">No deliveries recorded for this farm in this period.</td></tr>`;
+    } else {
+        document.getElementById("season-body").innerHTML = data.products.map(p=>{
+            let marginColor = p.profit_margin_pct >= 30 ? "var(--green)" : p.profit_margin_pct >= 0 ? "var(--warn)" : "var(--danger)";
+            let profitColor = p.profit_per_unit >= 0 ? "var(--green)" : "var(--danger)";
+            return `<tr>
+                <td class="name">${p.product_name}</td>
+                <td style="font-family:var(--mono)">${p.total_qty.toFixed(2)} ${p.unit}</td>
+                <td style="font-family:var(--mono);color:var(--muted)">${p.share_pct}%</td>
+                <td style="font-family:var(--mono);color:var(--orange)">${p.allocated_cost.toLocaleString(undefined,{minimumFractionDigits:2})}</td>
+                <td style="font-family:var(--mono);color:var(--warn)">${p.cost_per_unit.toFixed(2)}</td>
+                <td style="font-family:var(--mono);color:var(--blue)">${p.sale_price.toFixed(2)}</td>
+                <td style="font-family:var(--mono);font-weight:700;color:${profitColor}">${p.profit_per_unit.toFixed(2)}</td>
+                <td style="font-family:var(--mono);font-weight:700;color:${marginColor}">${p.profit_margin_pct}%</td>
+            </tr>`;
+        }).join("");
+    }
+}
 
 init();
 </script>

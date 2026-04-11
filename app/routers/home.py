@@ -525,11 +525,35 @@ body {
                 </div>
             </a>
 
+            <a href="/expenses/" class="module-card c-amber" data-permission="page_accounting">
+                <div class="card-icon">💸</div>
+                <div class="card-body">
+                    <div class="card-name">Expenses</div>
+                    <div class="card-desc">Water, electricity, gas, rent and operating costs</div>
+                </div>
+                <div class="card-footer">
+                    <span class="card-tag">Finance</span>
+                    <span class="card-arrow">↗</span>
+                </div>
+            </a>
+
             <a href="/users/" class="module-card c-rose" id="card-users" style="display:none">
                 <div class="card-icon">🔐</div>
                 <div class="card-body">
                     <div class="card-name">User Management</div>
                     <div class="card-desc">Roles, permissions, passwords, activity log</div>
+                </div>
+                <div class="card-footer">
+                    <span class="card-tag">Admin Only</span>
+                    <span class="card-arrow">↗</span>
+                </div>
+            </a>
+
+            <a href="/audit-log/" class="module-card c-purple" id="card-audit" style="display:none">
+                <div class="card-icon">🔍</div>
+                <div class="card-body">
+                    <div class="card-name">Audit Log</div>
+                    <div class="card-desc">Full history of every action taken across the system</div>
                 </div>
                 <div class="card-footer">
                     <span class="card-tag">Admin Only</span>
@@ -606,6 +630,8 @@ document.querySelectorAll(".module-card[data-permission]").forEach(card => {
 if(userRole === "admin"){
     let c = document.getElementById("card-users");
     if(c) c.style.display = "";
+    let a = document.getElementById("card-audit");
+    if(a) a.style.display = "";
 }
 
 // Restore saved colour mode

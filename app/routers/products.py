@@ -6,7 +6,9 @@ from typing import Optional, List
 from pydantic import BaseModel
 
 from app.database import get_db
+from app.core.permissions import get_current_user
 from app.models.product import Product
+from app.models.user import User
 from app.core.log import record
 
 router = APIRouter(prefix="/products", tags=["Products"])
@@ -107,7 +109,7 @@ def get_products(
 
 
 @router.post("/api/add")
-def add_product(data: ProductCreate, db: Session = Depends(get_db)):
+def add_product(data: ProductCreate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     if db.query(Product).filter(Product.sku == data.sku).first():
         raise HTTPException(status_code=400, detail="SKU already exists")
     p = Product(
@@ -126,7 +128,7 @@ def add_product(data: ProductCreate, db: Session = Depends(get_db)):
 
 
 @router.put("/api/edit/{product_id}")
-def edit_product(product_id: int, data: ProductUpdate, db: Session = Depends(get_db)):
+def edit_product(product_id: int, data: ProductUpdate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     p = db.query(Product).filter(Product.id == product_id).first()
     if not p:
         raise HTTPException(status_code=404, detail="Product not found")
@@ -141,7 +143,7 @@ def edit_product(product_id: int, data: ProductUpdate, db: Session = Depends(get
 
 
 @router.delete("/api/delete/{product_id}")
-def delete_product(product_id: int, db: Session = Depends(get_db)):
+def delete_product(product_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     p = db.query(Product).filter(Product.id == product_id).first()
     if not p:
         raise HTTPException(status_code=404, detail="Product not found")

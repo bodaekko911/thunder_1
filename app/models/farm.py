@@ -14,7 +14,8 @@ class Farm(Base):
     is_active  = Column(Integer, default=1)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
-    deliveries = relationship("FarmDelivery", back_populates="farm")
+    deliveries   = relationship("FarmDelivery", back_populates="farm")
+    weather_logs = relationship("WeatherLog", back_populates="farm")
 
 
 class FarmDelivery(Base):
@@ -48,3 +49,19 @@ class FarmDeliveryItem(Base):
 
     delivery = relationship("FarmDelivery", back_populates="items")
     product  = relationship("Product")
+
+
+class WeatherLog(Base):
+    __tablename__ = "weather_logs"
+
+    id           = Column(Integer, primary_key=True, index=True)
+    farm_id      = Column(Integer, ForeignKey("farms.id"), nullable=False)
+    log_date     = Column(Date, nullable=False)
+    temp_min     = Column(Numeric(5, 1), nullable=True)   # °C
+    temp_max     = Column(Numeric(5, 1), nullable=True)   # °C
+    rainfall_mm  = Column(Numeric(7, 2), nullable=True)
+    humidity_pct = Column(Numeric(5, 1), nullable=True)   # %
+    notes        = Column(Text, nullable=True)
+    created_at   = Column(DateTime(timezone=True), server_default=func.now())
+
+    farm = relationship("Farm", back_populates="weather_logs")

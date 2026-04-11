@@ -7,9 +7,10 @@ from app.models.inventory  import StockMove
 from app.models.hr         import Employee, Attendance, Payroll
 from app.models.accounting import Account, Journal, JournalEntry
 from app.models.production import Recipe, RecipeInput, RecipeOutput, ProductionBatch, BatchInput, BatchOutput
-from app.models.b2b        import B2BClient, B2BInvoice, B2BInvoiceItem, Consignment, ConsignmentItem, B2BRefund, B2BRefundItem
-from app.models.farm import Farm, FarmDelivery, FarmDeliveryItem
+from app.models.b2b        import B2BClient, B2BInvoice, B2BInvoiceItem, Consignment, ConsignmentItem, B2BRefund, B2BRefundItem, B2BClientPrice
+from app.models.farm import Farm, FarmDelivery, FarmDeliveryItem, WeatherLog
 from app.models.spoilage import SpoilageRecord
-from app.models.refund  import RetailRefund, RetailRefundItem
+from app.models.refund   import RetailRefund, RetailRefundItem
+from app.models.expense  import ExpenseCategory, Expense
 # Import ActivityLog so Base.metadata includes it and create_all() creates the table
-from app.core.log       import ActivityLog
+from app.core.log        import ActivityLog

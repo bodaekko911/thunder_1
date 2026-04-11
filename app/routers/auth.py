@@ -181,7 +181,13 @@ def login_page():
             localStorage.setItem("user_name", data.name);
             localStorage.setItem("user_role", data.role);
             localStorage.setItem("user_permissions", data.permissions || "");
-            window.location.href = "/home";
+            const roleHome = {
+                "admin":        "/dashboard",
+                "cashier":      "/pos",
+                "farm_manager": "/farm/",
+                "farm manager": "/farm/",
+            };
+            window.location.href = roleHome[data.role] || "/home";
         }
 
         // Press Enter to login

@@ -1,3 +1,5 @@
+from collections import defaultdict
+
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import HTMLResponse
 from sqlalchemy.orm import Session
@@ -6,8 +8,10 @@ from typing import Optional
 from pydantic import BaseModel
 
 from app.database import get_db
+from app.core.permissions import get_current_user
 from app.models.customer import Customer
-from app.models.invoice import Invoice
+from app.models.user import User
+from app.models.invoice import Invoice, InvoiceItem
 from app.models.refund import RetailRefund
 from app.core.log import record
 
@@ -113,8 +117,103 @@ def get_customer_invoices(customer_id: int, db: Session = Depends(get_db)):
     return rows
 
 
+@router.get("/api/profile/{customer_id}")
+def customer_profile(customer_id: int, db: Session = Depends(get_db)):
+    c = db.query(Customer).filter(Customer.id == customer_id).first()
+    if not c:
+        raise HTTPException(status_code=404, detail="Customer not found")
+
+    invoices = (
+        db.query(Invoice)
+        .filter(Invoice.customer_id == customer_id)
+        .order_by(Invoice.created_at.desc())
+        .all()
+    )
+    refunds = (
+        db.query(RetailRefund)
+        .filter(RetailRefund.customer_id == customer_id)
+        .order_by(RetailRefund.created_at.desc())
+        .all()
+    )
+
+    paid = [i for i in invoices if i.status == "paid"]
+    total_orders   = len(paid)
+    gross_spent    = sum(float(i.total) for i in paid)
+    total_refunded = sum(float(r.total) for r in refunds)
+    net_spent      = max(0.0, gross_spent - total_refunded)
+    avg_basket     = gross_spent / total_orders if total_orders else 0.0
+    last_purchase  = max((i.created_at for i in paid), default=None)
+
+    # aggregate qty per product across all paid invoices
+    prod_agg = defaultdict(lambda: {"name": "", "sku": "", "qty": 0.0, "revenue": 0.0})
+    for inv in paid:
+        for it in inv.items:
+            prod_agg[it.product_id]["name"]    = it.name or ""
+            prod_agg[it.product_id]["sku"]     = it.sku  or ""
+            prod_agg[it.product_id]["qty"]    += float(it.qty)
+            prod_agg[it.product_id]["revenue"] += float(it.total)
+    top_products = sorted(prod_agg.values(), key=lambda x: x["qty"], reverse=True)[:10]
+
+    order_rows = []
+    for inv in invoices:
+        order_rows.append({
+            "type":           "invoice",
+            "id":             inv.id,
+            "ref_number":     inv.invoice_number or f"#{inv.id}",
+            "total":          float(inv.total),
+            "status":         inv.status,
+            "payment_method": inv.payment_method or "cash",
+            "created_at":     inv.created_at.strftime("%Y-%m-%d %H:%M") if inv.created_at else "—",
+            "sort_key":       inv.created_at.isoformat() if inv.created_at else "",
+            "items": [
+                {
+                    "name":       it.name,
+                    "qty":        float(it.qty),
+                    "unit_price": float(it.unit_price),
+                    "total":      float(it.total),
+                }
+                for it in inv.items
+            ],
+        })
+    for ref in refunds:
+        order_rows.append({
+            "type":           "refund",
+            "id":             ref.id,
+            "ref_number":     ref.refund_number,
+            "total":          -float(ref.total),
+            "status":         "refunded",
+            "payment_method": ref.refund_method,
+            "reason":         ref.reason or "—",
+            "created_at":     ref.created_at.strftime("%Y-%m-%d %H:%M") if ref.created_at else "—",
+            "sort_key":       ref.created_at.isoformat() if ref.created_at else "",
+            "items":          [],
+        })
+    order_rows.sort(key=lambda x: x["sort_key"], reverse=True)
+
+    return {
+        "customer": {
+            "id":         c.id,
+            "name":       c.name,
+            "phone":      c.phone   or "—",
+            "email":      c.email   or "—",
+            "address":    c.address or "—",
+            "created_at": c.created_at.strftime("%Y-%m-%d") if c.created_at else "—",
+        },
+        "stats": {
+            "total_orders":   total_orders,
+            "gross_spent":    round(gross_spent,    2),
+            "total_refunded": round(total_refunded, 2),
+            "net_spent":      round(net_spent,      2),
+            "avg_basket":     round(avg_basket,     2),
+            "last_purchase":  last_purchase.strftime("%Y-%m-%d") if last_purchase else None,
+        },
+        "top_products": top_products,
+        "orders":       order_rows,
+    }
+
+
 @router.post("/api/add")
-def add_customer(data: CustomerCreate, db: Session = Depends(get_db)):
+def add_customer(data: CustomerCreate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     if data.phone and db.query(Customer).filter(Customer.phone == data.phone).first():
         raise HTTPException(status_code=400, detail="Phone number already exists")
     c = Customer(**data.model_dump())
@@ -127,7 +226,7 @@ def add_customer(data: CustomerCreate, db: Session = Depends(get_db)):
 
 
 @router.put("/api/edit/{customer_id}")
-def edit_customer(customer_id: int, data: CustomerUpdate, db: Session = Depends(get_db)):
+def edit_customer(customer_id: int, data: CustomerUpdate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     c = db.query(Customer).filter(Customer.id == customer_id).first()
     if not c:
         raise HTTPException(status_code=404, detail="Customer not found")
@@ -141,7 +240,7 @@ def edit_customer(customer_id: int, data: CustomerUpdate, db: Session = Depends(
 
 
 @router.delete("/api/delete/{customer_id}")
-def delete_customer(customer_id: int, db: Session = Depends(get_db)):
+def delete_customer(customer_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     c = db.query(Customer).filter(Customer.id == customer_id).first()
     if not c:
         raise HTTPException(status_code=404, detail="Customer not found")
@@ -150,6 +249,347 @@ def delete_customer(customer_id: int, db: Session = Depends(get_db)):
            ref_type="customer", ref_id=customer_id)
     db.delete(c); db.commit()
     return {"ok": True}
+
+
+# ── Profile UI ─────────────────────────────────────────
+@router.get("/profile/{customer_id}", response_class=HTMLResponse)
+def customer_profile_ui(customer_id: int):
+    return f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Customer Profile — Thunder ERP</title>
+<link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,300;0,400;0,600;1,300;1,400&family=DM+Sans:wght@300;400;500;600&family=DM+Mono:wght@400;500&family=Outfit:wght@400;500;600;700;800;900&display=swap" rel="stylesheet">
+<style>
+:root{{
+    --bg:      #08090c; --card:   #0d1008; --card2:  #111408;
+    --border:  rgba(255,255,255,0.055); --border2: rgba(255,255,255,0.10);
+    --green:   #7ecb6f; --green2: #a8d97a; --amber:  #d4a256;
+    --teal:    #5bbfb5; --rose:   #c97a7a; --blue:   #6a9fd4;
+    --text:    #e8eae0; --sub:    #8a9080; --muted:  #4a5040;
+    --serif:   'Cormorant Garamond', serif;
+    --sans:    'DM Sans', sans-serif;
+    --mono:    'DM Mono', monospace;
+}}
+body.light{{
+    --bg:#f4f5ef;--card:#eceee6;--card2:#e4e6de;
+    --border:rgba(0,0,0,0.07);--border2:rgba(0,0,0,0.12);
+    --text:#1a1e14;--sub:#4a5040;--muted:#8a9080;
+}}
+*,*::before,*::after{{box-sizing:border-box;margin:0;padding:0}}
+body{{font-family:var(--sans);background:var(--bg);color:var(--text);min-height:100vh}}
+
+.topbar{{position:sticky;top:0;z-index:100;display:flex;align-items:center;justify-content:space-between;gap:10px;padding:0 24px;height:58px;border-bottom:1px solid var(--border);background:rgba(10,13,24,.92);backdrop-filter:blur(20px)}}
+.logo{{font-family:'Outfit',sans-serif;font-size:17px;font-weight:900;text-decoration:none;display:flex;align-items:center;gap:8px}}
+.logo-text{{background:linear-gradient(135deg,var(--green),var(--blue));-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text}}
+.topbar-right{{display:flex;align-items:center;gap:10px}}
+.back-btn{{background:var(--card);border:1px solid var(--border);color:var(--sub);font-family:var(--sans);font-size:12px;font-weight:500;padding:8px 14px;border-radius:8px;cursor:pointer;transition:all .2s;text-decoration:none;display:flex;align-items:center;gap:6px}}
+.back-btn:hover{{border-color:var(--border2);color:var(--text)}}
+.mode-btn{{background:var(--card);border:1px solid var(--border);color:var(--sub);width:36px;height:36px;border-radius:10px;font-size:16px;cursor:pointer;transition:all .2s;display:flex;align-items:center;justify-content:center}}
+.mode-btn:hover{{border-color:var(--border2);transform:scale(1.08)}}
+
+.content{{max-width:1100px;margin:0 auto;padding:32px 24px;display:flex;flex-direction:column;gap:28px}}
+
+/* ── Customer header ── */
+.cust-header{{display:flex;align-items:flex-start;gap:20px;flex-wrap:wrap}}
+.cust-avatar{{width:64px;height:64px;border-radius:50%;background:linear-gradient(135deg,var(--green),var(--amber));display:flex;align-items:center;justify-content:center;font-family:'Outfit',sans-serif;font-size:26px;font-weight:800;color:#0a0c08;flex-shrink:0}}
+.cust-info{{flex:1}}
+.cust-name{{font-family:var(--serif);font-size:36px;font-weight:300;letter-spacing:-.3px;line-height:1.1}}
+.cust-name em{{font-style:italic;color:var(--green2)}}
+.cust-meta{{display:flex;gap:16px;flex-wrap:wrap;margin-top:8px}}
+.cust-meta-item{{font-size:13px;color:var(--muted);display:flex;align-items:center;gap:5px}}
+
+/* ── Stats ── */
+.stats-grid{{display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:14px}}
+.stat-card{{background:var(--card);border:1px solid var(--border);border-radius:14px;padding:20px}}
+.stat-label{{font-size:10px;letter-spacing:1.5px;text-transform:uppercase;color:var(--muted);margin-bottom:8px}}
+.stat-val{{font-family:var(--mono);font-size:26px;font-weight:500;color:var(--text)}}
+.stat-val.green{{color:var(--green2)}}
+.stat-val.amber{{color:var(--amber)}}
+.stat-val.teal{{color:var(--teal)}}
+.stat-val.rose{{color:var(--rose)}}
+.stat-sub{{font-size:11px;color:var(--muted);margin-top:4px}}
+
+/* ── Section title ── */
+.section-title{{font-size:11px;font-weight:600;letter-spacing:2.5px;text-transform:uppercase;color:var(--muted);margin-bottom:16px;display:flex;align-items:center;gap:12px}}
+.section-title::after{{content:'';flex:1;height:1px;background:linear-gradient(90deg,var(--border2),transparent)}}
+
+/* ── Top products ── */
+.products-list{{display:flex;flex-direction:column;gap:8px}}
+.product-row{{display:flex;align-items:center;gap:12px}}
+.product-rank{{font-family:var(--mono);font-size:11px;color:var(--muted);width:20px;text-align:right;flex-shrink:0}}
+.product-bar-wrap{{flex:1;display:flex;flex-direction:column;gap:3px}}
+.product-name{{font-size:13px;color:var(--text);font-weight:500}}
+.product-bar-bg{{height:6px;background:var(--border);border-radius:3px;overflow:hidden}}
+.product-bar{{height:100%;border-radius:3px;background:linear-gradient(90deg,var(--green),var(--teal));transition:width .6s ease}}
+.product-qty{{font-family:var(--mono);font-size:12px;color:var(--sub);white-space:nowrap;flex-shrink:0}}
+.product-rev{{font-family:var(--mono);font-size:11px;color:var(--muted);flex-shrink:0;min-width:70px;text-align:right}}
+
+/* ── Orders table ── */
+.orders-wrap{{background:var(--card);border:1px solid var(--border);border-radius:14px;overflow:hidden}}
+table{{width:100%;border-collapse:collapse}}
+thead th{{font-size:10px;letter-spacing:1.5px;text-transform:uppercase;color:var(--muted);padding:12px 16px;text-align:left;border-bottom:1px solid var(--border);white-space:nowrap;font-weight:500;background:var(--card2)}}
+tbody tr.order-row{{border-bottom:1px solid var(--border);cursor:pointer;transition:background .15s}}
+tbody tr.order-row:hover{{background:rgba(255,255,255,.025)}}
+tbody tr.order-row.refund-row:hover{{background:rgba(201,122,122,.04)}}
+tbody td{{padding:13px 16px;font-size:13px;vertical-align:middle}}
+.td-ref{{font-family:var(--mono);font-size:12px;color:var(--sub)}}
+.td-date{{font-family:var(--mono);font-size:11px;color:var(--muted);white-space:nowrap}}
+.td-total{{font-family:var(--mono);font-size:14px;font-weight:500}}
+.td-total.income{{color:var(--green2)}}
+.td-total.refund{{color:var(--rose)}}
+.badge{{display:inline-block;font-size:10px;font-weight:600;letter-spacing:.8px;text-transform:uppercase;padding:3px 8px;border-radius:6px}}
+.b-paid{{background:color-mix(in srgb,var(--green) 12%,transparent);color:var(--green);border:1px solid color-mix(in srgb,var(--green) 25%,transparent)}}
+.b-refunded{{background:color-mix(in srgb,var(--rose) 12%,transparent);color:var(--rose);border:1px solid color-mix(in srgb,var(--rose) 25%,transparent)}}
+.b-pending{{background:color-mix(in srgb,var(--amber) 12%,transparent);color:var(--amber);border:1px solid color-mix(in srgb,var(--amber) 25%,transparent)}}
+.pay-badge{{display:inline-block;font-size:10px;color:var(--muted);background:var(--card2);border:1px solid var(--border);padding:2px 7px;border-radius:5px;text-transform:capitalize}}
+.expand-icon{{color:var(--muted);font-size:14px;transition:transform .2s;display:inline-block}}
+
+/* line items sub-row */
+tr.items-row td{{padding:0}}
+.items-inner{{padding:0 16px 14px 48px;border-top:1px solid var(--border)}}
+.items-table{{width:100%;border-collapse:collapse;font-size:12px}}
+.items-table th{{color:var(--muted);font-size:10px;letter-spacing:1px;text-transform:uppercase;padding:6px 8px;text-align:left;font-weight:500}}
+.items-table td{{padding:6px 8px;color:var(--sub);border-top:1px solid rgba(255,255,255,.03)}}
+.items-table td.item-name{{color:var(--text)}}
+.items-table td.item-num{{font-family:var(--mono);text-align:right}}
+
+@media(max-width:700px){{
+    .content{{padding:20px 16px}}
+    .cust-name{{font-size:26px}}
+    .stats-grid{{grid-template-columns:1fr 1fr}}
+    .topbar{{padding:0 16px}}
+}}
+</style>
+</head>
+<body>
+
+<header class="topbar">
+    <a href="/home" class="logo">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none">
+            <polygon points="13,2 4,14 11,14 11,22 20,10 13,10" fill="#f59e0b"/>
+        </svg>
+        <span class="logo-text">Thunder ERP</span>
+    </a>
+    <div class="topbar-right">
+        <button class="mode-btn" id="mode-btn" onclick="toggleMode()">&#127769;</button>
+        <a href="/customers-mgmt/" class="back-btn">&#8592; Customers</a>
+    </div>
+</header>
+
+<div class="content">
+    <div id="loading" style="color:var(--muted);font-size:13px;padding:40px 0;text-align:center">Loading…</div>
+    <div id="profile-content" style="display:none;flex-direction:column;gap:28px"></div>
+</div>
+
+<script>
+const CUSTOMER_ID = {customer_id};
+const TOKEN = localStorage.getItem("token");
+if (!TOKEN) {{ window.location.href = "/"; }}
+
+if (localStorage.getItem("colorMode") === "light") {{
+    document.body.classList.add("light");
+    document.getElementById("mode-btn").innerHTML = "&#9728;&#65039;";
+}}
+function toggleMode(){{
+    const isLight = document.body.classList.toggle("light");
+    document.getElementById("mode-btn").innerHTML = isLight ? "&#9728;&#65039;" : "&#127769;";
+    localStorage.setItem("colorMode", isLight ? "light" : "dark");
+}}
+
+function fmt(n){{ return Number(n).toLocaleString("en-US",{{minimumFractionDigits:2,maximumFractionDigits:2}}); }}
+function esc(s){{ return String(s||"").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;"); }}
+
+async function load(){{
+    const r = await fetch(`/customers-mgmt/api/profile/${{CUSTOMER_ID}}`, {{
+        headers: {{ Authorization: "Bearer " + TOKEN }}
+    }});
+    if (!r.ok) {{
+        document.getElementById("loading").textContent = "Customer not found.";
+        return;
+    }}
+    const d = await r.json();
+    render(d);
+    document.getElementById("loading").style.display = "none";
+    const pc = document.getElementById("profile-content");
+    pc.style.display = "flex";
+}}
+
+function render(d){{
+    const pc = document.getElementById("profile-content");
+    const c  = d.customer;
+    const s  = d.stats;
+
+    // ── Header ──
+    const initials = c.name.split(" ").map(w=>w[0]).slice(0,2).join("").toUpperCase();
+    const nameParts = c.name.split(" ");
+    const firstName = nameParts.slice(0,-1).join(" ");
+    const lastName  = nameParts.slice(-1)[0] || "";
+    const nameHtml  = firstName
+        ? `${{esc(firstName)}} <em>${{esc(lastName)}}</em>`
+        : `<em>${{esc(c.name)}}</em>`;
+
+    pc.innerHTML = `
+    <div class="cust-header">
+        <div class="cust-avatar">${{initials}}</div>
+        <div class="cust-info">
+            <div class="cust-name">${{nameHtml}}</div>
+            <div class="cust-meta">
+                ${{c.phone !== "—" ? `<span class="cust-meta-item">&#128222; ${{esc(c.phone)}}</span>` : ""}}
+                ${{c.email !== "—" ? `<span class="cust-meta-item">&#9993; ${{esc(c.email)}}</span>` : ""}}
+                ${{c.address !== "—" ? `<span class="cust-meta-item">&#128205; ${{esc(c.address)}}</span>` : ""}}
+                <span class="cust-meta-item">&#128197; Customer since ${{esc(c.created_at)}}</span>
+            </div>
+        </div>
+    </div>
+
+    <div>
+        <div class="stats-grid">
+            <div class="stat-card">
+                <div class="stat-label">Total Orders</div>
+                <div class="stat-val green">${{s.total_orders}}</div>
+                ${{s.total_refunded > 0 ? `<div class="stat-sub">${{d.orders.filter(o=>o.type==="refund").length}} refund(s)</div>` : ""}}
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">Net Spent</div>
+                <div class="stat-val green">${{fmt(s.net_spent)}}</div>
+                ${{s.total_refunded > 0 ? `<div class="stat-sub">−${{fmt(s.total_refunded)}} refunded</div>` : ""}}
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">Avg Basket</div>
+                <div class="stat-val amber">${{fmt(s.avg_basket)}}</div>
+                <div class="stat-sub">per paid order</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">Last Purchase</div>
+                <div class="stat-val teal" style="font-size:18px">${{s.last_purchase || "Never"}}</div>
+            </div>
+        </div>
+    </div>`;
+
+    // ── Top products ──
+    if (d.top_products.length) {{
+        const maxQty = d.top_products[0].qty;
+        pc.innerHTML += `
+        <div>
+            <div class="section-title">Most Bought Products</div>
+            <div class="products-list">
+                ${{d.top_products.map((p, i) => `
+                <div class="product-row">
+                    <span class="product-rank">#${{i+1}}</span>
+                    <div class="product-bar-wrap">
+                        <div class="product-name">${{esc(p.name)}}</div>
+                        <div class="product-bar-bg">
+                            <div class="product-bar" style="width:${{Math.round(p.qty/maxQty*100)}}%"></div>
+                        </div>
+                    </div>
+                    <span class="product-qty">${{Number(p.qty).toLocaleString("en-US",{{maximumFractionDigits:1}})}} units</span>
+                    <span class="product-rev">${{fmt(p.revenue)}}</span>
+                </div>`).join("")}}
+            </div>
+        </div>`;
+    }}
+
+    // ── Order history ──
+    pc.innerHTML += `
+    <div>
+        <div class="section-title">Order History</div>
+        <div class="orders-wrap">
+            <table>
+                <thead>
+                    <tr>
+                        <th style="width:28px"></th>
+                        <th>Ref #</th>
+                        <th>Date</th>
+                        <th>Payment</th>
+                        <th>Status</th>
+                        <th style="text-align:right">Total</th>
+                    </tr>
+                </thead>
+                <tbody id="orders-tbody">
+                    ${{d.orders.length === 0 ? '<tr><td colspan="6" style="text-align:center;padding:40px;color:var(--muted)">No orders yet</td></tr>' : ""}}
+                </tbody>
+            </table>
+        </div>
+    </div>`;
+
+    const tbody = document.getElementById("orders-tbody");
+    d.orders.forEach((o, idx) => {{
+        const isRefund  = o.type === "refund";
+        const totalCls  = isRefund ? "td-total refund" : "td-total income";
+        const totalSign = isRefund ? "−" : "+";
+        const statusBadge = o.status === "paid"     ? "b-paid"
+                          : o.status === "refunded" ? "b-refunded" : "b-pending";
+        const hasItems = o.items && o.items.length > 0;
+
+        // order row
+        const tr = document.createElement("tr");
+        tr.className = "order-row" + (isRefund ? " refund-row" : "");
+        tr.innerHTML = `
+            <td style="padding-left:14px">
+                ${{hasItems ? `<span class="expand-icon" id="icon-${{idx}}">&#9654;</span>` : ""}}
+            </td>
+            <td class="td-ref">
+                <a href="${{isRefund ? `/refunds/print/${{o.id}}` : `/invoice/${{o.id}}`}}"
+                   target="_blank"
+                   style="color:inherit;text-decoration:none"
+                   onclick="event.stopPropagation()">
+                    ${{esc(o.ref_number)}}
+                </a>
+            </td>
+            <td class="td-date">${{esc(o.created_at)}}</td>
+            <td><span class="pay-badge">${{esc(o.payment_method)}}</span></td>
+            <td><span class="badge ${{statusBadge}}">${{esc(o.status)}}</span></td>
+            <td style="text-align:right" class="${{totalCls}}">${{totalSign}}${{fmt(Math.abs(o.total))}}</td>`;
+
+        // items sub-row
+        const subTr = document.createElement("tr");
+        subTr.className = "items-row";
+        subTr.style.display = "none";
+        if (hasItems) {{
+            subTr.innerHTML = `<td colspan="6">
+                <div class="items-inner">
+                    <table class="items-table">
+                        <thead><tr>
+                            <th>Product</th>
+                            <th style="text-align:right">Qty</th>
+                            <th style="text-align:right">Unit Price</th>
+                            <th style="text-align:right">Line Total</th>
+                        </tr></thead>
+                        <tbody>
+                            ${{o.items.map(it => `
+                            <tr>
+                                <td class="item-name">${{esc(it.name)}}</td>
+                                <td class="item-num">${{Number(it.qty).toLocaleString("en-US",{{maximumFractionDigits:3}})}}</td>
+                                <td class="item-num">${{fmt(it.unit_price)}}</td>
+                                <td class="item-num">${{fmt(it.total)}}</td>
+                            </tr>`).join("")}}
+                        </tbody>
+                    </table>
+                </div>
+            </td>`;
+        }}
+
+        if (hasItems) {{
+            tr.style.cursor = "pointer";
+            tr.addEventListener("click", () => {{
+                const open = subTr.style.display !== "none";
+                subTr.style.display = open ? "none" : "";
+                const icon = document.getElementById(`icon-${{idx}}`);
+                if (icon) icon.style.transform = open ? "" : "rotate(90deg)";
+            }});
+        }}
+
+        tbody.appendChild(tr);
+        tbody.appendChild(subTr);
+    }});
+}}
+
+load();
+</script>
+</body>
+</html>"""
 
 
 # ── UI ─────────────────────────────────────────────────
@@ -626,6 +1066,7 @@ async function load(){
             <td style="font-family:var(--mono);color:var(--blue)">${c.invoices}</td>
             <td class="mono">${c.total_spent.toFixed(2)}</td>
             <td style="display:flex;gap:6px" onclick="event.stopPropagation()">
+                <a class="action-btn" href="/customers-mgmt/profile/${c.id}" style="text-decoration:none;display:inline-flex;align-items:center">Profile</a>
                 <button class="action-btn" onclick="openEditModal(${c.id},'${c.name.replace(/'/g,"\\'")}','${c.phone}','${c.email}','${c.address}')">Edit</button>
                 <button class="action-btn danger" onclick="deleteCustomer(${c.id},'${c.name.replace(/'/g,"\\'")}')">Delete</button>
             </td>

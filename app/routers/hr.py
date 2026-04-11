@@ -7,8 +7,10 @@ from pydantic import BaseModel
 from datetime import date
 
 from app.database import get_db
+from app.core.permissions import get_current_user
 from app.core.log import record
 from app.models.hr import Employee, Attendance, Payroll
+from app.models.user import User
 
 router = APIRouter(prefix="/hr", tags=["HR"])
 
@@ -72,7 +74,7 @@ def get_employees(q: str = "", db: Session = Depends(get_db)):
     ]
 
 @router.post("/api/employees")
-def add_employee(data: EmployeeCreate, db: Session = Depends(get_db)):
+def add_employee(data: EmployeeCreate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     hire = date.fromisoformat(data.hire_date) if data.hire_date else None
     e = Employee(
         name=data.name, phone=data.phone,
@@ -87,7 +89,7 @@ def add_employee(data: EmployeeCreate, db: Session = Depends(get_db)):
     return {"id": e.id, "name": e.name}
 
 @router.put("/api/employees/{emp_id}")
-def edit_employee(emp_id: int, data: EmployeeUpdate, db: Session = Depends(get_db)):
+def edit_employee(emp_id: int, data: EmployeeUpdate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     e = db.query(Employee).filter(Employee.id == emp_id).first()
     if not e:
         raise HTTPException(status_code=404, detail="Employee not found")
@@ -100,7 +102,7 @@ def edit_employee(emp_id: int, data: EmployeeUpdate, db: Session = Depends(get_d
     return {"ok": True}
 
 @router.delete("/api/employees/{emp_id}")
-def deactivate_employee(emp_id: int, db: Session = Depends(get_db)):
+def deactivate_employee(emp_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     e = db.query(Employee).filter(Employee.id == emp_id).first()
     if not e:
         raise HTTPException(status_code=404, detail="Employee not found")
@@ -139,7 +141,7 @@ def get_attendance(emp_id: int = None, period: str = None, db: Session = Depends
     ]
 
 @router.post("/api/attendance")
-def log_attendance(data: AttendanceCreate, db: Session = Depends(get_db)):
+def log_attendance(data: AttendanceCreate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     # Check if already logged for that day
     existing = db.query(Attendance).filter(
         Attendance.employee_id == data.employee_id,
@@ -162,7 +164,7 @@ def log_attendance(data: AttendanceCreate, db: Session = Depends(get_db)):
 
 
 @router.post("/api/attendance/auto-today")
-def auto_mark_today(db: Session = Depends(get_db)):
+def auto_mark_today(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     """Auto-mark all active employees as present today if not already logged."""
     today = date.today()
     employees = db.query(Employee).filter(Employee.is_active == True).all()
@@ -179,7 +181,7 @@ def auto_mark_today(db: Session = Depends(get_db)):
     return {"ok": True, "created": created, "date": str(today)}
 
 @router.post("/api/attendance/mark-absent")
-def mark_absent_today(data: AttendanceCreate, db: Session = Depends(get_db)):
+def mark_absent_today(data: AttendanceCreate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     """Mark a specific employee as absent today (overrides auto-present)."""
     today = date.today()
     existing = db.query(Attendance).filter(
@@ -213,8 +215,8 @@ def get_payroll(period: str = None, db: Session = Depends(get_db)):
             "employee":    r.employee.name if r.employee else "—",
             "period":      r.period,
             "base_salary": float(r.base_salary) if r.base_salary else 0,
-            "days_worked": r.days_worked if hasattr(r, "days_worked") and r.days_worked else 0,
-            "working_days":r.working_days if hasattr(r, "working_days") and r.working_days else 0,
+            "days_worked": r.days_worked or 0,
+            "working_days":r.working_days or 0,
             "bonuses":     float(r.bonuses)     if r.bonuses     else 0,
             "deductions":  float(r.deductions)  if r.deductions  else 0,
             "net_salary":  float(r.net_salary)  if r.net_salary  else 0,
@@ -285,7 +287,7 @@ def preview_payroll(period: str, db: Session = Depends(get_db)):
     }
 
 @router.post("/api/payroll/run")
-def run_payroll(data: PayrollRun, db: Session = Depends(get_db)):
+def run_payroll(data: PayrollRun, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     from calendar import monthrange
     year, month = int(data.period.split("-")[0]), int(data.period.split("-")[1])
     total_days   = monthrange(year, month)[1]
@@ -321,8 +323,8 @@ def run_payroll(data: PayrollRun, db: Session = Depends(get_db)):
             earned          = round(daily_rate * days_present, 2)
             exists.base_salary  = emp.base_salary
             exists.net_salary   = earned + float(exists.bonuses or 0) - float(exists.deductions or 0)
-            if hasattr(exists, "days_worked"):  exists.days_worked  = days_present
-            if hasattr(exists, "working_days"): exists.working_days = working_days
+            exists.days_worked  = days_present
+            exists.working_days = working_days
             skipped += 1
             continue
 
@@ -343,9 +345,9 @@ def run_payroll(data: PayrollRun, db: Session = Depends(get_db)):
             bonuses=0, deductions=0,
             net_salary=earned,
             paid=False,
+            days_worked=days_present,
+            working_days=working_days,
         )
-        if hasattr(p, "days_worked"):  p.days_worked  = days_present
-        if hasattr(p, "working_days"): p.working_days = working_days
         db.add(p)
         created += 1
 
@@ -357,7 +359,7 @@ def run_payroll(data: PayrollRun, db: Session = Depends(get_db)):
 
 
 @router.put("/api/payroll/{payroll_id}")
-def update_payroll(payroll_id: int, data: PayrollUpdate, db: Session = Depends(get_db)):
+def update_payroll(payroll_id: int, data: PayrollUpdate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     p = db.query(Payroll).filter(Payroll.id == payroll_id).first()
     if not p:
         raise HTTPException(status_code=404, detail="Payroll record not found")
@@ -379,7 +381,7 @@ def update_payroll(payroll_id: int, data: PayrollUpdate, db: Session = Depends(g
     return {"ok": True, "net_salary": float(p.net_salary)}
 
 @router.patch("/api/payroll/{payroll_id}/pay")
-def mark_paid(payroll_id: int, db: Session = Depends(get_db)):
+def mark_paid(payroll_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     from datetime import datetime
     p = db.query(Payroll).filter(Payroll.id == payroll_id).first()
     if not p:

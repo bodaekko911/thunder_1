@@ -340,336 +340,712 @@ def refunds_ui():
 <html>
 <head>
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Retail Refunds</title>
+<title>Retail Refunds — Thunder ERP</title>
 <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
 <style>
-:root{
-    --bg:#f3f5f8;--surface:#ffffff;--card:#ffffff;--card2:#f8fafc;--border:#d9e0e8;
-    --border2:#c7d0da;--text:#18212b;--sub:#5e6b78;--muted:#8c98a4;--danger:#c84444;
-    --warn:#b7791f;--accent:#244b74;--green:#1d7a46;--sans:'Outfit',sans-serif;--mono:'JetBrains Mono',monospace;--r:12px;
+:root {
+    --bg:      #060810;
+    --card:    #0f1424;
+    --card2:   #151c30;
+    --border:  rgba(255,255,255,0.06);
+    --border2: rgba(255,255,255,0.11);
+    --rose:    #ff6b8a;
+    --rose2:   #ff4d6d;
+    --green:   #00ff9d;
+    --blue:    #4d9fff;
+    --warn:    #ffb547;
+    --text:    #f0f4ff;
+    --sub:     #8899bb;
+    --muted:   #445066;
+    --sans:    'Outfit', sans-serif;
+    --mono:    'JetBrains Mono', monospace;
+    --r:       12px;
 }
-body.light{
-    --bg:#f3f5f8;--surface:#ffffff;--card:#ffffff;--card2:#f8fafc;--border:#d9e0e8;--border2:#c7d0da;
-    --text:#18212b;--sub:#5e6b78;--muted:#8c98a4;
+body.light {
+    --bg: #f2f4f8; --card: #ffffff; --card2: #f7f8fb;
+    --border: rgba(0,0,0,0.07); --border2: rgba(0,0,0,0.13);
+    --text: #141820; --sub: #505870; --muted: #8090a8;
 }
-*{box-sizing:border-box;margin:0;padding:0}
-body{font-family:var(--sans);background:var(--bg);color:var(--text);min-height:100vh}
-.wrap{max-width:1360px;margin:0 auto;padding:24px}
-.top{display:flex;justify-content:space-between;align-items:flex-start;gap:16px;margin-bottom:20px}
-.title h1{font-size:28px;font-weight:800;letter-spacing:-.02em}
-.title p{color:var(--sub);margin-top:6px;font-size:14px}
-.actions{display:flex;gap:10px;align-items:center}
-.mode-btn,.nav-btn,.submit-btn,button{font-family:var(--sans)}
-.nav-btn,.mode-btn{display:inline-flex;align-items:center;justify-content:center;text-decoration:none;border:1px solid var(--border);background:var(--surface);color:var(--sub);height:40px;padding:0 16px;border-radius:10px}
-.mode-btn{width:42px;padding:0;cursor:pointer}
-.nav-btn:hover,.mode-btn:hover{border-color:var(--accent);color:var(--accent)}
-.grid{display:grid;grid-template-columns:320px 1fr 320px;gap:16px}
-.panel{background:var(--surface);border:1px solid var(--border);border-radius:16px;padding:18px;box-shadow:0 1px 2px rgba(16,24,40,.04)}
-.panel h2{font-size:16px;font-weight:700;margin-bottom:6px}
-.panel-sub{font-size:12px;color:var(--sub);margin-bottom:14px}
-.search{display:flex;gap:10px;margin-bottom:14px}
-.search input,.field input,.field textarea,.field select{width:100%;border:1px solid var(--border2);background:var(--surface);color:var(--text);padding:12px 14px;border-radius:10px;outline:none;font-family:var(--sans)}
-.search input:focus,.field input:focus,.field textarea:focus,.field select:focus{border-color:var(--accent)}
-.field textarea{min-height:90px;resize:vertical}
-.list{display:flex;flex-direction:column;gap:10px;max-height:72vh;overflow:auto;padding-right:4px}
-.inv-card,.refund-card,.item-row{border:1px solid var(--border);background:var(--card2);border-radius:12px;padding:14px}
-.inv-card{cursor:pointer;transition:border-color .15s,background .15s}
-.inv-card:hover,.inv-card.active{border-color:var(--accent);background:#f5f8fc}
-.num{font-family:var(--mono);font-size:12px;color:var(--accent);font-weight:700}
-.sub{color:var(--sub);font-size:12px}
-.row{display:flex;justify-content:space-between;gap:12px;align-items:center}
-.meta{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin:14px 0}
-.stat{border:1px solid var(--border);background:var(--card2);border-radius:12px;padding:12px}
-.stat label{display:block;font-size:11px;color:var(--muted);margin-bottom:5px}
-.stat strong{font-size:15px}
-.items{display:flex;flex-direction:column;gap:10px}
-.items-head{display:grid;grid-template-columns:minmax(0,1.6fr) 90px 90px 110px;gap:10px;padding:0 4px 6px;color:var(--muted);font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.04em}
-.item-row{display:grid;grid-template-columns:minmax(0,1.6fr) 90px 90px 110px;gap:10px;align-items:center}
-.item-row input{width:100%;border:1px solid var(--border2);background:var(--surface);color:var(--text);padding:10px;border-radius:8px}
-.totals{margin-top:14px;border:1px solid var(--border);background:var(--card2);border-radius:12px;padding:14px}
-.totals .row{margin:8px 0}
-.grand{font-size:22px;font-weight:900;color:var(--danger);font-family:var(--mono)}
-.submit-btn{width:100%;margin-top:14px;border:none;background:var(--accent);color:#fff;padding:14px;border-radius:10px;font-size:15px;font-weight:700;cursor:pointer}
-.submit-btn:hover{background:#1f3f62}
-.submit-btn:disabled{opacity:.6;cursor:not-allowed}
-.empty{padding:30px 10px;text-align:center;color:var(--muted)}
-.chip{display:inline-flex;align-items:center;gap:6px;border-radius:999px;padding:5px 10px;font-size:11px;font-weight:700;background:#eef3f8;color:var(--accent);border:1px solid var(--border)}
-.section-note{padding:12px 14px;border:1px dashed var(--border2);border-radius:10px;background:#fbfcfe;color:var(--sub);font-size:13px}
-#toast{position:fixed;bottom:18px;right:18px;background:#1f2937;color:white;padding:12px 16px;border-radius:10px;border:1px solid rgba(255,255,255,.08);opacity:0;pointer-events:none;transform:translateY(10px);transition:all .2s}
-#toast.show{opacity:1;transform:translateY(0)}
-@media (max-width:1200px){.grid{grid-template-columns:1fr}.meta{grid-template-columns:repeat(2,minmax(0,1fr))}.list{max-height:none}}
-@media (max-width:720px){.wrap{padding:14px}.top{flex-direction:column;align-items:stretch}.meta{grid-template-columns:1fr}.items-head{display:none}.item-row{grid-template-columns:1fr}.row{align-items:flex-start}}
+body.light nav { background: rgba(242,244,248,.92); }
+body.light .inv-card:hover, body.light .inv-card.active { background: rgba(255,107,138,.06); }
+
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: var(--sans); background: var(--bg); color: var(--text); min-height: 100vh; font-size: 14px; }
+
+/* ── NAV ── */
+nav {
+    position: sticky; top: 0; z-index: 100;
+    display: flex; align-items: center; gap: 10px;
+    padding: 0 24px; height: 58px;
+    background: rgba(6,8,16,.92); backdrop-filter: blur(20px);
+    border-bottom: 1px solid var(--border);
+}
+.logo {
+    font-size: 17px; font-weight: 900; text-decoration: none;
+    display: flex; align-items: center; gap: 8px; margin-right: 10px;
+    background: linear-gradient(135deg, var(--green), var(--blue));
+    -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text;
+}
+.nav-back {
+    display: inline-flex; align-items: center; gap: 7px;
+    background: var(--card); border: 1px solid var(--border2);
+    color: var(--sub); font-family: var(--sans); font-size: 12px;
+    font-weight: 600; padding: 7px 14px; border-radius: 9px;
+    text-decoration: none; transition: all .2s;
+}
+.nav-back:hover { border-color: var(--rose); color: var(--rose); }
+.nav-spacer { flex: 1; }
+.mode-btn {
+    width: 36px; height: 36px; border-radius: 10px;
+    border: 1px solid var(--border); background: var(--card);
+    color: var(--sub); font-size: 16px; cursor: pointer; transition: all .2s;
+    display: flex; align-items: center; justify-content: center;
+}
+.mode-btn:hover { border-color: var(--border2); transform: scale(1.06); }
+.user-pill {
+    display: flex; align-items: center; gap: 10px;
+    background: var(--card); border: 1px solid var(--border);
+    border-radius: 40px; padding: 6px 14px 6px 8px;
+}
+.user-avatar {
+    width: 26px; height: 26px;
+    background: linear-gradient(135deg, #7ecb6f, #d4a256);
+    border-radius: 50%; display: flex; align-items: center; justify-content: center;
+    font-size: 11px; font-weight: 700; color: #0a0c08;
+}
+.user-name { font-size: 13px; font-weight: 500; color: var(--sub); }
+.logout-btn {
+    background: transparent; border: 1px solid var(--border);
+    color: var(--muted); font-family: var(--sans); font-size: 12px;
+    font-weight: 500; padding: 7px 14px; border-radius: 8px; cursor: pointer; transition: all .2s;
+}
+.logout-btn:hover { border-color: var(--rose2); color: var(--rose2); }
+
+/* ── LAYOUT ── */
+.page { max-width: 1380px; margin: 0 auto; padding: 28px 24px; }
+.page-header { margin-bottom: 24px; }
+.page-title { font-size: 22px; font-weight: 800; display: flex; align-items: center; gap: 10px; }
+.page-title-badge {
+    font-size: 11px; font-weight: 700; letter-spacing: 1px; text-transform: uppercase;
+    background: rgba(255,107,138,.12); border: 1px solid rgba(255,107,138,.25);
+    color: var(--rose); padding: 3px 10px; border-radius: 20px;
+}
+.page-sub { color: var(--muted); font-size: 13px; margin-top: 4px; }
+
+.layout { display: grid; grid-template-columns: 300px 1fr 300px; gap: 16px; align-items: start; }
+
+/* ── PANELS ── */
+.panel {
+    background: var(--card); border: 1px solid var(--border);
+    border-radius: 16px; overflow: hidden;
+    position: sticky; top: 74px;
+}
+.panel-head {
+    padding: 16px 18px 14px;
+    border-bottom: 1px solid var(--border);
+    display: flex; align-items: center; justify-content: space-between;
+}
+.panel-title { font-size: 13px; font-weight: 700; color: var(--text); }
+.panel-count {
+    font-size: 11px; font-weight: 700; font-family: var(--mono);
+    background: var(--card2); border: 1px solid var(--border2);
+    color: var(--sub); padding: 2px 8px; border-radius: 20px;
+}
+.panel-body { padding: 14px; }
+
+/* ── SEARCH ── */
+.search-wrap {
+    display: flex; align-items: center; gap: 9px;
+    background: var(--card2); border: 1px solid var(--border2);
+    border-radius: var(--r); padding: 0 12px; margin-bottom: 12px;
+    transition: border-color .2s;
+}
+.search-wrap:focus-within { border-color: rgba(255,107,138,.4); }
+.search-wrap svg { color: var(--muted); flex-shrink: 0; }
+.search-wrap input {
+    background: transparent; border: none; outline: none;
+    color: var(--text); font-family: var(--sans); font-size: 13px;
+    padding: 10px 0; width: 100%;
+}
+.search-wrap input::placeholder { color: var(--muted); }
+
+/* ── INVOICE LIST ── */
+.inv-list { display: flex; flex-direction: column; gap: 6px; max-height: calc(100vh - 220px); overflow-y: auto; }
+.inv-card {
+    background: var(--card2); border: 1px solid var(--border);
+    border-radius: 10px; padding: 12px 14px; cursor: pointer;
+    transition: border-color .15s, background .15s;
+}
+.inv-card:hover { border-color: rgba(255,107,138,.35); background: rgba(255,107,138,.04); }
+.inv-card.active { border-color: var(--rose); background: rgba(255,107,138,.07); }
+.inv-card-num { font-family: var(--mono); font-size: 11px; font-weight: 700; color: var(--rose); }
+.inv-card-customer { font-size: 13px; font-weight: 600; color: var(--text); margin: 4px 0 3px; }
+.inv-card-row { display: flex; justify-content: space-between; align-items: center; }
+.inv-card-date { font-size: 11px; color: var(--muted); }
+.inv-card-amount { font-family: var(--mono); font-size: 12px; font-weight: 700; color: var(--sub); }
+.inv-card-refundable { font-family: var(--mono); font-size: 11px; font-weight: 700; color: var(--green); }
+
+/* ── CENTER: BUILDER ── */
+.builder { background: var(--card); border: 1px solid var(--border); border-radius: 16px; overflow: hidden; }
+.builder-head {
+    padding: 16px 20px; border-bottom: 1px solid var(--border);
+    display: flex; align-items: center; justify-content: space-between; gap: 12px;
+}
+.builder-title { font-size: 13px; font-weight: 700; color: var(--text); }
+
+.empty-state {
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    gap: 12px; padding: 80px 40px; color: var(--muted); text-align: center;
+}
+.empty-state-icon { font-size: 36px; opacity: .4; }
+.empty-state-title { font-size: 15px; font-weight: 700; color: var(--sub); }
+.empty-state-sub { font-size: 13px; }
+
+/* ── INVOICE DETAIL BANNER ── */
+.inv-banner {
+    padding: 14px 20px;
+    background: rgba(255,107,138,.05);
+    border-bottom: 1px solid rgba(255,107,138,.12);
+    display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
+}
+.inv-banner-num { font-family: var(--mono); font-size: 13px; font-weight: 700; color: var(--rose); }
+.inv-banner-customer { font-size: 14px; font-weight: 700; color: var(--text); }
+.inv-banner-meta { font-size: 12px; color: var(--muted); }
+.inv-banner-spacer { flex: 1; }
+.inv-banner-total { font-family: var(--mono); font-size: 18px; font-weight: 700; color: var(--text); }
+.inv-banner-total-label { font-size: 10px; font-weight: 700; letter-spacing: 1px; text-transform: uppercase; color: var(--muted); }
+
+/* ── ITEMS TABLE ── */
+.items-section { padding: 16px 20px 0; }
+.items-header {
+    display: grid; grid-template-columns: 1fr 80px 80px 110px;
+    gap: 10px; padding: 0 0 8px;
+    font-size: 10px; font-weight: 700; letter-spacing: 1px;
+    text-transform: uppercase; color: var(--muted);
+    border-bottom: 1px solid var(--border);
+}
+.item-row {
+    display: grid; grid-template-columns: 1fr 80px 80px 110px;
+    gap: 10px; padding: 12px 0;
+    border-bottom: 1px solid var(--border);
+    align-items: center;
+}
+.item-row:last-child { border-bottom: none; }
+.item-name { font-size: 13px; font-weight: 600; color: var(--text); }
+.item-sku { font-family: var(--mono); font-size: 10px; color: var(--muted); margin-top: 2px; }
+.item-qty { font-family: var(--mono); font-size: 13px; color: var(--sub); }
+.item-refundable { font-family: var(--mono); font-size: 13px; color: var(--green); font-weight: 600; }
+.qty-input {
+    width: 100%; background: var(--card2); border: 1px solid var(--border2);
+    border-radius: 9px; padding: 9px 12px; color: var(--text);
+    font-family: var(--mono); font-size: 13px; outline: none; text-align: center;
+    transition: border-color .2s;
+}
+.qty-input:focus { border-color: rgba(255,107,138,.5); }
+.qty-input.has-value { border-color: rgba(255,107,138,.4); background: rgba(255,107,138,.06); }
+
+/* ── FORM SECTION ── */
+.form-section {
+    padding: 16px 20px; border-top: 1px solid var(--border);
+    display: grid; grid-template-columns: 1fr 160px; gap: 12px; align-items: start;
+}
+.fld { display: flex; flex-direction: column; gap: 5px; }
+.fld label { font-size: 10px; font-weight: 700; letter-spacing: 1px; text-transform: uppercase; color: var(--muted); }
+.fld input, .fld select {
+    background: var(--card2); border: 1px solid var(--border2);
+    border-radius: 10px; padding: 10px 12px; color: var(--text);
+    font-family: var(--sans); font-size: 13px; outline: none;
+    transition: border-color .2s; width: 100%;
+}
+.fld input:focus, .fld select:focus { border-color: rgba(255,107,138,.4); }
+.fld input::placeholder { color: var(--muted); }
+
+/* ── SUMMARY + SUBMIT ── */
+.summary-section {
+    padding: 14px 20px 18px;
+    border-top: 1px solid var(--border);
+    display: flex; align-items: center; gap: 16px;
+}
+.summary-items {
+    display: flex; flex-direction: column; gap: 4px;
+}
+.summary-label { font-size: 10px; font-weight: 700; letter-spacing: 1px; text-transform: uppercase; color: var(--muted); }
+.summary-items-count { font-family: var(--mono); font-size: 15px; font-weight: 700; color: var(--sub); }
+.summary-divider { width: 1px; height: 36px; background: var(--border2); }
+.summary-total-wrap { display: flex; flex-direction: column; gap: 3px; }
+.summary-total { font-family: var(--mono); font-size: 28px; font-weight: 700; color: var(--rose); line-height: 1; }
+.summary-total-sub { font-size: 11px; color: var(--muted); }
+.summary-spacer { flex: 1; }
+.submit-btn {
+    display: flex; align-items: center; gap: 8px;
+    background: linear-gradient(135deg, var(--rose2), #e63060);
+    border: none; border-radius: 12px; padding: 14px 28px;
+    font-family: var(--sans); font-size: 14px; font-weight: 800;
+    color: white; cursor: pointer; transition: all .2s;
+    box-shadow: 0 4px 20px rgba(255,77,109,.25);
+}
+.submit-btn:hover:not(:disabled) { filter: brightness(1.1); transform: translateY(-2px); box-shadow: 0 8px 28px rgba(255,77,109,.35); }
+.submit-btn:disabled { opacity: .4; cursor: not-allowed; transform: none; box-shadow: none; }
+
+/* ── RECENT REFUNDS LIST ── */
+.refund-card {
+    background: var(--card2); border: 1px solid var(--border);
+    border-radius: 10px; padding: 12px 14px; margin-bottom: 6px;
+    transition: border-color .15s;
+}
+.refund-card:last-child { margin-bottom: 0; }
+.refund-card:hover { border-color: var(--border2); }
+.refund-card-top { display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px; }
+.refund-num { font-family: var(--mono); font-size: 11px; font-weight: 700; color: var(--rose); }
+.refund-print {
+    display: inline-flex; align-items: center; gap: 5px;
+    background: var(--card); border: 1px solid var(--border2);
+    color: var(--sub); font-size: 11px; font-weight: 700;
+    padding: 4px 10px; border-radius: 7px; text-decoration: none;
+    transition: all .15s; font-family: var(--sans);
+}
+.refund-print:hover { border-color: var(--rose); color: var(--rose); }
+.refund-customer { font-size: 13px; font-weight: 600; color: var(--text); margin-bottom: 3px; }
+.refund-meta { font-size: 11px; color: var(--muted); margin-bottom: 6px; }
+.refund-bottom { display: flex; align-items: center; justify-content: space-between; }
+.refund-reason { font-size: 11px; color: var(--sub); font-style: italic; }
+.refund-amount { font-family: var(--mono); font-size: 15px; font-weight: 700; color: var(--rose); }
+
+/* ── UTILS ── */
+.empty-list {
+    text-align: center; padding: 32px 16px;
+    color: var(--muted); font-size: 13px;
+}
+.empty-list svg { margin-bottom: 10px; opacity: .3; }
+
+/* ── TOAST ── */
+.toast {
+    position: fixed; bottom: 22px; left: 50%;
+    transform: translateX(-50%) translateY(12px);
+    background: var(--card2); border: 1px solid var(--border2);
+    border-radius: 12px; padding: 12px 20px;
+    font-size: 13px; font-weight: 600; color: var(--text);
+    box-shadow: 0 20px 50px rgba(0,0,0,.5);
+    opacity: 0; pointer-events: none;
+    transition: opacity .25s, transform .25s; z-index: 999;
+}
+.toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+.toast.success { border-color: rgba(0,255,157,.3); color: var(--green); }
+.toast.error   { border-color: rgba(255,77,109,.3); color: var(--rose); }
+
+/* ── SCROLLBAR ── */
+::-webkit-scrollbar { width: 4px; }
+::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 4px; }
+
+@media (max-width: 1150px) {
+    .layout { grid-template-columns: 280px 1fr; }
+    .panel:last-child { display: none; }
+}
+@media (max-width: 760px) {
+    .layout { grid-template-columns: 1fr; }
+    .panel { position: static; }
+    .items-header, .item-row { grid-template-columns: 1fr 70px 90px; }
+    .items-header div:nth-child(2), .item-qty { display: none; }
+    .form-section { grid-template-columns: 1fr; }
+    .summary-section { flex-wrap: wrap; }
+}
 </style>
 </head>
 <body>
-<div class="wrap">
-    <div class="top">
-        <div class="title">
-            <h1>Retail Refunds</h1>
-            <p>Process POS returns with a clear invoice lookup, item selection, and printable refund receipt.</p>
+
+<nav>
+    <a href="/home" class="logo">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none">
+            <polygon points="13,2 4,14 11,14 11,22 20,10 13,10" fill="#f59e0b"/>
+        </svg>
+        Thunder ERP
+    </a>
+    <a href="/pos" class="nav-back">
+        <svg width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path d="M19 12H5M12 5l-7 7 7 7"/></svg>
+        Back to POS
+    </a>
+    <div class="nav-spacer"></div>
+    <button class="mode-btn" id="mode-btn" onclick="toggleMode()">🌙</button>
+    <div class="user-pill">
+        <div class="user-avatar" id="user-avatar">A</div>
+        <span class="user-name" id="user-name">Admin</span>
+    </div>
+    <button class="logout-btn" onclick="logout()">Sign out</button>
+</nav>
+
+<div class="page">
+    <div class="page-header">
+        <div class="page-title">
+            Retail Refunds
+            <span class="page-title-badge">Returns</span>
         </div>
-        <div class="actions">
-            <a class="nav-btn" href="/pos">Back to POS</a>
-            <button class="mode-btn" onclick="toggleMode()">◐</button>
-        </div>
+        <div class="page-sub">Find an invoice, select items to return, and issue a refund receipt.</div>
     </div>
 
-    <div class="grid">
-        <section class="panel">
-            <h2>Invoices</h2>
-            <div class="panel-sub">Search recent POS invoices by number or customer.</div>
-            <div class="search">
-                <input id="search" placeholder="Search invoice or customer" oninput="loadInvoices()">
-            </div>
-            <div id="invoice-list" class="list"><div class="empty">Loading invoices...</div></div>
-        </section>
+    <div class="layout">
 
-        <section class="panel">
-            <h2>Refund Builder</h2>
-            <div class="panel-sub">Refund only quantities that were sold and still available to return.</div>
-            <div id="invoice-empty" class="section-note">Select an invoice from the left to start a refund.</div>
+        <!-- LEFT: INVOICE SEARCH -->
+        <div class="panel">
+            <div class="panel-head">
+                <span class="panel-title">Invoices</span>
+                <span class="panel-count" id="inv-count">—</span>
+            </div>
+            <div class="panel-body">
+                <div class="search-wrap">
+                    <svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24">
+                        <circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/>
+                    </svg>
+                    <input id="search" placeholder="Invoice # or customer name…" oninput="onSearch()">
+                </div>
+                <div id="invoice-list" class="inv-list">
+                    <div class="empty-list">Loading invoices…</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- CENTER: REFUND BUILDER -->
+        <div class="builder">
+            <div class="builder-head">
+                <span class="builder-title">Refund Builder</span>
+                <span id="builder-status" style="font-size:12px;color:var(--muted)">Select an invoice to begin</span>
+            </div>
+
+            <!-- Empty state -->
+            <div id="empty-state" class="empty-state">
+                <div class="empty-state-icon">↩</div>
+                <div class="empty-state-title">No invoice selected</div>
+                <div class="empty-state-sub">Choose an invoice from the left panel to start processing a return.</div>
+            </div>
+
+            <!-- Invoice detail + form (hidden until invoice selected) -->
             <div id="invoice-detail" style="display:none">
-                <div class="row">
-                    <div>
-                        <div class="num" id="inv-number">-</div>
-                        <div class="sub" id="inv-customer">-</div>
-                    </div>
-                    <div class="chip" id="inv-method">-</div>
-                </div>
-                <div class="meta">
-                    <div class="stat"><label>Date</label><strong id="inv-date">-</strong></div>
-                    <div class="stat"><label>Invoice Total</label><strong id="inv-total">0.00</strong></div>
-                    <div class="stat"><label>Status</label><strong id="inv-status">-</strong></div>
-                    <div class="stat"><label>Refund Total</label><strong id="refund-total">0.00</strong></div>
-                </div>
-                <div class="items-head">
-                    <div>Item</div>
-                    <div>Sold</div>
-                    <div>Left</div>
-                    <div>Refund Qty</div>
-                </div>
-                <div id="items" class="items"></div>
-                <div class="field" style="margin-top:14px">
-                    <input id="reason" placeholder="Reason for refund">
-                </div>
-                <div class="field" style="margin-top:10px">
-                    <select id="refund-method" onchange="recalcRefund()">
-                        <option value="cash">Cash</option>
-                        <option value="credit">Credit</option>
-                        <option value="exchange">Exchange</option>
-                    </select>
-                </div>
-                <div class="field" style="margin-top:10px">
-                    <textarea id="notes" placeholder="Optional notes"></textarea>
-                </div>
-                <div class="totals">
-                    <div class="row"><span>Items selected</span><span id="refund-lines">0</span></div>
-                    <div class="row"><span>Refund method</span><span id="refund-method-label">cash</span></div>
-                    <div class="row"><span>Total</span><span class="grand" id="refund-grand">0.00</span></div>
-                </div>
-                <button id="submit-btn" class="submit-btn" onclick="submitRefund()">Create Refund</button>
-            </div>
-        </section>
 
-        <section class="panel">
-            <h2>Recent Refunds</h2>
-            <div class="panel-sub">Latest recorded retail refunds with quick print access.</div>
-            <div id="refund-list" class="list"><div class="empty">Loading refunds...</div></div>
-        </section>
+                <!-- Invoice banner -->
+                <div class="inv-banner">
+                    <div>
+                        <div class="inv-banner-num" id="ib-num">—</div>
+                        <div class="inv-banner-customer" id="ib-customer">—</div>
+                        <div class="inv-banner-meta" id="ib-meta">—</div>
+                    </div>
+                    <div class="inv-banner-spacer"></div>
+                    <div style="text-align:right">
+                        <div class="inv-banner-total-label">Invoice Total</div>
+                        <div class="inv-banner-total" id="ib-total">—</div>
+                    </div>
+                </div>
+
+                <!-- Items -->
+                <div class="items-section">
+                    <div class="items-header">
+                        <div>Item</div>
+                        <div>Sold</div>
+                        <div>Available</div>
+                        <div style="text-align:center">Return Qty</div>
+                    </div>
+                    <div id="items"></div>
+                </div>
+
+                <!-- Reason + method -->
+                <div class="form-section">
+                    <div class="fld">
+                        <label>Reason for Return *</label>
+                        <input id="reason" placeholder="e.g. Wrong item, damaged product…">
+                    </div>
+                    <div class="fld">
+                        <label>Refund Method</label>
+                        <select id="refund-method">
+                            <option value="cash">💵 Cash</option>
+                            <option value="credit">💳 Credit</option>
+                            <option value="exchange">🔄 Exchange</option>
+                        </select>
+                    </div>
+                </div>
+
+                <!-- Summary + submit -->
+                <div class="summary-section">
+                    <div class="summary-items">
+                        <div class="summary-label">Items</div>
+                        <div class="summary-items-count" id="summary-count">0</div>
+                    </div>
+                    <div class="summary-divider"></div>
+                    <div class="summary-total-wrap">
+                        <div class="summary-label">Refund Total</div>
+                        <div class="summary-total" id="summary-total">0.00</div>
+                        <div class="summary-total-sub">EGP</div>
+                    </div>
+                    <div class="summary-spacer"></div>
+                    <button id="submit-btn" class="submit-btn" onclick="submitRefund()" disabled>
+                        <svg width="15" height="15" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24">
+                            <polyline points="20 6 9 17 4 12"/>
+                        </svg>
+                        Issue Refund
+                    </button>
+                </div>
+
+            </div>
+        </div>
+
+        <!-- RIGHT: RECENT REFUNDS -->
+        <div class="panel">
+            <div class="panel-head">
+                <span class="panel-title">Recent Refunds</span>
+                <span class="panel-count" id="refund-count">—</span>
+            </div>
+            <div class="panel-body" style="max-height:calc(100vh - 220px);overflow-y:auto">
+                <div id="refund-list">
+                    <div class="empty-list">Loading…</div>
+                </div>
+            </div>
+        </div>
+
     </div>
 </div>
-<div id="toast"></div>
-<script>
-let selectedInvoiceId = null;
-let selectedInvoice = null;
-let token = localStorage.getItem("token") || "";
 
-function showToast(msg){
+<div class="toast" id="toast"></div>
+
+<script>
+// ── Init ─────────────────────────────────────────────────────
+const token = localStorage.getItem("token") || "";
+let selectedInvoiceId = null;
+let selectedInvoice   = null;
+let searchTimer       = null;
+
+function initUser() {
+    const name = localStorage.getItem("user_name") || "Admin";
+    document.getElementById("user-avatar").innerText = name.charAt(0).toUpperCase();
+    document.getElementById("user-name").innerText   = name;
+}
+
+function toggleMode() {
+    const light = document.body.classList.toggle("light");
+    localStorage.setItem("refund-theme", light ? "light" : "dark");
+    document.getElementById("mode-btn").innerText = light ? "☀️" : "🌙";
+}
+
+function logout() {
+    ["token","user_name","user_role","user_permissions"].forEach(k => localStorage.removeItem(k));
+    window.location.href = "/";
+}
+
+if (!token) window.location.href = "/";
+
+if (localStorage.getItem("refund-theme") === "light") {
+    document.body.classList.add("light");
+    document.getElementById("mode-btn").innerText = "☀️";
+}
+
+initUser();
+
+// ── Toast ────────────────────────────────────────────────────
+let toastTimer = null;
+function showToast(msg, type = "") {
     const el = document.getElementById("toast");
     el.textContent = msg;
-    el.classList.add("show");
-    clearTimeout(window.toastTimer);
-    window.toastTimer = setTimeout(()=>el.classList.remove("show"), 3000);
+    el.className   = "toast show" + (type ? " " + type : "");
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => el.classList.remove("show"), 3200);
 }
 
-function toggleMode(){
-    document.body.classList.toggle("light");
-    localStorage.setItem("refund-theme", document.body.classList.contains("light") ? "light" : "dark");
+// ── Invoice List ─────────────────────────────────────────────
+function onSearch() {
+    clearTimeout(searchTimer);
+    searchTimer = setTimeout(loadInvoices, 280);
 }
 
-if(localStorage.getItem("refund-theme")==="light"){
-    document.body.classList.add("light");
-}
-
-async function loadInvoices(){
-    const q = encodeURIComponent(document.getElementById("search").value.trim());
+async function loadInvoices() {
+    const q    = encodeURIComponent((document.getElementById("search").value || "").trim());
     const list = document.getElementById("invoice-list");
-    list.innerHTML = '<div class="empty">Loading invoices...</div>';
-    try{
-        const data = await (await fetch(`/refunds/api/invoices?q=${q}`)).json();
-        if(!Array.isArray(data) || !data.length){
-            list.innerHTML = '<div class="empty">No invoices found.</div>';
+    try {
+        const data = await (await fetch("/refunds/api/invoices?q=" + q)).json();
+        document.getElementById("inv-count").innerText = data.length || "0";
+        if (!data.length) {
+            list.innerHTML = `<div class="empty-list">
+                <svg width="28" height="28" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
+                <div>No invoices found</div>
+            </div>`;
             return;
         }
-        list.innerHTML = data.map(inv=>`
-            <div class="inv-card ${selectedInvoiceId===inv.id?'active':''}" onclick="selectInvoice(${inv.id})">
-                <div class="row">
-                    <div class="num">${inv.invoice_number}</div>
-                    <div class="sub">${inv.date}</div>
+        list.innerHTML = data.map(inv => {
+            const active = selectedInvoiceId === inv.id;
+            const fullyRefunded = inv.refundable_total <= 0.01;
+            return `<div class="inv-card ${active ? "active" : ""} ${fullyRefunded ? "fully-refunded" : ""}"
+                         onclick="${fullyRefunded ? "" : "selectInvoice(" + inv.id + ")"}">
+                <div class="inv-card-num">${inv.invoice_number}</div>
+                <div class="inv-card-customer">${inv.customer}</div>
+                <div class="inv-card-row" style="margin-top:5px">
+                    <span class="inv-card-date">${inv.date.slice(0,10)}</span>
+                    ${fullyRefunded
+                        ? `<span style="font-size:10px;font-weight:700;color:var(--muted);background:var(--card);border:1px solid var(--border);padding:1px 7px;border-radius:20px">Fully refunded</span>`
+                        : `<span class="inv-card-refundable">↩ ${inv.refundable_total.toFixed(2)}</span>`
+                    }
                 </div>
-                <div style="font-weight:700;margin:8px 0 4px">${inv.customer}</div>
-                <div class="row">
-                    <span class="sub">Invoice ${inv.total.toFixed(2)}</span>
-                    <span class="sub" style="color:var(--accent)">Refundable ${inv.refundable_total.toFixed(2)}</span>
-                </div>
-            </div>
-        `).join("");
-    }catch(e){
-        list.innerHTML = '<div class="empty">Failed to load invoices.</div>';
+            </div>`;
+        }).join("");
+    } catch(e) {
+        list.innerHTML = `<div class="empty-list">Failed to load invoices</div>`;
     }
 }
 
-async function selectInvoice(id){
+// ── Select Invoice ────────────────────────────────────────────
+async function selectInvoice(id) {
     selectedInvoiceId = id;
-    loadInvoices();
-    try{
-        const data = await (await fetch(`/refunds/api/invoice/${id}`)).json();
-        if(data.detail){ showToast(data.detail); return; }
+    loadInvoices(); // refresh active state
+    document.getElementById("empty-state").style.display   = "none";
+    document.getElementById("invoice-detail").style.display = "";
+    document.getElementById("builder-status").innerText = "Loading…";
+    try {
+        const data = await (await fetch("/refunds/api/invoice/" + id)).json();
+        if (data.detail) { showToast(data.detail, "error"); return; }
         selectedInvoice = data;
         renderInvoice();
-    }catch(e){
-        showToast("Failed to load invoice");
+    } catch(e) {
+        showToast("Failed to load invoice", "error");
     }
 }
 
-function renderInvoice(){
-    if(!selectedInvoice) return;
-    document.getElementById("invoice-empty").style.display = "none";
-    document.getElementById("invoice-detail").style.display = "";
-    document.getElementById("inv-number").textContent = selectedInvoice.invoice_number;
-    document.getElementById("inv-customer").textContent = selectedInvoice.customer;
-    document.getElementById("inv-method").textContent = selectedInvoice.payment_method;
-    document.getElementById("inv-date").textContent = selectedInvoice.date;
-    document.getElementById("inv-total").textContent = selectedInvoice.total.toFixed(2);
-    document.getElementById("inv-status").textContent = selectedInvoice.status;
-    document.getElementById("reason").value = "";
-    document.getElementById("notes").value = "";
-    document.getElementById("refund-method").value = "cash";
+function renderInvoice() {
+    const inv = selectedInvoice;
 
-    const itemsEl = document.getElementById("items");
-    itemsEl.innerHTML = selectedInvoice.items.map(item=>`
+    document.getElementById("ib-num").innerText      = inv.invoice_number;
+    document.getElementById("ib-customer").innerText = inv.customer;
+    document.getElementById("ib-meta").innerText     = inv.date + "  ·  " + inv.payment_method;
+    document.getElementById("ib-total").innerText    = inv.total.toFixed(2) + " EGP";
+    document.getElementById("builder-status").innerText = "Select items to return";
+    document.getElementById("reason").value         = "";
+    document.getElementById("refund-method").value  = "cash";
+
+    document.getElementById("items").innerHTML = inv.items.map(item => `
         <div class="item-row">
             <div>
-                <div style="font-weight:800">${item.name}</div>
-                <div class="sub">${item.sku || ''}</div>
+                <div class="item-name">${item.name}</div>
+                <div class="item-sku">${item.sku || ""}</div>
             </div>
-            <div class="sub">${item.sold_qty.toFixed(3)}</div>
-            <div class="sub">${item.refundable_qty.toFixed(3)}</div>
-            <input type="number" min="0" max="${item.refundable_qty}" step="0.001" value="0" data-product-id="${item.product_id}" data-price="${item.unit_price}" oninput="recalcRefund()">
+            <div class="item-qty">${item.sold_qty % 1 === 0 ? item.sold_qty.toFixed(0) : item.sold_qty.toFixed(2)}</div>
+            <div class="item-refundable">${item.refundable_qty % 1 === 0 ? item.refundable_qty.toFixed(0) : item.refundable_qty.toFixed(2)}</div>
+            <input class="qty-input" type="number"
+                min="0" max="${item.refundable_qty}" step="${item.refundable_qty % 1 === 0 ? 1 : 0.001}"
+                value="0"
+                placeholder="0"
+                data-product-id="${item.product_id}"
+                data-price="${item.unit_price}"
+                data-max="${item.refundable_qty}"
+                oninput="onQtyInput(this)"
+                ${item.refundable_qty <= 0 ? "disabled style='opacity:.4;cursor:not-allowed'" : ""}>
         </div>
     `).join("");
-    recalcRefund();
+
+    recalc();
 }
 
-function recalcRefund(){
-    let total = 0;
-    let lines = 0;
-    document.querySelectorAll('#items input').forEach(input=>{
-        const qty = parseFloat(input.value) || 0;
-        const max = parseFloat(input.max) || 0;
-        if(qty > max){
-            input.value = max;
-        }
-        if((parseFloat(input.value) || 0) > 0){
-            lines += 1;
-            total += (parseFloat(input.value) || 0) * (parseFloat(input.dataset.price) || 0);
+function onQtyInput(el) {
+    const val = parseFloat(el.value) || 0;
+    const max = parseFloat(el.dataset.max) || 0;
+    if (val > max) el.value = max;
+    el.classList.toggle("has-value", (parseFloat(el.value) || 0) > 0);
+    recalc();
+}
+
+function recalc() {
+    let total = 0, count = 0;
+    document.querySelectorAll("#items .qty-input").forEach(inp => {
+        const qty = parseFloat(inp.value) || 0;
+        if (qty > 0) {
+            total += qty * (parseFloat(inp.dataset.price) || 0);
+            count++;
         }
     });
-    document.getElementById("refund-total").textContent = total.toFixed(2);
-    document.getElementById("refund-grand").textContent = total.toFixed(2);
-    document.getElementById("refund-lines").textContent = lines;
-    document.getElementById("refund-method-label").textContent = document.getElementById("refund-method").value;
+    document.getElementById("summary-count").innerText = count;
+    document.getElementById("summary-total").innerText = total.toFixed(2);
+    const btn = document.getElementById("submit-btn");
+    btn.disabled = count === 0 || !document.getElementById("reason").value.trim();
 }
 
-async function loadRefunds(){
+document.addEventListener("input", e => {
+    if (e.target.id === "reason") recalc();
+});
+
+// ── Submit ────────────────────────────────────────────────────
+async function submitRefund() {
+    if (!selectedInvoice) return;
+    const reason = document.getElementById("reason").value.trim();
+    if (!reason) { showToast("Enter a reason for the return", "error"); return; }
+
+    const items = Array.from(document.querySelectorAll("#items .qty-input"))
+        .map(el => ({ product_id: parseInt(el.dataset.productId), qty: parseFloat(el.value) || 0 }))
+        .filter(it => it.qty > 0);
+
+    if (!items.length) { showToast("Select at least one item to return", "error"); return; }
+
+    const btn = document.getElementById("submit-btn");
+    btn.disabled = true;
+    btn.innerHTML = `<svg width="15" height="15" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24" style="animation:spin .8s linear infinite"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg> Processing…`;
+
+    try {
+        const res  = await fetch("/refunds/api/create", {
+            method: "POST",
+            headers: { "Content-Type": "application/json", "Authorization": "Bearer " + token },
+            body: JSON.stringify({
+                invoice_id:    selectedInvoice.id,
+                reason,
+                refund_method: document.getElementById("refund-method").value,
+                items,
+            }),
+        });
+        const data = await res.json();
+        if (data.detail) { showToast(data.detail, "error"); return; }
+        showToast("✓ " + data.refund_number + " — " + data.amount.toFixed(2) + " EGP refunded", "success");
+        window.open("/refunds/print/" + data.id, "_blank");
+        await Promise.all([loadRefunds(), selectInvoice(selectedInvoice.id), loadInvoices()]);
+    } catch(e) {
+        showToast("Failed to create refund", "error");
+    } finally {
+        btn.disabled = false;
+        btn.innerHTML = `<svg width="15" height="15" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><polyline points="20 6 9 17 4 12"/></svg> Issue Refund`;
+        recalc();
+    }
+}
+
+// ── Recent Refunds ────────────────────────────────────────────
+async function loadRefunds() {
     const list = document.getElementById("refund-list");
-    list.innerHTML = '<div class="empty">Loading refunds...</div>';
-    try{
-        const data = await (await fetch('/refunds/api/refunds')).json();
-        if(!Array.isArray(data) || !data.length){
-            list.innerHTML = '<div class="empty">No refunds recorded yet.</div>';
+    try {
+        const data = await (await fetch("/refunds/api/refunds")).json();
+        document.getElementById("refund-count").innerText = data.length || "0";
+        if (!data.length) {
+            list.innerHTML = `<div class="empty-list">No refunds yet</div>`;
             return;
         }
-        list.innerHTML = data.map(r=>`
+        list.innerHTML = data.map(r => `
             <div class="refund-card">
-                <div class="row">
-                    <div class="num">${r.refund_number}</div>
-                    <a class="nav-btn" style="height:34px;padding:0 12px" href="/refunds/print/${r.id}" target="_blank">Print</a>
+                <div class="refund-card-top">
+                    <span class="refund-num">${r.refund_number}</span>
+                    <a class="refund-print" href="/refunds/print/${r.id}" target="_blank">
+                        <svg width="11" height="11" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24">
+                            <polyline points="6 9 6 2 18 2 18 9"/><path d="M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2"/>
+                            <rect width="12" height="8" x="6" y="14"/>
+                        </svg>
+                        Print
+                    </a>
                 </div>
-                <div style="font-weight:700;margin:8px 0 4px">${r.customer}</div>
-                <div class="sub">${r.invoice_number} · ${r.created_at}</div>
-                <div class="row" style="margin-top:10px">
-                    <span class="sub">${r.reason || r.refund_method}</span>
-                    <span style="font-family:var(--mono);font-weight:800;color:var(--text)">${r.total.toFixed(2)}</span>
+                <div class="refund-customer">${r.customer}</div>
+                <div class="refund-meta">${r.invoice_number}  ·  ${r.created_at.slice(0,10)}</div>
+                <div class="refund-bottom">
+                    <span class="refund-reason">${r.reason || r.refund_method}</span>
+                    <span class="refund-amount">−${r.total.toFixed(2)}</span>
                 </div>
             </div>
         `).join("");
-    }catch(e){
-        list.innerHTML = '<div class="empty">Failed to load refunds.</div>';
+    } catch(e) {
+        list.innerHTML = `<div class="empty-list">Failed to load</div>`;
     }
 }
 
-async function submitRefund(){
-    if(!selectedInvoice){
-        showToast("Select an invoice first");
-        return;
-    }
-    const reason = document.getElementById("reason").value.trim();
-    if(!reason){
-        showToast("Enter a refund reason");
-        return;
-    }
-    const items = Array.from(document.querySelectorAll('#items input'))
-        .map(input=>({product_id: parseInt(input.dataset.productId), qty: parseFloat(input.value) || 0}))
-        .filter(item=>item.qty > 0);
-    if(!items.length){
-        showToast("Choose at least one item quantity");
-        return;
-    }
-    const btn = document.getElementById("submit-btn");
-    btn.disabled = true;
-    btn.textContent = "Creating refund...";
-    try{
-        const res = await fetch('/refunds/api/create', {
-            method:'POST',
-            headers:{
-                'Content-Type':'application/json',
-                'Authorization':'Bearer ' + token
-            },
-            body:JSON.stringify({
-                invoice_id: selectedInvoice.id,
-                reason,
-                refund_method: document.getElementById("refund-method").value,
-                notes: document.getElementById("notes").value.trim(),
-                items
-            })
-        });
-        const data = await res.json();
-        if(data.detail){
-            showToast(data.detail);
-            return;
-        }
-        showToast(`${data.refund_number} created`);
-        window.open(`/refunds/print/${data.id}`, '_blank');
-        await Promise.all([loadRefunds(), selectInvoice(selectedInvoice.id), loadInvoices()]);
-    }catch(e){
-        showToast("Failed to create refund");
-    }finally{
-        btn.disabled = false;
-        btn.textContent = "Create Refund";
-    }
-}
+// ── Spin animation ────────────────────────────────────────────
+const style = document.createElement("style");
+style.textContent = "@keyframes spin{to{transform:rotate(360deg)}}";
+document.head.appendChild(style);
 
+// ── Boot ──────────────────────────────────────────────────────
 loadInvoices();
 loadRefunds();
 </script>

@@ -215,6 +215,47 @@ body {{ font-family: monospace; background:#060810; color:white; }}
 </html>"""
 
 
+@router.get("/pos-sw.js")
+def pos_service_worker():
+    from fastapi.responses import Response
+    js = r"""
+const CACHE = 'pos-v1';
+const PRECACHE = ['/pos', '/products-cache', '/customers', '/static/Logo.png'];
+
+self.addEventListener('install', e => {
+  e.waitUntil(caches.open(CACHE).then(c => c.addAll(PRECACHE)));
+  self.skipWaiting();
+});
+
+self.addEventListener('activate', e => {
+  e.waitUntil(
+    caches.keys().then(keys =>
+      Promise.all(keys.filter(k => k !== CACHE).map(k => caches.delete(k)))
+    )
+  );
+  self.clients.claim();
+});
+
+self.addEventListener('fetch', e => {
+  const url = new URL(e.request.url);
+  if (e.request.method !== 'GET') return;
+  const cacheable = ['/pos', '/products-cache', '/customers', '/static/Logo.png'];
+  if (!cacheable.some(p => url.pathname === p || url.pathname.startsWith(p))) return;
+  e.respondWith(
+    fetch(e.request).then(res => {
+      if (res.ok) {
+        const copy = res.clone();
+        caches.open(CACHE).then(c => c.put(e.request, copy));
+      }
+      return res;
+    }).catch(() => caches.match(e.request))
+  );
+});
+"""
+    return Response(content=js, media_type="application/javascript",
+                    headers={"Service-Worker-Allowed": "/"})
+
+
 @router.get("/pos", response_class=HTMLResponse)
 def pos_ui():
     return """<!DOCTYPE html>
@@ -460,6 +501,8 @@ body.light .toast{background:var(--card);}
     </div>
 
     <div class="topbar-right">
+        <div id="offline-indicator" style="display:none;align-items:center;gap:6px;background:rgba(255,181,71,.12);border:1px solid rgba(255,181,71,.35);color:#ffb547;font-size:12px;font-weight:700;padding:7px 12px;border-radius:9px;">📴 Offline</div>
+        <div id="offline-badge" style="display:none;background:rgba(255,181,71,.12);border:1px solid rgba(255,181,71,.35);color:#ffb547;font-size:12px;font-weight:700;padding:7px 12px;border-radius:9px;cursor:pointer;" onclick="showPendingQueue()" title="Pending offline sales — click to sync"></div>
         <a href="/refunds/" style="display:flex;align-items:center;gap:6px;background:rgba(255,77,109,.08);border:1px solid rgba(255,77,109,.25);color:#ff4d6d;font-family:var(--sans);font-size:12px;font-weight:700;padding:8px 14px;border-radius:9px;cursor:pointer;text-decoration:none;transition:all .2s;" onmouseover="this.style.background='rgba(255,77,109,.18)'" onmouseout="this.style.background='rgba(255,77,109,.08)'">↩ Refunds</a>
         <button class="mode-btn" id="mode-btn" onclick="toggleMode()" title="Toggle color mode">??</button>
         <div class="user-pill">
@@ -687,15 +730,118 @@ if(!hasPermission("action_pos_settle_later")){
     document.getElementById("settle_btn").style.display = "none";
 }
 
+/* ── OFFLINE / INDEXEDDB ── */
+function openDB(){
+    return new Promise((res,rej)=>{
+        const r = indexedDB.open("pos-offline",1);
+        r.onupgradeneeded = e => e.target.result.createObjectStore("queue",{keyPath:"id",autoIncrement:true});
+        r.onsuccess = e => res(e.target.result);
+        r.onerror   = e => rej(e.target.error);
+    });
+}
+async function queueOfflineSale(payload){
+    const db = await openDB();
+    return new Promise((res,rej)=>{
+        const tx = db.transaction("queue","readwrite");
+        tx.objectStore("queue").add(payload);
+        tx.oncomplete = res; tx.onerror = e => rej(e.target.error);
+    });
+}
+async function getPendingQueue(){
+    const db = await openDB();
+    return new Promise((res,rej)=>{
+        const tx = db.transaction("queue","readonly");
+        const req = tx.objectStore("queue").getAll();
+        req.onsuccess = e => res(e.target.result);
+        req.onerror   = e => rej(e.target.error);
+    });
+}
+async function removeFromQueue(id){
+    const db = await openDB();
+    return new Promise((res,rej)=>{
+        const tx = db.transaction("queue","readwrite");
+        tx.objectStore("queue").delete(id);
+        tx.oncomplete = res; tx.onerror = e => rej(e.target.error);
+    });
+}
+async function updateOfflineBadge(){
+    try {
+        const q = await getPendingQueue();
+        const badge = document.getElementById("offline-badge");
+        if(q.length>0){
+            badge.textContent = `📴 ${q.length} queued`;
+            badge.style.display = "";
+        } else {
+            badge.style.display = "none";
+        }
+    } catch(e){}
+}
+async function syncOfflineQueue(){
+    if(!navigator.onLine) return;
+    let q;
+    try { q = await getPendingQueue(); } catch(e){ return; }
+    if(!q.length) return;
+    let synced=0, failed=0;
+    for(const sale of q){
+        try {
+            const res = await fetch("/invoice",{
+                method:"POST",
+                headers:{"Content-Type":"application/json","Authorization":"Bearer "+token},
+                body: JSON.stringify({
+                    customer_id:      sale.customer_id,
+                    items:            sale.items,
+                    discount_percent: sale.discount_percent,
+                    notes:            sale.notes||"",
+                    payment_method:   sale.payment_method,
+                    settle_later:     sale.settle_later||false,
+                }),
+            });
+            if(res.ok){ await removeFromQueue(sale.id); synced++; }
+            else { failed++; }
+        } catch(e){ break; }
+    }
+    if(synced>0) showToast(`✅ Synced ${synced} offline sale${synced>1?"s":""}`);
+    if(failed>0) showToast(`⚠️ ${failed} sale${failed>1?"s":""} could not sync`);
+    updateOfflineBadge();
+}
+async function showPendingQueue(){
+    const q = await getPendingQueue();
+    if(!q.length){ showToast("No pending offline sales"); return; }
+    if(navigator.onLine){
+        showToast(`Syncing ${q.length} offline sale${q.length>1?"s":""}…`, false);
+        await syncOfflineQueue();
+    } else {
+        showToast(`📴 ${q.length} sale${q.length>1?"s":""} waiting for connection`);
+    }
+}
+window.addEventListener("online",()=>{
+    const ind = document.getElementById("offline-indicator");
+    if(ind) ind.style.display = "none";
+    syncOfflineQueue();
+});
+window.addEventListener("offline",()=>{
+    const ind = document.getElementById("offline-indicator");
+    if(ind) ind.style.display = "flex";
+});
+
 /* ── INIT ── */
 async function load(){
     if(!token){ window.location.href="/"; return; }
+    if(!navigator.onLine){
+        const ind = document.getElementById("offline-indicator");
+        if(ind) ind.style.display = "flex";
+    }
     try {
         customers = await (await fetch("/customers")).json();
         products  = await (await fetch("/products-cache")).json();
         draw(products.slice(0,40));
         checkUnpaidCount();
-    } catch(e){ console.error("Load error:", e); }
+    } catch(e){
+        console.error("Load error:", e);
+        if(!navigator.onLine) showToast("📴 Working offline — product list may be limited", false);
+    }
+    updateOfflineBadge();
+    if(navigator.onLine) syncOfflineQueue();
 }
 
 /* ── CHECK UNPAID COUNT (for notification badge) ── */
@@ -897,18 +1043,20 @@ async function checkout(settleLater=false){
     let btn=document.getElementById(settleLater?"settle_btn":"checkout_btn");
     btn.disabled=true; btn.innerText="Processing…";
 
+    const payload = {
+        customer_id:      selectedCustomer?parseInt(selectedCustomer):null,
+        items:            cart.map(c=>({sku:c.sku,name:c.name,price:c.price,qty:c.qty})),
+        discount_percent: parseFloat(document.getElementById("discount").value)||0,
+        notes:            "",
+        payment_method:   settleLater?"unpaid":selectedPayMethod,
+        settle_later:     settleLater,
+    };
+
     try {
         let res=await fetch("/invoice",{
             method:"POST",
             headers:{"Content-Type":"application/json","Authorization":"Bearer "+token},
-            body:JSON.stringify({
-                customer_id:      selectedCustomer?parseInt(selectedCustomer):null,
-                items:            cart.map(c=>({sku:c.sku,name:c.name,price:c.price,qty:c.qty})),
-                discount_percent: parseFloat(document.getElementById("discount").value)||0,
-                notes:            "",
-                payment_method:   settleLater?"unpaid":selectedPayMethod,
-                settle_later:     settleLater,
-            }),
+            body:JSON.stringify(payload),
         });
         let data;
         try {
@@ -928,7 +1076,17 @@ async function checkout(settleLater=false){
             }
             window.location.href="/invoice/"+data.id;
         }
-    } catch(e){ showToast("Network error"); }
+    } catch(e){
+        // Network failure — queue for later sync
+        try {
+            await queueOfflineSale(payload);
+            showToast("📴 No connection — sale queued, will sync when back online", false);
+            cart=[]; drawCart();
+            updateOfflineBadge();
+        } catch(dbErr){
+            showToast("Network error — could not save offline");
+        }
+    }
     finally { btn.disabled=false; btn.innerText=settleLater?"⏳ Settle Later (requires customer)":"Confirm Order"; }
 }
 
@@ -1032,6 +1190,10 @@ document.getElementById("inv-modal").addEventListener("click", function(e){
 });
 
 load();
+
+if("serviceWorker" in navigator){
+    navigator.serviceWorker.register("/pos-sw.js", {scope:"/"}).catch(()=>{});
+}
 </script>
 </body>
 </html>

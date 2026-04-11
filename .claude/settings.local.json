@@ -9,7 +9,12 @@
       "Bash(find \"c:/Users/Abdallah Abo zaid/erp/app/routers\" -name \"*.py\" -type f -exec wc -l {} +)",
       "Bash(python3 -c ':*)",
       "Bash(python \"c:/Users/Abdallah Abo zaid/erp/check_pos.py\")",
-      "Bash(python3 -c \"f=open\\('c:/Users/Abdallah Abo zaid/erp/app/routers/pos.py'\\);c=f.read\\(\\);f.close\\(\\);print\\(len\\(c\\),c.count\\(chr\\(10\\)\\),'returns-panel' in c,'submitRefund' in c\\)\")"
+      "Bash(python3 -c \"f=open\\('c:/Users/Abdallah Abo zaid/erp/app/routers/pos.py'\\);c=f.read\\(\\);f.close\\(\\);print\\(len\\(c\\),c.count\\(chr\\(10\\)\\),'returns-panel' in c,'submitRefund' in c\\)\")",
+      "Bash(dir \"c:\\\\\\\\Users\\\\\\\\Abdallah Abo zaid\\\\\\\\erp\\\\\\\\app\\\\\\\\static\")",
+      "Bash(python3 -c \"import os; print\\(os.listdir\\('c:/Users/Abdallah Abo zaid/erp/app/static'\\)\\)\")",
+      "Bash(python3 -c \"import os; p='c:/Users/Abdallah Abo zaid/erp/app/static'; print\\(os.path.exists\\(p\\), os.listdir\\(p\\) if os.path.exists\\(p\\) else 'N/A'\\)\")",
+      "Bash(python -c \"import os; p='app/static'; print\\(os.path.exists\\(p\\), os.listdir\\(p\\) if os.path.exists\\(p\\) else 'N/A'\\)\")",
+      "Bash(cmd /c \"dir /b \\\\\"c:\\\\Users\\\\Abdallah Abo zaid\\\\erp\\\\app\\\\static\\\\\" 2>&1\")"
     ]
   }
 }

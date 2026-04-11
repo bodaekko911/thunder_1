@@ -25,7 +25,7 @@ def safe_str(v):
 
 def safe_float(v):
     try: return float(v)
-    except: return None
+    except (ValueError, TypeError): return None
 
 
 # ── PREVIEW ────────────────────────────────────────────
@@ -77,7 +77,7 @@ async def import_products(file: UploadFile = File(...), db: Session = Depends(ge
         raw_sku = ws.cell(row, col_sku).value if col_sku else None
         if raw_sku is not None:
             try:    sku = str(int(float(str(raw_sku))))
-            except: sku = str(raw_sku).strip()
+            except (ValueError, TypeError): sku = str(raw_sku).strip()
         else:
             sku = None
 
@@ -86,7 +86,7 @@ async def import_products(file: UploadFile = File(...), db: Session = Depends(ge
             nums = []
             for p in db.query(Product).all():
                 try: nums.append(int(p.sku))
-                except: pass
+                except (ValueError, TypeError): pass
             sku = str(max(nums) + 1) if nums else "10001"
 
         unit  = v(col_unit) or "gram"
@@ -159,7 +159,7 @@ async def import_stock(file: UploadFile = File(...), db: Session = Depends(get_d
         # Normalise SKU
         if sku_raw is not None:
             try:    sku = str(int(float(str(sku_raw))))
-            except: sku = str(sku_raw).strip()
+            except (ValueError, TypeError): sku = str(sku_raw).strip()
         else:
             sku = None
 
@@ -622,5 +622,3 @@ async function doImport(type){
 </script>
 </body>
 </html>"""
-
-

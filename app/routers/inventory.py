@@ -8,8 +8,10 @@ from datetime import datetime, date
 import io
 
 from app.database import get_db
+from app.core.permissions import get_current_user
 from app.core.log import record
 from app.models.product import Product
+from app.models.user import User
 from app.models.inventory import StockMove
 
 router = APIRouter(prefix="/inventory", tags=["Inventory"])
@@ -172,7 +174,7 @@ def export_moves(
 
 
 @router.post("/api/adjust")
-def adjust_stock(data: StockAdjustment, db: Session = Depends(get_db)):
+def adjust_stock(data: StockAdjustment, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     product = db.query(Product).filter(Product.id == data.product_id).first()
     if not product:
         raise HTTPException(status_code=404, detail="Product not found")

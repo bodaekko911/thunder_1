@@ -10,7 +10,7 @@ from datetime import date, datetime
 from app.database import get_db
 from app.core.permissions import get_current_user
 from app.core.log import record
-from app.models.b2b import B2BClient, B2BInvoice, B2BInvoiceItem, Consignment, ConsignmentItem, B2BRefund, B2BRefundItem
+from app.models.b2b import B2BClient, B2BInvoice, B2BInvoiceItem, Consignment, ConsignmentItem, B2BRefund, B2BRefundItem, B2BClientPrice
 from app.models.product import Product
 from app.models.inventory import StockMove
 from app.models.accounting import Account, Journal, JournalEntry
@@ -75,16 +75,16 @@ class ClientRefundCreate(BaseModel):
 
 # ── HELPERS ────────────────────────────────────────────
 def _next_b2b_number(db):
-    count = db.query(B2BInvoice).count()
-    return f"B2B-{str(count + 1).zfill(5)}"
+    max_id = db.query(func.max(B2BInvoice.id)).scalar() or 0
+    return f"B2B-{str(max_id + 1).zfill(5)}"
 
 def _next_cons_number(db):
-    count = db.query(Consignment).count()
-    return f"CONS-{str(count + 1).zfill(4)}"
+    max_id = db.query(func.max(Consignment.id)).scalar() or 0
+    return f"CONS-{str(max_id + 1).zfill(4)}"
 
 def _next_refund_number(db):
-    count = db.query(B2BRefund).count()
-    return f"RFD-{str(count + 1).zfill(5)}"
+    max_id = db.query(func.max(B2BRefund.id)).scalar() or 0
+    return f"RFD-{str(max_id + 1).zfill(5)}"
 
 def _post_journal(db, description, ref_type, entries, user_id=None):
     journal = Journal(ref_type=ref_type, description=description, user_id=user_id)
@@ -119,8 +119,7 @@ def _normalized_client_terms(client: B2BClient) -> str:
     return "cash"
 
 def _client_discount_pct(client: B2BClient) -> float:
-    # This app currently stores the client-side default discount in credit_limit.
-    return float(client.credit_limit or 0)
+    return float(client.discount_pct or 0)
 
 def _reverse_invoice_stock(invoice, db):
     for item in invoice.items:
@@ -151,7 +150,12 @@ def _reverse_invoice_journal(invoice, db):
             ("1100", 0, total),   # Credit AR
         ])
         client = invoice.client
-        client.outstanding = Decimal(str(max(0, float(client.outstanding) - total)))
+        # Only subtract the UNPAID portion — the paid portion was already removed
+        # from client.outstanding when payment was collected, so subtracting total
+        # again would double-reverse it.
+        unpaid = max(0.0, total - float(invoice.amount_paid))
+        if unpaid > 0:
+            client.outstanding = Decimal(str(max(0, float(client.outstanding) - unpaid)))
 
 
 # ── SEED DEFERRED REVENUE ──────────────────────────────
@@ -180,8 +184,8 @@ def get_clients(q: str = "", db: Session = Depends(get_db)):
             "email":          c.email or "—",
             "address":        c.address or "—",
             "payment_terms":  c.payment_terms,
-            "discount_pct":   float(c.credit_limit),
-            "credit_limit":   float(c.credit_limit),
+            "discount_pct":   float(c.discount_pct or 0),
+            "credit_limit":   float(c.credit_limit or 0),
             "outstanding":    float(c.outstanding),
             "notes":          c.notes or "",
             "invoice_count":  len(c.invoices),
@@ -190,19 +194,20 @@ def get_clients(q: str = "", db: Session = Depends(get_db)):
     ]
 
 @router.post("/api/clients")
-def create_client(data: ClientCreate, db: Session = Depends(get_db)):
+def create_client(data: ClientCreate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     c = B2BClient(
         name=data.name, contact_person=data.contact_person,
         phone=data.phone, email=data.email, address=data.address,
         payment_terms=data.payment_terms,
-        credit_limit=data.discount_pct,
+        discount_pct=data.discount_pct,
+        credit_limit=data.credit_limit,
         notes=data.notes,
     )
     db.add(c); db.commit(); db.refresh(c)
     return {"id": c.id, "name": c.name}
 
 @router.put("/api/clients/{client_id}")
-def update_client(client_id: int, data: ClientUpdate, db: Session = Depends(get_db)):
+def update_client(client_id: int, data: ClientUpdate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     c = db.query(B2BClient).filter(B2BClient.id == client_id).first()
     if not c:
         raise HTTPException(status_code=404, detail="Client not found")
@@ -212,13 +217,14 @@ def update_client(client_id: int, data: ClientUpdate, db: Session = Depends(get_
     if data.email is not None:          c.email          = data.email
     if data.address is not None:        c.address        = data.address
     if data.payment_terms is not None:  c.payment_terms  = data.payment_terms
-    if data.discount_pct is not None:   c.credit_limit   = data.discount_pct
+    if data.discount_pct is not None:   c.discount_pct   = data.discount_pct
+    if data.credit_limit is not None:   c.credit_limit   = data.credit_limit
     if data.notes is not None:          c.notes          = data.notes
     db.commit()
     return {"ok": True}
 
 @router.delete("/api/clients/{client_id}")
-def delete_client(client_id: int, db: Session = Depends(get_db)):
+def delete_client(client_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     c = db.query(B2BClient).filter(B2BClient.id == client_id).first()
     if not c:
         raise HTTPException(status_code=404, detail="Client not found")
@@ -472,7 +478,7 @@ def edit_invoice(invoice_id: int, data: InvoiceCreate, db: Session = Depends(get
 
 
 @router.delete("/api/invoices/{invoice_id}")
-def delete_invoice(invoice_id: int, db: Session = Depends(get_db)):
+def delete_invoice(invoice_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     invoice = db.query(B2BInvoice).filter(B2BInvoice.id == invoice_id).first()
     if not invoice:
         raise HTTPException(status_code=404, detail="Invoice not found")
@@ -764,9 +770,85 @@ def get_stats(db: Session = Depends(get_db)):
     }
 
 @router.get("/api/products-list")
-def products_list(db: Session = Depends(get_db)):
+def products_list(client_id: int = None, db: Session = Depends(get_db)):
     products = db.query(Product).filter(Product.is_active == True).order_by(Product.name).all()
-    return [{"id": p.id, "name": p.name, "sku": p.sku, "price": float(p.price), "stock": float(p.stock), "unit": p.unit} for p in products]
+    # Build custom-price lookup for this client
+    custom = {}
+    if client_id:
+        for cp in db.query(B2BClientPrice).filter(B2BClientPrice.client_id == client_id).all():
+            custom[cp.product_id] = float(cp.price)
+    return [
+        {
+            "id":           p.id,
+            "name":         p.name,
+            "sku":          p.sku,
+            "price":        custom.get(p.id, float(p.price)),
+            "default_price": float(p.price),
+            "has_custom":   p.id in custom,
+            "stock":        float(p.stock),
+            "unit":         p.unit,
+        }
+        for p in products
+    ]
+
+
+# ── CLIENT PRICE LIST API ──────────────────────────────
+@router.get("/api/clients/{client_id}/prices")
+def get_client_prices(client_id: int, db: Session = Depends(get_db)):
+    client = db.query(B2BClient).filter(B2BClient.id == client_id).first()
+    if not client:
+        raise HTTPException(status_code=404, detail="Client not found")
+    prices = db.query(B2BClientPrice).filter(B2BClientPrice.client_id == client_id).all()
+    return [
+        {
+            "id":            cp.id,
+            "product_id":    cp.product_id,
+            "product_name":  cp.product.name if cp.product else "—",
+            "sku":           cp.product.sku  if cp.product else "—",
+            "custom_price":  float(cp.price),
+            "default_price": float(cp.product.price) if cp.product else 0,
+        }
+        for cp in prices
+    ]
+
+
+class ClientPriceUpsert(BaseModel):
+    product_id: int
+    price:      float
+
+@router.put("/api/clients/{client_id}/prices")
+def upsert_client_price(client_id: int, data: ClientPriceUpsert,
+                         db: Session = Depends(get_db),
+                         current_user: User = Depends(get_current_user)):
+    client = db.query(B2BClient).filter(B2BClient.id == client_id).first()
+    if not client:
+        raise HTTPException(status_code=404, detail="Client not found")
+    if data.price < 0:
+        raise HTTPException(status_code=400, detail="Price must be >= 0")
+    cp = db.query(B2BClientPrice).filter(
+        B2BClientPrice.client_id == client_id,
+        B2BClientPrice.product_id == data.product_id,
+    ).first()
+    if cp:
+        cp.price = data.price
+    else:
+        db.add(B2BClientPrice(client_id=client_id, product_id=data.product_id, price=data.price))
+    db.commit()
+    return {"ok": True}
+
+
+@router.delete("/api/clients/{client_id}/prices/{product_id}")
+def delete_client_price(client_id: int, product_id: int,
+                         db: Session = Depends(get_db),
+                         current_user: User = Depends(get_current_user)):
+    cp = db.query(B2BClientPrice).filter(
+        B2BClientPrice.client_id == client_id,
+        B2BClientPrice.product_id == product_id,
+    ).first()
+    if cp:
+        db.delete(cp)
+        db.commit()
+    return {"ok": True}
 
 @router.get("/api/refund-products/{client_id}")
 def refund_products(client_id: int, db: Session = Depends(get_db)):
@@ -1379,6 +1461,404 @@ table.totals .amount {{ text-align: right; font-family: monospace; font-weight: 
 </html>"""
 
 
+# ── CLIENT STATEMENT ───────────────────────────────────
+@router.get("/api/clients/{client_id}/statement")
+def client_statement_data(client_id: int, db: Session = Depends(get_db)):
+    client = db.query(B2BClient).filter(B2BClient.id == client_id).first()
+    if not client:
+        raise HTTPException(status_code=404, detail="Client not found")
+
+    invoices = (
+        db.query(B2BInvoice)
+        .filter(B2BInvoice.client_id == client_id)
+        .order_by(B2BInvoice.created_at)
+        .all()
+    )
+    refunds = (
+        db.query(B2BRefund)
+        .filter(B2BRefund.client_id == client_id)
+        .order_by(B2BRefund.created_at)
+        .all()
+    )
+
+    # Merge into chronological transactions
+    txns = []
+    for inv in invoices:
+        txns.append({
+            "date":     inv.created_at,
+            "ref":      inv.invoice_number,
+            "type":     "invoice",
+            "desc":     f"{inv.invoice_type.replace('_',' ').title()} Invoice",
+            "debit":    float(inv.total),
+            "credit":   float(inv.amount_paid),
+            "status":   inv.status,
+        })
+    for rfnd in refunds:
+        txns.append({
+            "date":     rfnd.created_at,
+            "ref":      rfnd.refund_number,
+            "type":     "refund",
+            "desc":     "Credit / Refund",
+            "debit":    0.0,
+            "credit":   float(rfnd.total),
+            "status":   "refund",
+        })
+
+    txns.sort(key=lambda x: x["date"])
+
+    running = 0.0
+    rows = []
+    for t in txns:
+        running += t["debit"] - t["credit"]
+        rows.append({
+            "date":    t["date"].strftime("%d-%b-%Y") if t["date"] else "—",
+            "ref":     t["ref"],
+            "type":    t["type"],
+            "desc":    t["desc"],
+            "debit":   t["debit"],
+            "credit":  t["credit"],
+            "balance": round(running, 2),
+            "status":  t["status"],
+        })
+
+    return {
+        "client": {
+            "id":             client.id,
+            "code":           f"C{str(client.id).zfill(4)}",
+            "name":           client.name,
+            "contact_person": client.contact_person or "",
+            "phone":          client.phone or "",
+            "email":          client.email or "",
+            "address":        client.address or "",
+            "payment_terms":  client.payment_terms or "",
+            "credit_limit":   float(client.credit_limit or 0),
+            "outstanding":    float(client.outstanding or 0),
+        },
+        "transactions":  rows,
+        "total_invoiced": sum(t["debit"]  for t in rows),
+        "total_paid":     sum(t["credit"] for t in rows),
+        "balance_due":    round(running, 2),
+    }
+
+
+@router.get("/client/{client_id}/statement", response_class=HTMLResponse)
+def client_statement_print(client_id: int, db: Session = Depends(get_db)):
+    client = db.query(B2BClient).filter(B2BClient.id == client_id).first()
+    if not client:
+        raise HTTPException(status_code=404, detail="Client not found")
+
+    invoices = (
+        db.query(B2BInvoice)
+        .filter(B2BInvoice.client_id == client_id)
+        .order_by(B2BInvoice.created_at)
+        .all()
+    )
+    refunds = (
+        db.query(B2BRefund)
+        .filter(B2BRefund.client_id == client_id)
+        .order_by(B2BRefund.created_at)
+        .all()
+    )
+
+    txns = []
+    for inv in invoices:
+        txns.append({
+            "date":   inv.created_at,
+            "ref":    inv.invoice_number,
+            "type":   "invoice",
+            "desc":   inv.invoice_type.replace("_", " ").title() + " Invoice",
+            "debit":  float(inv.total),
+            "credit": float(inv.amount_paid),
+            "status": inv.status,
+        })
+    for rfnd in refunds:
+        txns.append({
+            "date":   rfnd.created_at,
+            "ref":    rfnd.refund_number,
+            "type":   "refund",
+            "desc":   "Credit / Refund",
+            "debit":  0.0,
+            "credit": float(rfnd.total),
+            "status": "refund",
+        })
+
+    txns.sort(key=lambda x: x["date"])
+
+    running = 0.0
+    rows_html = ""
+    for t in txns:
+        running += t["debit"] - t["credit"]
+        date_str = t["date"].strftime("%d-%b-%Y") if t["date"] else "—"
+        debit_str  = f"ج.م. {t['debit']:,.2f}"  if t["debit"]  > 0 else "—"
+        credit_str = f"ج.م. {t['credit']:,.2f}" if t["credit"] > 0 else "—"
+        bal_color  = "#c0392b" if running > 0 else "#2a7a2a"
+        row_class  = "refund-row" if t["type"] == "refund" else ""
+        status_badge = ""
+        if t["status"] == "paid":
+            status_badge = '<span class="badge paid">PAID</span>'
+        elif t["status"] == "partial":
+            status_badge = '<span class="badge partial">PARTIAL</span>'
+        elif t["status"] == "unpaid":
+            status_badge = '<span class="badge unpaid">UNPAID</span>'
+        elif t["status"] == "refund":
+            status_badge = '<span class="badge refund">REFUND</span>'
+        rows_html += f"""
+        <tr class="{row_class}">
+            <td>{date_str}</td>
+            <td class="mono">{t['ref']}</td>
+            <td>{t['desc']} {status_badge}</td>
+            <td class="right mono">{debit_str}</td>
+            <td class="right mono green">{credit_str}</td>
+            <td class="right mono bold" style="color:{bal_color}">ج.م. {running:,.2f}</td>
+        </tr>"""
+
+    total_invoiced = sum(t["debit"]  for t in txns)
+    total_paid     = sum(t["credit"] for t in txns)
+    balance_due    = round(running, 2)
+    client_code    = f"C{str(client.id).zfill(4)}"
+    from datetime import date as _date
+    today_str      = _date.today().strftime("%d-%b-%Y")
+
+    return f"""<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<title>Account Statement — {client.name}</title>
+<style>
+* {{ box-sizing: border-box; margin: 0; padding: 0; }}
+body {{
+    font-family: Arial, sans-serif;
+    font-size: 13px;
+    color: #111;
+    background: white;
+    padding: 30px;
+    max-width: 900px;
+    margin: 0 auto;
+}}
+.header-top {{
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    margin-bottom: 20px;
+    padding-bottom: 16px;
+    border-bottom: 2px solid #2a7a2a;
+}}
+.company-block {{ text-align: center; flex: 1; }}
+.company-name {{
+    font-size: 20px; font-weight: 900;
+    color: #2a7a2a; letter-spacing: 1px; margin-bottom: 3px;
+}}
+.company-sub {{ font-size: 11px; color: #555; }}
+.doc-title {{
+    font-size: 22px; font-weight: 900; color: #2a7a2a;
+    letter-spacing: 2px; text-transform: uppercase;
+    margin-bottom: 6px;
+}}
+.meta-table td {{ padding: 3px 10px 3px 0; font-size: 12px; }}
+.meta-table .lbl {{ color: #666; }}
+.client-box {{
+    background: #f7f9f7;
+    border: 1px solid #c8dfc8;
+    border-left: 4px solid #2a7a2a;
+    border-radius: 6px;
+    padding: 14px 18px;
+    margin-bottom: 20px;
+    display: flex;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 12px;
+}}
+.client-box .name {{ font-size: 16px; font-weight: 700; margin-bottom: 4px; }}
+.client-box .detail {{ font-size: 12px; color: #555; line-height: 1.7; }}
+.client-box .terms {{
+    font-size: 11px; font-weight: 700; letter-spacing: 1px;
+    text-transform: uppercase; color: #2a7a2a;
+    background: #e8f5e8; padding: 3px 10px;
+    border-radius: 20px; border: 1px solid #c8dfc8;
+    display: inline-block; margin-top: 6px;
+}}
+table.stmt {{
+    width: 100%;
+    border-collapse: collapse;
+    margin-bottom: 0;
+}}
+table.stmt th {{
+    background: #2a7a2a; color: white;
+    padding: 9px 12px; text-align: left;
+    font-size: 11px; font-weight: 700; letter-spacing: .5px;
+    text-transform: uppercase;
+}}
+table.stmt th.right {{ text-align: right; }}
+table.stmt td {{
+    padding: 9px 12px;
+    border-bottom: 1px solid #e8e8e8;
+    font-size: 13px;
+    vertical-align: middle;
+}}
+table.stmt tbody tr:nth-child(even) {{ background: #f9f9f9; }}
+table.stmt tbody tr:hover {{ background: #f0f7f0; }}
+table.stmt tr.refund-row td {{ color: #2a7a2a; background: #f2fcf2; }}
+.right {{ text-align: right; }}
+.mono {{ font-family: 'Courier New', monospace; }}
+.green {{ color: #2a7a2a; }}
+.bold {{ font-weight: 700; }}
+.badge {{
+    display: inline-block;
+    font-size: 9px; font-weight: 700; letter-spacing: .8px;
+    text-transform: uppercase; padding: 2px 7px;
+    border-radius: 3px; vertical-align: middle; margin-left: 6px;
+}}
+.badge.paid    {{ background: #e8f5e8; color: #2a7a2a; border: 1px solid #c8dfc8; }}
+.badge.partial {{ background: #fff8e8; color: #a07000; border: 1px solid #e8d898; }}
+.badge.unpaid  {{ background: #fef0f0; color: #c0392b; border: 1px solid #f0c8c8; }}
+.badge.refund  {{ background: #e8f0ff; color: #2255aa; border: 1px solid #c0d0f0; }}
+.summary-wrap {{
+    display: flex; justify-content: flex-end; margin-top: 0;
+}}
+table.summary {{
+    border-collapse: collapse;
+    min-width: 320px;
+    border: 1px solid #ccc;
+    margin-top: 12px;
+}}
+table.summary td {{
+    padding: 9px 16px; font-size: 13px;
+    border-bottom: 1px solid #eee;
+}}
+table.summary .lbl {{ color: #444; }}
+table.summary .amt {{ text-align: right; font-family: 'Courier New', monospace; font-weight: 600; }}
+.row-total   {{ background: #f5f5f5; }}
+.row-paid    {{ color: #2a7a2a; }}
+.row-balance {{
+    background: {"#c0392b" if balance_due > 0 else "#2a7a2a"};
+    color: white; font-weight: 700; font-size: 15px;
+}}
+.row-balance .amt {{ color: white; }}
+.notice-box {{
+    margin-top: 30px;
+    padding: 12px 16px;
+    background: #fffbf0;
+    border: 1px solid #e8d898;
+    border-radius: 6px;
+    font-size: 12px; color: #555;
+}}
+.page-footer {{
+    text-align: center; margin-top: 30px;
+    font-size: 11px; color: #888;
+    border-top: 1px solid #eee; padding-top: 10px;
+    font-style: italic;
+}}
+.no-print {{ margin-bottom: 20px; display: flex; gap: 8px; }}
+.print-btn {{
+    display: inline-flex; align-items: center; gap: 8px;
+    background: #2a7a2a; color: white; border: none;
+    padding: 10px 20px; border-radius: 8px;
+    font-size: 14px; font-weight: 700; cursor: pointer;
+}}
+.back-btn {{
+    display: inline-flex; align-items: center; gap: 8px;
+    background: #eee; color: #333; border: none;
+    padding: 10px 20px; border-radius: 8px;
+    font-size: 14px; font-weight: 700; cursor: pointer;
+}}
+@media print {{
+    .no-print {{ display: none; }}
+    body {{ padding: 15px; }}
+}}
+</style>
+</head>
+<body>
+
+<div class="no-print">
+    <button class="print-btn" onclick="window.print()">&#128424; Print Statement</button>
+    <button class="back-btn" onclick="history.back()">&#8592; Back</button>
+</div>
+
+<!-- HEADER -->
+<div class="header-top">
+    <div>
+        <div class="doc-title">Account Statement</div>
+        <table class="meta-table">
+            <tr><td class="lbl">As of:</td><td><b>{today_str}</b></td></tr>
+            <tr><td class="lbl">Client Code:</td><td><b>{client_code}</b></td></tr>
+            <tr><td class="lbl">Credit Limit:</td><td>ج.م. {float(client.credit_limit or 0):,.2f}</td></tr>
+        </table>
+    </div>
+    <div class="company-block">
+        <img src="/static/Logo.png" alt="Habiba" style="height:110px;object-fit:contain;margin-bottom:6px;">
+        <div class="company-name">Habiba Organic Farm</div>
+        <div class="company-sub">Commercial registry: 126278</div>
+        <div class="company-sub">Tax ID: 560042604</div>
+    </div>
+</div>
+
+<!-- CLIENT INFO -->
+<div class="client-box">
+    <div>
+        <div class="name">{client.name}</div>
+        <div class="detail">
+            {f"Contact: {client.contact_person}<br>" if client.contact_person else ""}
+            {f"Phone: {client.phone}<br>" if client.phone else ""}
+            {f"Email: {client.email}<br>" if client.email else ""}
+            {f"Address: {client.address}" if client.address else ""}
+        </div>
+        <span class="terms">{(client.payment_terms or "").replace("_"," ").title()}</span>
+    </div>
+    <div style="text-align:right">
+        <div style="font-size:12px;color:#666;margin-bottom:4px">Outstanding Balance</div>
+        <div style="font-size:28px;font-weight:900;font-family:'Courier New',monospace;color:{"#c0392b" if balance_due > 0 else "#2a7a2a"}">
+            ج.م. {balance_due:,.2f}
+        </div>
+    </div>
+</div>
+
+<!-- TRANSACTIONS TABLE -->
+<table class="stmt">
+    <thead>
+        <tr>
+            <th>Date</th>
+            <th>Reference</th>
+            <th>Description</th>
+            <th class="right">Charges</th>
+            <th class="right">Credits</th>
+            <th class="right">Balance</th>
+        </tr>
+    </thead>
+    <tbody>
+        {rows_html if rows_html else '<tr><td colspan="6" style="text-align:center;color:#888;padding:30px">No transactions found.</td></tr>'}
+    </tbody>
+</table>
+
+<!-- SUMMARY -->
+<div class="summary-wrap">
+    <table class="summary">
+        <tr class="row-total">
+            <td class="lbl">Total Invoiced</td>
+            <td class="amt">ج.م. {total_invoiced:,.2f}</td>
+        </tr>
+        <tr class="row-paid">
+            <td class="lbl">Total Credits &amp; Payments</td>
+            <td class="amt">ج.م. {total_paid:,.2f}</td>
+        </tr>
+        <tr class="row-balance">
+            <td class="lbl">Balance Due</td>
+            <td class="amt">ج.م. {balance_due:,.2f}</td>
+        </tr>
+    </table>
+</div>
+
+{f'<div class="notice-box">&#9432; &nbsp;This statement reflects all invoices and credits recorded as of {today_str}. Please contact us if you have any discrepancies.</div>' if balance_due > 0 else ""}
+
+<div class="page-footer">
+    Desert going green &nbsp;|&nbsp;
+    &#128247; habibaorganicfarm &nbsp;|&nbsp;
+    &#127760; habibacommunity.com
+</div>
+
+</body>
+</html>"""
+
+
 # ── UI ─────────────────────────────────────────────────
 @router.get("/", response_class=HTMLResponse)
 def b2b_ui():
@@ -1575,9 +2055,10 @@ td.name{color:var(--text);font-weight:600;}
 
     <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px;">
         <div class="tabs">
-            <button class="tab active" id="tab-clients"  onclick="switchTab('clients')">Clients</button>
-            <button class="tab"        id="tab-invoices" onclick="switchTab('invoices')">Invoices</button>
-            <button class="tab"        id="tab-refunds"  onclick="switchTab('refunds')">Client Refund</button>
+            <button class="tab active" id="tab-clients"    onclick="switchTab('clients')">Clients</button>
+            <button class="tab"        id="tab-invoices"  onclick="switchTab('invoices')">Invoices</button>
+            <button class="tab"        id="tab-refunds"   onclick="switchTab('refunds')">Client Refund</button>
+            <button class="tab"        id="tab-pricelists" onclick="switchTab('pricelists')">&#127991; Price Lists</button>
         </div>
         <div style="display:flex;gap:10px;">
             <button class="btn btn-blue"  id="btn-add-client"  onclick="openClientModal()">+ Add Client</button>
@@ -1688,6 +2169,50 @@ td.name{color:var(--text);font-weight:600;}
 
     <!-- CONSIGNMENT SETTLE (inline cards, no separate tab) -->
     <div id="section-consignments" style="display:none"></div>
+
+    <!-- PRICE LISTS -->
+    <div id="section-pricelists" style="display:none">
+        <div class="table-wrap">
+            <div style="padding:16px 18px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap">
+                <div>
+                    <div class="modal-title" style="margin-bottom:2px">Client Price Lists</div>
+                    <div class="modal-sub">Set custom prices per client. These override the default product price on new invoices.</div>
+                </div>
+                <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+                    <select id="pl-client-select" onchange="loadPriceList()" style="background:var(--card2);border:1px solid var(--border2);border-radius:8px;padding:8px 12px;color:var(--text);font-family:var(--sans);font-size:13px;outline:none;min-width:200px">
+                        <option value="">— Select a client —</option>
+                    </select>
+                    <button class="btn btn-blue" onclick="openAddPriceModal()" id="btn-add-price" style="display:none">+ Add / Edit Price</button>
+                </div>
+            </div>
+            <table>
+                <thead><tr><th>Product</th><th>SKU</th><th>Default Price</th><th>Client Price</th><th>Difference</th><th>Actions</th></tr></thead>
+                <tbody id="pl-body"><tr><td colspan="6" style="text-align:center;color:var(--muted);padding:40px">Select a client to view their price list.</td></tr></tbody>
+            </table>
+        </div>
+    </div>
+</div>
+
+<!-- PRICE LIST MODAL -->
+<div class="modal-bg" id="pl-modal">
+    <div class="modal" style="width:460px">
+        <div class="modal-title">Set Custom Price</div>
+        <div class="modal-sub" id="pl-modal-sub">Override the default product price for this client.</div>
+        <div class="fld" style="margin-top:14px">
+            <label>Product *</label>
+            <select id="pl-product" onchange="onPlProductChange()" style="background:var(--card2);border:1px solid var(--border2);border-radius:8px;padding:9px 12px;color:var(--text);font-family:var(--sans);font-size:13px;outline:none;width:100%"></select>
+        </div>
+        <div style="background:var(--card2);border:1px solid var(--border);border-radius:8px;padding:10px 14px;font-size:12px;color:var(--muted);margin-bottom:12px" id="pl-default-hint"></div>
+        <div class="fld">
+            <label>Custom Price (ج.م.) *</label>
+            <input id="pl-price" type="number" min="0" step="any" placeholder="0.00"
+                style="background:var(--card2);border:1px solid var(--border2);border-radius:8px;padding:9px 12px;color:var(--text);font-family:var(--mono);font-size:14px;outline:none;width:100%">
+        </div>
+        <div class="modal-actions">
+            <button class="btn-cancel" onclick="document.getElementById('pl-modal').classList.remove('open')">Cancel</button>
+            <button class="btn btn-blue" onclick="savePriceEntry()">Save Price</button>
+        </div>
+    </div>
 </div>
 
 <!-- CLIENT MODAL -->
@@ -1974,16 +2499,17 @@ function switchTab(tab){
         consignments: "tab_b2b_consignment",
     };
     if(required[tab] && !hasPermission(required[tab])) return;
-    ["clients","invoices","refunds","consignments"].forEach(t=>{
+    ["clients","invoices","refunds","consignments","pricelists"].forEach(t=>{
         let el = document.getElementById("section-"+t);
         if(el) el.style.display = t===tab?"":"none";
         let tb = document.getElementById("tab-"+t);
         if(tb) tb.classList.toggle("active", t===tab);
     });
-    document.getElementById("btn-add-client").style.display  = tab==="clients" ?"":"none";
-    document.getElementById("btn-new-invoice").style.display = tab==="invoices"?"":"none";
-    if(tab==="invoices") loadInvoices();
-    if(tab==="refunds")  prepareRefundTab();
+    document.getElementById("btn-add-client").style.display  = tab==="clients"    ?"":"none";
+    document.getElementById("btn-new-invoice").style.display = tab==="invoices"   ?"":"none";
+    if(tab==="invoices")   loadInvoices();
+    if(tab==="refunds")    prepareRefundTab();
+    if(tab==="pricelists") initPriceListTab();
 }
 
 /* ── CLIENTS ── */
@@ -2007,8 +2533,9 @@ async function loadClients(){
             <td style="font-family:var(--mono);color:${c.outstanding>0?"var(--warn)":"var(--muted)"}">
                 ${c.outstanding>0?c.outstanding.toFixed(2):"—"}
             </td>
-            <td style="display:flex;gap:6px">
+            <td style="display:flex;gap:6px;flex-wrap:wrap">
                 ${hasPermission("tab_b2b_invoices")?`<button class="action-btn green" onclick="quickInvoice(${c.id})">+ Invoice</button>`:""}
+                <button class="action-btn" onclick="window.open('/b2b/client/${c.id}/statement','_blank')" title="Account Statement">&#128196; Statement</button>
                 <button class="action-btn" onclick="openEditClient(${c.id})">Edit</button>
                 ${hasPermission("action_b2b_delete")?`<button class="action-btn danger" onclick="deleteClient(${c.id},'${c.name.replace(/'/g,"\\'")}')">Remove</button>`:""}
             </td>
@@ -2072,7 +2599,7 @@ async function deleteClient(id,name){
 }
 
 /* ── INVOICE MODAL ── */
-function openInvoiceModal(preClientId=null){
+async function openInvoiceModal(preClientId=null){
     editingInvoiceId = null;
     document.getElementById("inv-modal-title").innerText = "New B2B Invoice";
     document.getElementById("inv-save-btn").innerText    = "Create Invoice";
@@ -2082,8 +2609,8 @@ function openInvoiceModal(preClientId=null){
     ).join("");
     document.getElementById("inv-items").innerHTML = "";
     document.getElementById("inv-notes").value = "";
-    // Always auto-apply whichever client is selected (pre-selected or first in list)
-    onClientChange();
+    // Await so allProducts is loaded with client prices before items are added
+    await onClientChange();
     addInvItem();
     document.getElementById("invoice-modal").classList.add("open");
 }
@@ -2097,7 +2624,7 @@ function closeInvoiceModal(){
     document.getElementById("invoice-modal").classList.remove("open");
 }
 
-function onClientChange(){
+async function onClientChange(){
     let sel = document.getElementById("inv-client");
     let opt = sel.options[sel.selectedIndex];
     if(!opt || !opt.value) return;
@@ -2106,6 +2633,10 @@ function onClientChange(){
     selectType(terms);
     document.getElementById("inv-deal-type").value = formatDealType(terms);
     document.getElementById("inv-discount-pct").value = discount;
+    // Reload product list with client-specific prices
+    let clientId = parseInt(opt.value);
+    allProducts = await (await fetch(`/b2b/api/products-list?client_id=${clientId}`)).json();
+    buildB2BProductDatalist();
     updateSummary();
 }
 
@@ -2166,70 +2697,91 @@ function productMatches(products, query){
     return starts.concat(contains).slice(0, 8);
 }
 
-function attachProductDropdown(inputEl, hiddenEl, hintEl, products, accent, onPick){
+// getProducts can be an array OR a function returning an array
+function attachProductDropdown(inputEl, hiddenEl, hintEl, getProducts, accent, onPick){
+    function resolveList(){ return typeof getProducts === "function" ? getProducts() : getProducts; }
+
     let box = document.createElement("div");
-    box.style.position = "absolute";
-    box.style.left = "0";
-    box.style.right = "0";
-    box.style.top = "calc(100% + 6px)";
-    box.style.background = "var(--card)";
-    box.style.border = "1px solid var(--border2)";
-    box.style.borderRadius = "10px";
-    box.style.boxShadow = "0 18px 40px rgba(0,0,0,.35)";
-    box.style.maxHeight = "240px";
-    box.style.overflowY = "auto";
-    box.style.zIndex = "35";
-    box.style.display = "none";
+    box.style.cssText = "position:absolute;left:0;right:0;top:calc(100% + 4px);background:var(--card);border:1px solid var(--border2);border-radius:10px;box-shadow:0 18px 40px rgba(0,0,0,.4);max-height:280px;overflow-y:auto;z-index:9999;display:none;";
     inputEl.parentElement.appendChild(box);
 
-    function hideBox(){
-        box.style.display = "none";
-    }
+    let activeIdx = -1;
 
-    function draw(items){
+    function hideBox(){ box.style.display = "none"; activeIdx = -1; }
+
+    function draw(q){
+        let items = productMatches(resolveList(), q);
+        activeIdx = -1;
         if(!items.length){
-            box.innerHTML = `<div style="padding:10px 12px;color:var(--muted);font-size:12px">No matching products</div>`;
+            box.innerHTML = `<div style="padding:10px 14px;color:var(--muted);font-size:12px">No matching products</div>`;
             box.style.display = "block";
             return;
         }
-        box.innerHTML = items.map((p, i)=>`
-            <button type="button" data-idx="${i}" style="width:100%;text-align:left;background:transparent;border:none;padding:10px 12px;cursor:pointer;border-bottom:${i < items.length-1 ? "1px solid var(--border)" : "none"};font-family:var(--sans);">
+        box.innerHTML = items.map((p, i)=>{
+            let priceColor = (p.has_custom) ? "var(--blue)" : accent;
+            let customTag  = p.has_custom ? `<span style="font-size:9px;font-weight:700;letter-spacing:.6px;text-transform:uppercase;background:rgba(77,159,255,.15);color:var(--blue);padding:1px 5px;border-radius:4px;margin-left:4px">custom</span>` : "";
+            return `<button type="button" data-idx="${i}" style="width:100%;text-align:left;background:transparent;border:none;padding:10px 14px;cursor:pointer;${i>0?"border-top:1px solid var(--border)":""};font-family:var(--sans);transition:background .1s;">
                 <div style="display:flex;justify-content:space-between;gap:10px;align-items:center">
-                    <div>
-                        <div style="font-size:13px;font-weight:700;color:var(--text)">${p.name}</div>
-                        <div style="font-family:var(--mono);font-size:11px;color:var(--muted)">${p.sku}</div>
+                    <div style="min-width:0;flex:1">
+                        <div style="font-size:13px;font-weight:600;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${p.name}${customTag}</div>
+                        <div style="font-family:var(--mono);font-size:11px;color:var(--muted);margin-top:1px">${p.sku || "—"}</div>
                     </div>
-                    <div style="text-align:right">
-                        <div style="font-family:var(--mono);font-size:12px;color:${accent}">${p.price.toFixed(2)}</div>
-                        <div style="font-size:10px;color:var(--muted)">stock ${p.stock.toFixed(0)} ${p.unit}</div>
+                    <div style="text-align:right;flex-shrink:0">
+                        <div style="font-family:var(--mono);font-size:13px;font-weight:700;color:${priceColor}">${p.price.toFixed(2)}</div>
+                        <div style="font-size:10px;color:var(--muted);margin-top:1px">stk ${p.stock.toFixed(0)} ${p.unit}</div>
                     </div>
                 </div>
-            </button>
-        `).join("");
+            </button>`;
+        }).join("");
         box.querySelectorAll("button[data-idx]").forEach(btn=>{
             btn.addEventListener("mousedown", function(e){
                 e.preventDefault();
                 let p = items[parseInt(this.dataset.idx)];
-                inputEl.value = productLabel(p);
-                hiddenEl.value = p.id;
-                hintEl.innerText = `stock: ${p.stock.toFixed(0)} ${p.unit}`;
-                inputEl.style.borderColor = accent;
-                onPick(p);
-                hideBox();
+                pick(p);
+            });
+            btn.addEventListener("mouseenter", function(){
+                setActive(parseInt(this.dataset.idx));
             });
         });
         box.style.display = "block";
     }
 
-    inputEl.addEventListener("focus", function(){
-        draw(productMatches(products, this.value));
+    function setActive(idx){
+        activeIdx = idx;
+        box.querySelectorAll("button[data-idx]").forEach(btn=>{
+            let active = parseInt(btn.dataset.idx) === idx;
+            btn.style.background = active ? "var(--card2)" : "transparent";
+        });
+    }
+
+    function pick(p){
+        inputEl.value = productLabel(p);
+        hiddenEl.value = p.id;
+        hintEl.innerText = `stock: ${p.stock.toFixed(0)} ${p.unit}`;
+        inputEl.style.borderColor = accent;
+        onPick(p);
+        hideBox();
+    }
+
+    inputEl.addEventListener("focus", function(){ draw(this.value); });
+    inputEl.addEventListener("input", function(){ draw(this.value); });
+    inputEl.addEventListener("keydown", function(e){
+        let btns = Array.from(box.querySelectorAll("button[data-idx]"));
+        if(!btns.length) return;
+        if(e.key === "ArrowDown"){
+            e.preventDefault();
+            setActive(Math.min(activeIdx + 1, btns.length - 1));
+        } else if(e.key === "ArrowUp"){
+            e.preventDefault();
+            setActive(Math.max(activeIdx - 1, 0));
+        } else if(e.key === "Enter" && activeIdx >= 0){
+            e.preventDefault();
+            btns[activeIdx].dispatchEvent(new MouseEvent("mousedown", {bubbles:true}));
+        } else if(e.key === "Escape"){
+            hideBox();
+        }
     });
-    inputEl.addEventListener("input", function(){
-        draw(productMatches(products, this.value));
-    });
-    inputEl.addEventListener("blur", function(){
-        setTimeout(hideBox, 120);
-    });
+    inputEl.addEventListener("blur", function(){ setTimeout(hideBox, 150); });
 }
 
 function addInvItem(selectedId=null, qty=1, price=null){
@@ -2237,9 +2789,9 @@ function addInvItem(selectedId=null, qty=1, price=null){
     div.className = "item-row";
     div.innerHTML = `
         <div style="position:relative;flex:1;">
-            <input type="text" list="b2b-product-datalist"
+            <input type="text"
                 class="b2b-prod-search"
-                placeholder="Search by name or SKU..."
+                placeholder="Search by name or SKU…"
                 autocomplete="off"
                 style="width:100%;background:var(--card2);border:1px solid var(--border2);border-radius:8px;padding:8px 10px;color:var(--text);font-family:var(--sans);font-size:13px;outline:none;transition:border-color .2s;">
             <input type="hidden" class="b2b-prod-id">
@@ -2247,50 +2799,46 @@ function addInvItem(selectedId=null, qty=1, price=null){
         </div>
         <input type="number" placeholder="1" min="0.001" step="any" value="${qty}" oninput="updateSummary()"
             style="background:var(--card2);border:1px solid var(--border2);border-radius:8px;padding:8px 10px;color:var(--text);font-family:var(--mono);font-size:13px;outline:none;width:80px;">
-        <input type="number" placeholder="0.00" min="0" step="any" value="${price||""}" oninput="updateSummary()"
+        <input type="number" placeholder="0.00" min="0" step="any" value="${price!=null?price:""}" oninput="updateSummary()"
             style="background:var(--card2);border:1px solid var(--border2);border-radius:8px;padding:8px 10px;color:var(--text);font-family:var(--mono);font-size:13px;outline:none;width:100px;">
         <button class="rm-btn" onclick="this.closest('.item-row').remove();updateSummary()">×</button>
     `;
     let searchInp = div.querySelector(".b2b-prod-search");
     let hiddenId  = div.querySelector(".b2b-prod-id");
     let stockHint = div.querySelector(".b2b-stock-hint");
+    let priceInp  = div.querySelectorAll("input[type=number]")[1];
 
-    // Pre-fill if editing
+    // Pre-fill when editing an existing invoice
     if(selectedId){
         let p = allProducts.find(x=>x.id===selectedId);
         if(p){
-            searchInp.value = `${p.sku} — ${p.name}`;
+            searchInp.value = productLabel(p);
             hiddenId.value  = p.id;
             stockHint.innerText = `stock: ${p.stock.toFixed(0)} ${p.unit}`;
             searchInp.style.borderColor = "rgba(0,255,157,.4)";
         }
     }
 
-    searchInp.addEventListener("input", function(){
-        let p = resolveB2BProduct(this);
-        if(p){
-            hiddenId.value  = p.id;
-            stockHint.innerText = `stock: ${p.stock.toFixed(0)} ${p.unit}`;
-            // auto-fill price
-            let priceInp = this.closest(".item-row").querySelectorAll("input[type=number]")[1];
-            if(!priceInp.value || parseFloat(priceInp.value)===0)
-                priceInp.value = p.price.toFixed(2);
-            this.style.borderColor = "rgba(0,255,157,.4)";
-        } else {
-            hiddenId.value  = "";
-            stockHint.innerText = "";
-            this.style.borderColor = "";
+    // Rich dropdown — always reads current allProducts via getter
+    attachProductDropdown(
+        searchInp, hiddenId, stockHint,
+        () => allProducts,
+        "rgba(0,255,157,.45)",
+        function(p){
+            priceInp.value = p.price.toFixed(2);
+            if(p.has_custom){
+                priceInp.style.borderColor = "rgba(77,159,255,.6)";
+                priceInp.title = `Custom price (default: ${(p.default_price||p.price).toFixed(2)})`;
+            } else {
+                priceInp.style.borderColor = "";
+                priceInp.title = "";
+            }
+            updateSummary();
         }
-        updateSummary();
-    });
-    searchInp.addEventListener("blur", function(){
-        if(!resolveB2BProduct(this) && this.value.trim())
-            this.style.borderColor = "rgba(255,77,109,.5)";
-    });
+    );
 
     document.getElementById("inv-items").appendChild(div);
-    buildB2BProductDatalist();
-    if(price) updateSummary();
+    if(price != null) updateSummary();
 }
 
 function updateSummary(){
@@ -2362,9 +2910,9 @@ function addRefundItem(selectedId=null, qty=1, price=null){
     div.className = "item-row";
     div.innerHTML = `
         <div style="position:relative;flex:1;">
-            <input type="text" list="b2b-product-datalist"
+            <input type="text"
                 class="b2b-prod-search"
-                placeholder="Search by name or SKU..."
+                placeholder="Search by name or SKU…"
                 autocomplete="off"
                 style="width:100%;background:var(--card2);border:1px solid var(--border2);border-radius:8px;padding:8px 10px;color:var(--text);font-family:var(--sans);font-size:13px;outline:none;transition:border-color .2s;">
             <input type="hidden" class="b2b-prod-id">
@@ -2372,9 +2920,9 @@ function addRefundItem(selectedId=null, qty=1, price=null){
         </div>
         <input type="number" placeholder="1" min="0.001" step="any" value="${qty}" oninput="updateRefundSummary()"
             style="background:var(--card2);border:1px solid var(--border2);border-radius:8px;padding:8px 10px;color:var(--text);font-family:var(--mono);font-size:13px;outline:none;width:80px;">
-        <input type="number" placeholder="0.00" min="0" step="any" value="${price||""}" oninput="updateRefundSummary()"
+        <input type="number" placeholder="0.00" min="0" step="any" value="${price!=null?price:""}" oninput="updateRefundSummary()"
             style="background:var(--card2);border:1px solid var(--border2);border-radius:8px;padding:8px 10px;color:var(--text);font-family:var(--mono);font-size:13px;outline:none;width:100px;">
-        <button class="rm-btn" onclick="this.closest('.item-row').remove();updateRefundSummary()">x</button>
+        <button class="rm-btn" onclick="this.closest('.item-row').remove();updateRefundSummary()">×</button>
     `;
     let searchInp = div.querySelector(".b2b-prod-search");
     let hiddenId  = div.querySelector(".b2b-prod-id");
@@ -2395,37 +2943,16 @@ function addRefundItem(selectedId=null, qty=1, price=null){
         searchInp,
         hiddenId,
         stockHint,
-        refundProducts,
+        () => refundProducts,
         "rgba(255,181,71,.45)",
         function(p){
             priceInp.value = p.price.toFixed(2);
             updateRefundSummary();
         }
     );
-    searchInp.addEventListener("input", function(){
-        let p = refundProducts.find(x=>
-            productLabel(x).toLowerCase() === this.value.trim().toLowerCase() ||
-            (x.sku || "").toLowerCase() === this.value.trim().toLowerCase() ||
-            (x.name || "").toLowerCase() === this.value.trim().toLowerCase()
-        );
-        if(p){
-            hiddenId.value = p.id;
-            stockHint.innerText = `stock: ${p.stock.toFixed(0)} ${p.unit}`;
-            priceInp.value = p.price.toFixed(2);
-            this.style.borderColor = "rgba(255,181,71,.45)";
-        } else {
-            hiddenId.value = "";
-            stockHint.innerText = "";
-        }
-        updateRefundSummary();
-    });
-    searchInp.addEventListener("blur", function(){
-        if(!hiddenId.value && this.value.trim()) this.style.borderColor = "rgba(255,77,109,.5)";
-    });
 
     document.getElementById("refund-items").appendChild(div);
-    buildB2BProductDatalist();
-    if(price) updateRefundSummary();
+    if(price != null) updateRefundSummary();
 }
 
 function updateRefundSummary(){
@@ -2525,7 +3052,7 @@ async function openEditInvoice(id){
     sel.innerHTML = allClients.map(c=>
         `<option value="${c.id}" data-terms="${c.payment_terms}" data-discount="${c.discount_pct}" ${c.id===invoice.client_id?"selected":""}>${c.name}</option>`
     ).join("");
-    onClientChange();
+    await onClientChange();
     document.getElementById("inv-notes").value        = invoice.notes;
     document.getElementById("inv-items").innerHTML = "";
     invoice.items.forEach(item=>{ addInvItem(item.product_id, item.qty, item.unit_price); });
@@ -2792,7 +3319,7 @@ async function saveSettle(){
     loadConsignments(); loadClients(); loadStats();
 }
 
-["client-modal","invoice-modal","pay-modal","cons-pay-modal"].forEach(id=>{
+["client-modal","invoice-modal","pay-modal","cons-pay-modal","pl-modal"].forEach(id=>{
     document.getElementById(id).addEventListener("click",function(e){ if(e.target===this) this.classList.remove("open"); });
 });
 
@@ -2802,6 +3329,129 @@ function showToast(msg){
     t.innerText=msg; t.classList.add("show");
     clearTimeout(toastTimer);
     toastTimer=setTimeout(()=>t.classList.remove("show"),4500);
+}
+
+/* ── PRICE LISTS ── */
+let plClientPrices = [];   // current client's price entries from API
+let plInitDone = false;
+
+function initPriceListTab(){
+    if(plInitDone) return;
+    plInitDone = true;
+    // Populate client dropdown
+    let sel = document.getElementById("pl-client-select");
+    sel.innerHTML = '<option value="">— Select a client —</option>';
+    allClients.forEach(c=>{
+        let opt = document.createElement("option");
+        opt.value = c.id; opt.textContent = c.name;
+        sel.appendChild(opt);
+    });
+}
+
+async function loadPriceList(){
+    let clientId = document.getElementById("pl-client-select").value;
+    let addBtn   = document.getElementById("btn-add-price");
+    let tbody    = document.getElementById("pl-body");
+    if(!clientId){
+        addBtn.style.display = "none";
+        tbody.innerHTML = `<tr><td colspan="6" style="text-align:center;color:var(--muted);padding:40px">Select a client to view their price list.</td></tr>`;
+        return;
+    }
+    addBtn.style.display = "";
+    tbody.innerHTML = `<tr><td colspan="6" style="text-align:center;color:var(--muted);padding:28px">Loading...</td></tr>`;
+    plClientPrices = await (await fetch(`/b2b/api/clients/${clientId}/prices`)).json();
+    renderPriceList();
+}
+
+function renderPriceList(){
+    let tbody = document.getElementById("pl-body");
+    if(!plClientPrices.length){
+        tbody.innerHTML = `<tr><td colspan="6" style="text-align:center;color:var(--muted);padding:40px">No custom prices set. All products use default pricing.</td></tr>`;
+        return;
+    }
+    tbody.innerHTML = plClientPrices.map(cp=>{
+        let diff = cp.custom_price - cp.default_price;
+        let diffStr = diff === 0 ? "—" : (diff > 0 ? `<span style="color:var(--warn)">+${diff.toFixed(2)}</span>` : `<span style="color:var(--green)">${diff.toFixed(2)}</span>`);
+        return `<tr>
+            <td class="name">${cp.product_name}</td>
+            <td style="font-family:var(--mono);font-size:12px;color:var(--muted)">${cp.sku}</td>
+            <td style="font-family:var(--mono);color:var(--muted)">${cp.default_price.toFixed(2)}</td>
+            <td style="font-family:var(--mono);font-weight:700;color:var(--blue)">${cp.custom_price.toFixed(2)}</td>
+            <td style="font-family:var(--mono)">${diffStr}</td>
+            <td style="display:flex;gap:6px">
+                <button class="action-btn" onclick="editPriceEntry(${cp.product_id},${cp.custom_price})">Edit</button>
+                <button class="action-btn danger" onclick="deletePriceEntry(${cp.product_id},'${cp.product_name.replace(/'/g,"\\'")}')">Remove</button>
+            </td>
+        </tr>`;
+    }).join("");
+}
+
+function openAddPriceModal(){
+    let clientId = document.getElementById("pl-client-select").value;
+    if(!clientId){ showToast("Select a client first"); return; }
+    let client = allClients.find(c=>c.id==clientId);
+    document.getElementById("pl-modal-sub").innerText = `Client: ${client ? client.name : ""}`;
+    // Build product dropdown — skip products already in the list
+    let existing = new Set(plClientPrices.map(p=>p.product_id));
+    let prodSel = document.getElementById("pl-product");
+    prodSel.innerHTML = allProducts.map(p=>{
+        let label = p.sku ? `${p.sku} — ${p.name}` : p.name;
+        let note  = existing.has(p.id) ? " ★" : "";
+        return `<option value="${p.id}" data-default="${p.default_price || p.price}">${label}${note}</option>`;
+    }).join("");
+    document.getElementById("pl-price").value = "";
+    onPlProductChange();
+    document.getElementById("pl-modal").classList.add("open");
+}
+
+function editPriceEntry(productId, currentPrice){
+    openAddPriceModal();
+    // Select the right product
+    let sel = document.getElementById("pl-product");
+    for(let opt of sel.options){ if(parseInt(opt.value)===productId){ sel.value=productId; break; } }
+    onPlProductChange();
+    document.getElementById("pl-price").value = currentPrice.toFixed(2);
+}
+
+function onPlProductChange(){
+    let sel  = document.getElementById("pl-product");
+    let opt  = sel.options[sel.selectedIndex];
+    let hint = document.getElementById("pl-default-hint");
+    if(!opt || !opt.value){ hint.innerText = ""; return; }
+    let def = parseFloat(opt.dataset.default) || 0;
+    // Check if client already has a custom price for this product
+    let existing = plClientPrices.find(cp=>cp.product_id===parseInt(opt.value));
+    hint.innerHTML = `Default price: <b style="font-family:var(--mono)">${def.toFixed(2)} ج.م.</b>` +
+        (existing ? `&nbsp;&nbsp;|&nbsp;&nbsp;Current custom price: <b style="font-family:var(--mono);color:var(--blue)">${existing.custom_price.toFixed(2)} ج.م.</b>` : "");
+    if(!document.getElementById("pl-price").value && existing)
+        document.getElementById("pl-price").value = existing.custom_price.toFixed(2);
+}
+
+async function savePriceEntry(){
+    let clientId  = document.getElementById("pl-client-select").value;
+    let productId = parseInt(document.getElementById("pl-product").value);
+    let price     = parseFloat(document.getElementById("pl-price").value);
+    if(!clientId || !productId){ showToast("Select a product"); return; }
+    if(isNaN(price) || price < 0){ showToast("Enter a valid price"); return; }
+    let res  = await fetch(`/b2b/api/clients/${clientId}/prices`, {
+        method:"PUT", headers:{"Content-Type":"application/json"},
+        body: JSON.stringify({product_id: productId, price}),
+    });
+    let data = await res.json();
+    if(data.detail){ showToast("Error: "+data.detail); return; }
+    document.getElementById("pl-modal").classList.remove("open");
+    showToast("Price saved ✓");
+    plClientPrices = await (await fetch(`/b2b/api/clients/${clientId}/prices`)).json();
+    renderPriceList();
+}
+
+async function deletePriceEntry(productId, productName){
+    let clientId = document.getElementById("pl-client-select").value;
+    if(!confirm(`Remove custom price for "${productName}"? The default product price will apply.`)) return;
+    await fetch(`/b2b/api/clients/${clientId}/prices/${productId}`, {method:"DELETE"});
+    showToast("Custom price removed ✓");
+    plClientPrices = await (await fetch(`/b2b/api/clients/${clientId}/prices`)).json();
+    renderPriceList();
 }
 
 init();

@@ -44,6 +44,9 @@ class Payroll(Base):
     deductions  = Column(Numeric(12, 2), default=0)
     net_salary  = Column(Numeric(12, 2))
     paid        = Column(Boolean, default=False)
+    days_worked  = Column(Integer, nullable=True)
+    working_days = Column(Integer, nullable=True)
+    paid_at      = Column(DateTime(timezone=True), nullable=True)
     created_at  = Column(DateTime(timezone=True), server_default=func.now())
 
     employee = relationship("Employee", back_populates="payrolls")
