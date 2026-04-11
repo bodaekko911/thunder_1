@@ -1,29 +1,22 @@
-from fastapi import APIRouter, Depends, HTTPException, Header
+from fastapi import APIRouter, Depends
 from fastapi.responses import HTMLResponse
 from sqlalchemy.orm import Session
 from decimal import Decimal
 from datetime import datetime
 
 from app.database import get_db
+from app.core.permissions import require_permission
+from app.core.security import get_current_user
 from app.models.product import Product
 from app.models.customer import Customer
 from app.models.invoice import Invoice, InvoiceItem
 from app.schemas.invoice import InvoiceCreate
 from app.services.pos_service import create_invoice
-from app.core.security import decode_token
 
-router = APIRouter(tags=["POS"])
-
-
-def get_current_user(authorization: str = Header(None)):
-    if not authorization:
-        raise HTTPException(status_code=401, detail="Not logged in")
-    try:
-        parts = authorization.strip().split(" ")
-        token = parts[-1]
-        return decode_token(token)
-    except Exception as e:
-        raise HTTPException(status_code=401, detail=f"Invalid token: {str(e)}")
+router = APIRouter(
+    tags=["POS"],
+    dependencies=[Depends(require_permission("page_pos"))],
+)
 
 
 @router.get("/products-cache")
@@ -63,7 +56,7 @@ def checkout(
     db: Session = Depends(get_db),
     user=Depends(get_current_user),
 ):
-    user_id = int(user.get("sub"))
+    user_id = user.id
     invoice = create_invoice(db=db, data=data, user_id=user_id)
     return {
         "id": invoice.id,
@@ -993,7 +986,7 @@ function clearCart(){
     lastCart=[...cart]; cart=[]; drawCart(); showToast("Cart cleared",true,true);
 }
 function undoCart(){ cart=[...lastCart]; drawCart(); hideToast(); }
-function logout(){ localStorage.removeItem("token"); localStorage.removeItem("user_name"); localStorage.removeItem("user_role"); localStorage.removeItem("user_permissions"); window.location.href="/"; }
+function logout(){ localStorage.removeItem("token"); localStorage.removeItem("user_name"); localStorage.removeItem("user_role"); localStorage.removeItem("user_permissions"); document.cookie = "access_token=; Max-Age=0; path=/; SameSite=Lax"; window.location.href="/"; }
 
 function drawCart(){
     let empty=document.getElementById("cart_empty"), cartEl=document.getElementById("cart"), countEl=document.getElementById("cart_count"), total=0;

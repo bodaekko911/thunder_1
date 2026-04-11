@@ -7,12 +7,16 @@ from pydantic import BaseModel
 from datetime import date
 
 from app.database import get_db
-from app.core.permissions import get_current_user
+from app.core.permissions import get_current_user, require_permission
 from app.core.log import record
 from app.models.hr import Employee, Attendance, Payroll
 from app.models.user import User
 
-router = APIRouter(prefix="/hr", tags=["HR"])
+router = APIRouter(
+    prefix="/hr",
+    tags=["HR"],
+    dependencies=[Depends(require_permission("page_hr"))],
+)
 
 
 # ── Schemas ────────────────────────────────────────────
@@ -286,7 +290,7 @@ def preview_payroll(period: str, db: Session = Depends(get_db)):
         "total_to_pay": round(total_to_pay, 2),
     }
 
-@router.post("/api/payroll/run")
+@router.post("/api/payroll/run", dependencies=[Depends(require_permission("action_hr_run_payroll"))])
 def run_payroll(data: PayrollRun, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     from calendar import monthrange
     year, month = int(data.period.split("-")[0]), int(data.period.split("-")[1])
@@ -358,7 +362,7 @@ def run_payroll(data: PayrollRun, db: Session = Depends(get_db), current_user: U
     return {"created": created, "skipped": skipped, "period": data.period}
 
 
-@router.put("/api/payroll/{payroll_id}")
+@router.put("/api/payroll/{payroll_id}", dependencies=[Depends(require_permission("action_hr_run_payroll"))])
 def update_payroll(payroll_id: int, data: PayrollUpdate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     p = db.query(Payroll).filter(Payroll.id == payroll_id).first()
     if not p:
@@ -380,7 +384,7 @@ def update_payroll(payroll_id: int, data: PayrollUpdate, db: Session = Depends(g
     db.commit()
     return {"ok": True, "net_salary": float(p.net_salary)}
 
-@router.patch("/api/payroll/{payroll_id}/pay")
+@router.patch("/api/payroll/{payroll_id}/pay", dependencies=[Depends(require_permission("action_hr_mark_paid"))])
 def mark_paid(payroll_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     from datetime import datetime
     p = db.query(Payroll).filter(Payroll.id == payroll_id).first()
@@ -810,6 +814,7 @@ function logout(){
     localStorage.removeItem("user_name");
     localStorage.removeItem("user_role");
     localStorage.removeItem("user_permissions");
+    document.cookie = "access_token=; Max-Age=0; path=/; SameSite=Lax";
     window.location.href = "/";
 }
   function requirePageAccess(permission){

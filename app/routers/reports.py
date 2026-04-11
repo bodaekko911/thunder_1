@@ -6,6 +6,7 @@ from datetime import datetime, date, timedelta
 from typing import Optional
 import io
 
+from app.core.permissions import require_permission
 from app.database import get_db
 from app.models.product import Product
 from app.models.invoice import Invoice, InvoiceItem
@@ -17,7 +18,11 @@ from app.models.refund import RetailRefund
 from app.models.production import ProductionBatch, BatchInput, BatchOutput
 from app.models.accounting import Account, Journal, JournalEntry
 
-router = APIRouter(prefix="/reports", tags=["Reports"])
+router = APIRouter(
+    prefix="/reports",
+    tags=["Reports"],
+    dependencies=[Depends(require_permission("page_reports"))],
+)
 
 
 # ── EXCEL HELPER ───────────────────────────────────────
@@ -160,7 +165,7 @@ def sales_report(date_from: Optional[str] = None, date_to: Optional[str] = None,
             "pos_records": pos_records, "b2b_records": b2b_records, "refund_records": refund_records,
             "date_from": d_from.strftime("%Y-%m-%d"), "date_to": d_to.strftime("%Y-%m-%d")}
 
-@router.get("/export/sales")
+@router.get("/export/sales", dependencies=[Depends(require_permission("action_export_excel"))])
 def export_sales(date_from: str = None, date_to: str = None, db: Session = Depends(get_db)):
     data = sales_report(date_from=date_from, date_to=date_to, db=db)
     try:
@@ -298,7 +303,7 @@ def b2b_statement(date_from: Optional[str] = None, date_to: Optional[str] = None
             "outstanding":round(total_invoiced-total_paid,2),"invoice_count":len(invoices)})
     return result
 
-@router.get("/export/b2b-statement")
+@router.get("/export/b2b-statement", dependencies=[Depends(require_permission("action_export_excel"))])
 def export_b2b(date_from: str = None, date_to: str = None, db: Session = Depends(get_db)):
     data = b2b_statement(date_from=date_from, date_to=date_to, db=db)
     rows = [[d["name"],d["phone"],d["payment_terms"],d["total_invoiced"],d["total_paid"],d["outstanding"],d["invoice_count"]] for d in data]
@@ -319,7 +324,7 @@ def inventory_report(db: Session = Depends(get_db)):
             "value":round(float(p.stock)*float(p.price),2),"total_in":round(total_in,2),"total_out":round(total_out,2),"low_stock":float(p.stock)<=5})
     return {"products":rows,"total_value":round(sum(r["value"] for r in rows),2),"low_count":sum(1 for r in rows if r["low_stock"]),"total_products":len(rows)}
 
-@router.get("/export/inventory")
+@router.get("/export/inventory", dependencies=[Depends(require_permission("action_export_excel"))])
 def export_inventory(db: Session = Depends(get_db)):
     data = inventory_report(db=db)
     rows = [[p["sku"],p["name"],p["stock"],p["unit"],p["price"],p["value"],p["total_in"],p["total_out"],"YES" if p["low_stock"] else ""] for p in data["products"]]
@@ -366,7 +371,7 @@ def farm_intake_report(date_from: Optional[str] = None, date_to: Optional[str] =
     delivery_rows.sort(key=lambda row: (row["delivery_date"], row["delivery_number"]), reverse=True)
     return {"farms": result, "deliveries": delivery_rows}
 
-@router.get("/export/farm-intake")
+@router.get("/export/farm-intake", dependencies=[Depends(require_permission("action_export_excel"))])
 def export_farm(date_from: str = None, date_to: str = None, db: Session = Depends(get_db)):
     data = farm_intake_report(date_from=date_from, date_to=date_to, db=db)
     rows = []
@@ -397,7 +402,7 @@ def spoilage_report(date_from: Optional[str] = None, date_to: Optional[str] = No
             "by_product":[{"name":k,"qty":round(v,2)} for k,v in sorted(by_product.items(),key=lambda x:x[1],reverse=True)[:8]],
             "by_reason": [{"reason":k,"qty":round(v,2)} for k,v in sorted(by_reason.items(), key=lambda x:x[1],reverse=True)]}
 
-@router.get("/export/spoilage")
+@router.get("/export/spoilage", dependencies=[Depends(require_permission("action_export_excel"))])
 def export_spoilage(date_from: str = None, date_to: str = None, db: Session = Depends(get_db)):
     data = spoilage_report(date_from=date_from, date_to=date_to, db=db)
     rows = [[r["ref"],r["product"],r["qty"],r["unit"],r["reason"],r["farm"],r["date"],r["user_name"],r["notes"]] for r in data["records"]]
@@ -425,7 +430,7 @@ def production_report(date_from: Optional[str] = None, date_to: Optional[str] = 
     return {"batches":rows,"total_processing":total_proc,"total_packaging":total_pkg,
             "avg_loss_pct":round(sum(losses)/len(losses),2) if losses else 0,"total_batches":len(rows)}
 
-@router.get("/export/production")
+@router.get("/export/production", dependencies=[Depends(require_permission("action_export_excel"))])
 def export_production(date_from: str = None, date_to: str = None, db: Session = Depends(get_db)):
     data = production_report(date_from=date_from, date_to=date_to, db=db)
     rows = [[b["batch_number"],b["type"],b["recipe"],b["inputs_str"],b["outputs_str"],b["waste_pct"],b["date"],b["user_name"],b["notes"]] for b in data["batches"]]
@@ -487,7 +492,7 @@ def pl_report(date_from: Optional[str] = None, date_to: Optional[str] = None, db
             "net_profit": round(total_revenue - total_expense, 2),
             "date_from": d_from.strftime("%Y-%m-%d"), "date_to": d_to.strftime("%Y-%m-%d")}
 
-@router.get("/export/pl")
+@router.get("/export/pl", dependencies=[Depends(require_permission("action_export_excel"))])
 def export_pl(date_from: str = None, date_to: str = None, db: Session = Depends(get_db)):
     data = pl_report(date_from=date_from, date_to=date_to, db=db)
     try:
@@ -759,7 +764,7 @@ def transactions_report(
         "total_discount": round(total_discount,  2),
     }
 
-@router.get("/export/transactions")
+@router.get("/export/transactions", dependencies=[Depends(require_permission("action_export_excel"))])
 def export_transactions(date_from: str = None, date_to: str = None, source: str = None, db: Session = Depends(get_db)):
     data = transactions_report(date_from=date_from, date_to=date_to, source=source, db=db)
     headers = ["Date","Invoice #","Source","Customer","Performed By","SKU","Product","QTY","Unit Price","Line Total","Discount (EGP)","Discount %","Payment Method","Invoice Total","Status"]
@@ -1287,6 +1292,7 @@ function logout(){
     localStorage.removeItem("user_name");
     localStorage.removeItem("user_role");
     localStorage.removeItem("user_permissions");
+    document.cookie = "access_token=; Max-Age=0; path=/; SameSite=Lax";
     window.location.href = "/";
 }
   function requirePageAccess(permission){

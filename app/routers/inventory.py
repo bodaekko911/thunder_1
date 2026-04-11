@@ -8,13 +8,17 @@ from datetime import datetime, date
 import io
 
 from app.database import get_db
-from app.core.permissions import get_current_user
+from app.core.permissions import get_current_user, require_permission
 from app.core.log import record
 from app.models.product import Product
 from app.models.user import User
 from app.models.inventory import StockMove
 
-router = APIRouter(prefix="/inventory", tags=["Inventory"])
+router = APIRouter(
+    prefix="/inventory",
+    tags=["Inventory"],
+    dependencies=[Depends(require_permission("page_inventory"))],
+)
 
 
 def to_xlsx(headers, rows, sheet_name="Report"):
@@ -173,7 +177,7 @@ def export_moves(
     )
 
 
-@router.post("/api/adjust")
+@router.post("/api/adjust", dependencies=[Depends(require_permission("action_inventory_adjust"))])
 def adjust_stock(data: StockAdjustment, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     product = db.query(Product).filter(Product.id == data.product_id).first()
     if not product:
@@ -669,6 +673,7 @@ function logout(){
     localStorage.removeItem("user_name");
     localStorage.removeItem("user_role");
     localStorage.removeItem("user_permissions");
+    document.cookie = "access_token=; Max-Age=0; path=/; SameSite=Lax";
     window.location.href = "/";
 }
   function requirePageAccess(permission){

@@ -4,6 +4,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy import func
 from datetime import date, datetime, timedelta
 
+from app.core.permissions import require_permission
 from app.database import get_db
 from app.models.invoice import Invoice, InvoiceItem
 from app.models.product import Product
@@ -14,7 +15,10 @@ from app.models.spoilage import SpoilageRecord
 from app.models.production import ProductionBatch
 from app.models.refund import RetailRefund
 
-router = APIRouter(tags=["Dashboard"])
+router = APIRouter(
+    tags=["Dashboard"],
+    dependencies=[Depends(require_permission("page_dashboard"))],
+)
 
 
 @router.get("/dashboard/data")
@@ -572,6 +576,7 @@ function logout(){
     localStorage.removeItem("user_name");
     localStorage.removeItem("user_role");
     localStorage.removeItem("user_permissions");
+    document.cookie = "access_token=; Max-Age=0; path=/; SameSite=Lax";
     window.location.href = "/";
 }
   function requirePageAccess(permission){

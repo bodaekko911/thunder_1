@@ -8,7 +8,7 @@ from decimal import Decimal
 from datetime import date, datetime
 
 from app.database import get_db
-from app.core.permissions import get_current_user
+from app.core.permissions import get_current_user, require_permission
 from app.core.log import record
 from app.models.b2b import B2BClient, B2BInvoice, B2BInvoiceItem, Consignment, ConsignmentItem, B2BRefund, B2BRefundItem, B2BClientPrice
 from app.models.product import Product
@@ -16,7 +16,11 @@ from app.models.inventory import StockMove
 from app.models.accounting import Account, Journal, JournalEntry
 from app.models.user import User
 
-router = APIRouter(prefix="/b2b", tags=["B2B"])
+router = APIRouter(
+    prefix="/b2b",
+    tags=["B2B"],
+    dependencies=[Depends(require_permission("page_b2b"))],
+)
 
 
 # ── Schemas ────────────────────────────────────────────
@@ -477,7 +481,7 @@ def edit_invoice(invoice_id: int, data: InvoiceCreate, db: Session = Depends(get
     return {"ok": True, "invoice_number": invoice.invoice_number, "total": total}
 
 
-@router.delete("/api/invoices/{invoice_id}")
+@router.delete("/api/invoices/{invoice_id}", dependencies=[Depends(require_permission("action_b2b_delete"))])
 def delete_invoice(invoice_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     invoice = db.query(B2BInvoice).filter(B2BInvoice.id == invoice_id).first()
     if not invoice:
@@ -498,7 +502,7 @@ def delete_invoice(invoice_id: int, db: Session = Depends(get_db), current_user:
     return {"ok": True}
 
 
-@router.post("/api/invoices/{invoice_id}/pay")
+@router.post("/api/invoices/{invoice_id}/pay", dependencies=[Depends(require_permission("action_b2b_collect"))])
 def record_payment(invoice_id: int, data: PaymentRecord, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     """
     Collect payment on a full_payment invoice.
@@ -631,7 +635,7 @@ class ConsignmentPayment(BaseModel):
     month_label: Optional[str] = None   # e.g. "March 2025"
     notes:       Optional[str] = None
 
-@router.post("/api/invoices/{invoice_id}/consignment-payment")
+@router.post("/api/invoices/{invoice_id}/consignment-payment", dependencies=[Depends(require_permission("action_b2b_collect"))])
 def consignment_payment(invoice_id: int, data: ConsignmentPayment, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     """
     Record a cash payment from a consignment client.
@@ -2395,6 +2399,7 @@ function logout(){
     localStorage.removeItem("user_name");
     localStorage.removeItem("user_role");
     localStorage.removeItem("user_permissions");
+    document.cookie = "access_token=; Max-Age=0; path=/; SameSite=Lax";
     window.location.href = "/";
 }
   function requirePageAccess(permission){

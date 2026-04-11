@@ -2,9 +2,20 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import HTMLResponse
 from sqlalchemy.orm import Session
 
+from app.core.permission_catalog import get_permission_catalog
+from app.core.permissions import (
+    get_effective_permissions,
+    normalize_permissions,
+    serialize_permissions,
+)
+from app.core.security import (
+    create_access_token,
+    get_current_user,
+    hash_password,
+    verify_password,
+)
 from app.database import get_db
 from app.models.user import User
-from app.core.security import hash_password, verify_password, create_access_token
 from app.schemas.user import UserCreate, UserOut, UserLogin
 
 router = APIRouter(tags=["Auth"])
@@ -181,13 +192,28 @@ def login_page():
             localStorage.setItem("user_name", data.name);
             localStorage.setItem("user_role", data.role);
             localStorage.setItem("user_permissions", data.permissions || "");
-            const roleHome = {
-                "admin":        "/dashboard",
-                "cashier":      "/pos",
-                "farm_manager": "/farm/",
-                "farm manager": "/farm/",
-            };
-            window.location.href = roleHome[data.role] || "/home";
+            document.cookie = "access_token=" + encodeURIComponent(data.access_token) + "; path=/; SameSite=Lax";
+            const permissions = new Set((data.permissions || "").split(",").map(v => v.trim()).filter(Boolean));
+            const landingPages = [
+                ["/dashboard", "page_dashboard"],
+                ["/pos", "page_pos"],
+                ["/farm/", "page_farm"],
+                ["/production/", "page_production"],
+                ["/inventory/", "page_inventory"],
+                ["/products/", "page_products"],
+                ["/customers-mgmt/", "page_customers"],
+                ["/suppliers/", "page_suppliers"],
+                ["/import", "page_import"],
+                ["/reports/", "page_reports"],
+                ["/b2b/", "page_b2b"],
+                ["/hr/", "page_hr"],
+                ["/accounting/", "page_accounting"],
+                ["/expenses/", "page_accounting"]
+            ];
+            const nextPage = data.role === "admin"
+                ? "/dashboard"
+                : (landingPages.find(([, permission]) => permissions.has(permission)) || ["/home"])[0];
+            window.location.href = nextPage;
         }
 
         // Press Enter to login
@@ -214,7 +240,12 @@ def login(data: UserLogin, db: Session = Depends(get_db)):
         raise HTTPException(status_code=401, detail="Invalid email or password")
     if not user.is_active:
         raise HTTPException(status_code=403, detail="Account is disabled")
-    token = create_access_token({"sub": str(user.id), "role": user.role})
+    permissions = serialize_permissions(
+        get_effective_permissions(user.role, user.permissions)
+    )
+    token = create_access_token(
+        {"sub": user.id, "role": user.role, "permissions": permissions}
+    )
     record(db, "Auth", "login",
            f"User logged in: {user.name} ({user.role})",
            user=user, ref_type="user", ref_id=user.id)
@@ -224,7 +255,31 @@ def login(data: UserLogin, db: Session = Depends(get_db)):
         "token_type": "bearer",
         "role": user.role,
         "name": user.name,
-        "permissions": user.permissions or ""
+        "permissions": permissions,
+    }
+
+
+@router.get("/auth/me")
+def me(current_user: User = Depends(get_current_user)):
+    permissions = serialize_permissions(
+        get_effective_permissions(current_user.role, current_user.permissions)
+    )
+    return {
+        "id": current_user.id,
+        "name": current_user.name,
+        "email": current_user.email,
+        "role": current_user.role,
+        "is_active": current_user.is_active,
+        "permissions": permissions,
+    }
+
+
+@router.get("/auth/permissions/catalog")
+def permissions_catalog(current_user: User = Depends(get_current_user)):
+    return {
+        "catalog": get_permission_catalog(),
+        "role": current_user.role,
+        "permissions": sorted(get_effective_permissions(current_user.role, current_user.permissions)),
     }
 
 

@@ -6,12 +6,16 @@ from typing import Optional, List
 from pydantic import BaseModel
 
 from app.database import get_db
-from app.core.permissions import get_current_user
+from app.core.permissions import get_current_user, require_permission
 from app.models.product import Product
 from app.models.user import User
 from app.core.log import record
 
-router = APIRouter(prefix="/products", tags=["Products"])
+router = APIRouter(
+    prefix="/products",
+    tags=["Products"],
+    dependencies=[Depends(require_permission("page_products"))],
+)
 
 
 # ── Schemas ────────────────────────────────────────────
@@ -127,7 +131,7 @@ def add_product(data: ProductCreate, db: Session = Depends(get_db), current_user
     return {"id": p.id, "sku": p.sku, "name": p.name}
 
 
-@router.put("/api/edit/{product_id}")
+@router.put("/api/edit/{product_id}", dependencies=[Depends(require_permission("action_products_edit"))])
 def edit_product(product_id: int, data: ProductUpdate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     p = db.query(Product).filter(Product.id == product_id).first()
     if not p:
@@ -142,7 +146,7 @@ def edit_product(product_id: int, data: ProductUpdate, db: Session = Depends(get
     return {"ok": True}
 
 
-@router.delete("/api/delete/{product_id}")
+@router.delete("/api/delete/{product_id}", dependencies=[Depends(require_permission("action_products_delete"))])
 def delete_product(product_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     p = db.query(Product).filter(Product.id == product_id).first()
     if not p:
@@ -487,6 +491,7 @@ function logout(){
     localStorage.removeItem("user_name");
     localStorage.removeItem("user_role");
     localStorage.removeItem("user_permissions");
+    document.cookie = "access_token=; Max-Age=0; path=/; SameSite=Lax";
     window.location.href = "/";
 }
   function requirePageAccess(permission){

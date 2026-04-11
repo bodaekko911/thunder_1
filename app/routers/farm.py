@@ -8,13 +8,17 @@ from datetime import date
 
 from app.database import get_db
 from app.core.log import record
-from app.core.permissions import get_current_user
+from app.core.permissions import get_current_user, require_permission
 from app.models.farm import Farm, FarmDelivery, FarmDeliveryItem, WeatherLog
 from app.models.product import Product
 from app.models.inventory import StockMove
 from app.models.user import User
 
-router = APIRouter(prefix="/farm", tags=["Farm"])
+router = APIRouter(
+    prefix="/farm",
+    tags=["Farm"],
+    dependencies=[Depends(require_permission("page_farm"))],
+)
 
 
 # ── Schemas ────────────────────────────────────────────
@@ -825,6 +829,7 @@ function logout(){
     localStorage.removeItem("user_name");
     localStorage.removeItem("user_role");
     localStorage.removeItem("user_permissions");
+    document.cookie = "access_token=; Max-Age=0; path=/; SameSite=Lax";
     window.location.href = "/";
 }
   function requirePageAccess(permission){

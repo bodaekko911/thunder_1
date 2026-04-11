@@ -6,6 +6,13 @@ from sqlalchemy.sql import func
 from pydantic import BaseModel
 from typing import Optional
 
+from app.core.permission_catalog import ROLE_DEFINITIONS, get_permission_catalog
+from app.core.permissions import (
+    require_admin as core_require_admin,
+    get_custom_permissions,
+    get_effective_permissions,
+    serialize_permissions,
+)
 from app.database import get_db, Base
 from app.models.user import User
 from app.core.security import hash_password, verify_password, decode_token
@@ -68,7 +75,7 @@ def _extract_user(authorization: str, db: Session):
 def get_user_from_token(authorization: str = Header(None), db: Session = Depends(get_db)):
     return _extract_user(authorization, db)
 
-def require_admin(authorization: str = Header(None), db: Session = Depends(get_db)):
+def require_admin_header(authorization: str = Header(None), db: Session = Depends(get_db)):
     user = _extract_user(authorization, db)
     if not user:
         raise HTTPException(status_code=401, detail="Not authenticated")
@@ -100,7 +107,7 @@ def get_logs(
     user_id: Optional[int] = None,
     limit:   int = 300,
     db:      Session = Depends(get_db),
-    _=Depends(require_admin),
+    _=Depends(core_require_admin),
 ):
     q = db.query(ActivityLog).order_by(ActivityLog.created_at.desc())
     if module:  q = q.filter(ActivityLog.module == module)
@@ -124,7 +131,7 @@ def get_logs(
 
 # ── User CRUD API ────────────────────────────────────────
 @router.get("/api/users")
-def get_users(db: Session = Depends(get_db), _=Depends(require_admin)):
+def get_users(db: Session = Depends(get_db), _=Depends(core_require_admin)):
     users = db.query(User).order_by(User.id).all()
     return [
         {
@@ -133,14 +140,19 @@ def get_users(db: Session = Depends(get_db), _=Depends(require_admin)):
             "email":       u.email,
             "role":        u.role,
             "is_active":   u.is_active,
-            "permissions": getattr(u, "permissions", None) or "",
+            "permissions": serialize_permissions(get_effective_permissions(u.role, getattr(u, "permissions", None))),
+            "custom_permissions": getattr(u, "permissions", None) or "",
             "created_at":  u.created_at.strftime("%Y-%m-%d") if u.created_at else "—",
         }
         for u in users
     ]
 
+@router.get("/api/permissions/catalog")
+def permissions_catalog(_=Depends(core_require_admin)):
+    return get_permission_catalog()
+
 @router.post("/api/users")
-def create_user(data: UserCreate, db: Session = Depends(get_db), admin=Depends(require_admin)):
+def create_user(data: UserCreate, db: Session = Depends(get_db), admin=Depends(core_require_admin)):
     if db.query(User).filter(User.email == data.email).first():
         raise HTTPException(status_code=400, detail="Email already exists")
     if len(data.password) < 6:
@@ -151,7 +163,9 @@ def create_user(data: UserCreate, db: Session = Depends(get_db), admin=Depends(r
         role=data.role, is_active=data.is_active,
     )
     if hasattr(u, "permissions"):
-        u.permissions = data.permissions
+        u.permissions = serialize_permissions(
+            get_custom_permissions(data.role, (data.permissions or "").split(","))
+        )
     db.add(u); db.commit(); db.refresh(u)
     # log
     log = ActivityLog(user_id=admin.id, user_name=admin.name, user_role=admin.role,
@@ -162,7 +176,7 @@ def create_user(data: UserCreate, db: Session = Depends(get_db), admin=Depends(r
     return {"id": u.id, "name": u.name, "email": u.email, "role": u.role}
 
 @router.put("/api/users/{user_id}")
-def update_user(user_id: int, data: UserUpdate, db: Session = Depends(get_db), admin=Depends(require_admin)):
+def update_user(user_id: int, data: UserUpdate, db: Session = Depends(get_db), admin=Depends(core_require_admin)):
     u = db.query(User).filter(User.id == user_id).first()
     if not u:
         raise HTTPException(status_code=404, detail="User not found")
@@ -174,7 +188,9 @@ def update_user(user_id: int, data: UserUpdate, db: Session = Depends(get_db), a
             raise HTTPException(status_code=400, detail="Email already in use")
         u.email = data.email
     if data.permissions is not None and hasattr(u, "permissions"):
-        u.permissions = data.permissions
+        u.permissions = serialize_permissions(
+            get_custom_permissions(data.role or u.role, data.permissions.split(","))
+        )
     db.commit()
     log = ActivityLog(user_id=admin.id, user_name=admin.name, user_role=admin.role,
         action="UPDATE_USER", module="USERS",
@@ -184,7 +200,7 @@ def update_user(user_id: int, data: UserUpdate, db: Session = Depends(get_db), a
     return {"ok": True, "id": u.id, "name": u.name, "role": u.role}
 
 @router.delete("/api/users/{user_id}")
-def delete_user(user_id: int, db: Session = Depends(get_db), admin=Depends(require_admin)):
+def delete_user(user_id: int, db: Session = Depends(get_db), admin=Depends(core_require_admin)):
     if user_id == admin.id:
         raise HTTPException(status_code=400, detail="Cannot delete your own account")
     u = db.query(User).filter(User.id == user_id).first()
@@ -200,7 +216,7 @@ def delete_user(user_id: int, db: Session = Depends(get_db), admin=Depends(requi
 
 @router.post("/api/users/{user_id}/reset-password")
 def admin_reset_password(user_id: int, data: AdminResetPassword,
-    db: Session = Depends(get_db), admin=Depends(require_admin)):
+    db: Session = Depends(get_db), admin=Depends(core_require_admin)):
     u = db.query(User).filter(User.id == user_id).first()
     if not u:
         raise HTTPException(status_code=404, detail="User not found")
@@ -239,7 +255,7 @@ def change_password(data: ChangePasswordData,
 
 # ── UI ────────────────────────────────────────────────────
 @router.get("/", response_class=HTMLResponse)
-def users_ui():
+def users_ui(_=Depends(core_require_admin)):
     return """<!DOCTYPE html>
 <html>
 <head>
@@ -584,6 +600,7 @@ function logout(){
     localStorage.removeItem("user_name");
     localStorage.removeItem("user_role");
     localStorage.removeItem("user_permissions");
+    document.cookie = "access_token=; Max-Age=0; path=/; SameSite=Lax";
     window.location.href = "/";
 }
 const token  = localStorage.getItem("token");
@@ -606,8 +623,27 @@ initializeColorMode();
 setUserInfo();
 
 let allUsers = [], allLogs = [], editingId = null, resetUserId = null;
+let permissionCatalog = {pages: [], roles: []};
+let PAGE_TREE = [];
+let roleDesc = {};
+let roleDefaults = {};
+const permissionIcons = {
+    chart: "📊",
+    reports: "📈",
+    pos: "🛒",
+    b2b: "🤝",
+    inventory: "📦",
+    products: "🏷",
+    import: "📥",
+    production: "⚙️",
+    farm: "🌾",
+    hr: "👥",
+    accounting: "📒",
+    customers: "👤",
+    suppliers: "🏭",
+};
 
-const roleDesc = {
+const legacyRoleDesc = {
     cashier:    "POS terminal only. Cannot access reports, settings, or financial data.",
     manager:    "Full operations: POS, B2B, inventory, production, farm, reports. No user/accounting management.",
     accountant: "Accounting only: journal entries, P&L, trial balance, financial reports.",
@@ -624,6 +660,42 @@ function switchTab(tab){
     });
     document.getElementById("add-btn-wrap").style.display = tab==="users"?"":"none";
     if(tab==="logs") loadLogs();
+}
+
+function hydratePermissionCatalog(catalog){
+    permissionCatalog = catalog || {pages: [], roles: []};
+    PAGE_TREE = (permissionCatalog.pages || []).map(page => ({
+        page: page.key,
+        icon: permissionIcons[page.icon] || "🔐",
+        label: page.label,
+        children: (page.actions || []).map(action => ({
+            value: action.key,
+            label: action.label,
+        })),
+    }));
+    roleDesc = Object.fromEntries((permissionCatalog.roles || []).map(role => [role.key, role.description]));
+    roleDefaults = Object.fromEntries((permissionCatalog.roles || []).map(role => [role.key, new Set(role.permissions || [])]));
+    renderRoleOptions();
+}
+
+function renderRoleOptions(){
+    const select = document.getElementById("u-role");
+    if(!select) return;
+    const current = select.value;
+    select.innerHTML = (permissionCatalog.roles || []).map(role =>
+        `<option value="${role.key}">${role.label}</option>`
+    ).join("");
+    if(current && roleDesc[current]) select.value = current;
+}
+
+async function loadPermissionCatalog(){
+    const res = await fetch("/users/api/permissions/catalog", {headers:H});
+    if(!res.ok){
+        showToast("Failed to load permission catalog");
+        return false;
+    }
+    hydratePermissionCatalog(await res.json());
+    return true;
 }
 
 // ── LOAD USERS ─────────────────────────────────────────
@@ -677,7 +749,7 @@ function renderUsers(users){
 }
 
 // ── PERMISSIONS TREE ───────────────────────────────────
-const PAGE_TREE = [
+const LEGACY_PAGE_TREE = [
     { page: "page_dashboard",  icon: "📊", label: "Dashboard",   children: [] },
     { page: "page_reports",    icon: "📈", label: "Reports",     children: [
         {value:"tab_reports_sales",      label:"Sales tab"},
@@ -784,6 +856,10 @@ function toggleSub(val, checked){
     else selectedSubs.delete(val);
 }
 
+function getRolePermissionString(role){
+    return [...(roleDefaults[role] || new Set())].join(",");
+}
+
 function setPermsFromString(str){
     selectedPages.clear(); selectedSubs.clear();
     if(!str) { renderPageChips(); return; }
@@ -809,7 +885,7 @@ function openAddModal(){
     document.getElementById("u-role").value  = "cashier";
     document.getElementById("u-active").checked = true;
     document.getElementById("u-bar").style.cssText = "width:0;background:var(--border2)";
-    setPermsFromString("");
+    setPermsFromString(getRolePermissionString("cashier"));
     updateRoleDesc();
     document.getElementById("user-modal").classList.add("open");
     setTimeout(()=>document.getElementById("u-name").focus(),100);
@@ -838,6 +914,9 @@ function closeModal(){ document.getElementById("user-modal").classList.remove("o
 function updateRoleDesc(){
     let r = document.getElementById("u-role").value;
     document.getElementById("role-info").innerText = roleDesc[r]||"";
+    if(editingId === null && selectedPages.size === 0 && selectedSubs.size === 0){
+        setPermsFromString(getRolePermissionString(r));
+    }
 }
 
 function pwdStrength(inputId, barId){
@@ -982,7 +1061,13 @@ function showToast(msg){
     clearTimeout(toastT);toastT=setTimeout(()=>t.classList.remove("show"),4000);
 }
 
-loadUsers();
+async function initializeUsersPage(){
+    const ok = await loadPermissionCatalog();
+    if(!ok) return;
+    await loadUsers();
+}
+
+initializeUsersPage();
 </script>
 </body>
 </html>"""

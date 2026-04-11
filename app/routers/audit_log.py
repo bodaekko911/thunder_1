@@ -5,8 +5,8 @@ from sqlalchemy.orm import Session
 from sqlalchemy import or_
 
 from app.core.log import ActivityLog
+from app.core.permissions import require_admin
 from app.database import get_db
-from app.routers.users import require_admin
 
 router = APIRouter(prefix="/audit-log", tags=["Audit Log"])
 

@@ -1,11 +1,12 @@
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 from fastapi.responses import HTMLResponse
+from app.core.security import get_current_user
 
 router = APIRouter(tags=["Home"])
 
 
 @router.get("/home", response_class=HTMLResponse)
-def home_ui():
+def home_ui(_=Depends(get_current_user)):
     return """
 <!DOCTYPE html>
 <html>
@@ -594,6 +595,7 @@ function logout(){
     localStorage.removeItem("user_name");
     localStorage.removeItem("user_role");
     localStorage.removeItem("user_permissions");
+    document.cookie = "access_token=; Max-Age=0; path=/; SameSite=Lax";
     window.location.href = "/";
 }
 

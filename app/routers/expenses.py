@@ -9,7 +9,7 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.core.log import record
-from app.core.permissions import get_current_user
+from app.core.permissions import get_current_user, require_permission
 from app.database import get_db
 from app.models.accounting import Account, Journal, JournalEntry
 from app.models.expense import Expense, ExpenseCategory
@@ -17,7 +17,11 @@ from app.models.farm import Farm, FarmDelivery, FarmDeliveryItem
 from app.models.product import Product
 from app.models.user import User
 
-router = APIRouter(prefix="/expenses", tags=["Expenses"])
+router = APIRouter(
+    prefix="/expenses",
+    tags=["Expenses"],
+    dependencies=[Depends(require_permission("page_accounting"))],
+)
 
 
 # ── Schemas ─────────────────────────────────────────────────────────────────
@@ -1008,6 +1012,7 @@ function toggleMode() {
 }
 function logout() {
     ["token","user_name","user_role","user_permissions"].forEach(k => localStorage.removeItem(k));
+    document.cookie = "access_token=; Max-Age=0; path=/; SameSite=Lax";
     window.location.href = "/";
 }
 if (localStorage.getItem("expenses-theme") === "light") {

@@ -8,7 +8,7 @@ from decimal import Decimal
 from datetime import date as date_type
 
 from app.database import get_db
-from app.core.permissions import get_current_user
+from app.core.permissions import get_current_user, require_permission
 from app.core.log import record as log_record
 from app.models.product import Product
 from app.models.inventory import StockMove
@@ -19,7 +19,11 @@ from app.models.production import (
 )
 from app.models.spoilage import SpoilageRecord
 
-router = APIRouter(prefix="/production", tags=["Production"])
+router = APIRouter(
+    prefix="/production",
+    tags=["Production"],
+    dependencies=[Depends(require_permission("page_production"))],
+)
 
 
 # ── Schemas ────────────────────────────────────────────
@@ -730,6 +734,7 @@ function logout(){
     localStorage.removeItem("user_name");
     localStorage.removeItem("user_role");
     localStorage.removeItem("user_permissions");
+    document.cookie = "access_token=; Max-Age=0; path=/; SameSite=Lax";
     window.location.href = "/";
 }
   function requirePageAccess(permission){

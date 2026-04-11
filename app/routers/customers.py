@@ -8,14 +8,18 @@ from typing import Optional
 from pydantic import BaseModel
 
 from app.database import get_db
-from app.core.permissions import get_current_user
+from app.core.permissions import get_current_user, require_permission
 from app.models.customer import Customer
 from app.models.user import User
 from app.models.invoice import Invoice, InvoiceItem
 from app.models.refund import RetailRefund
 from app.core.log import record
 
-router = APIRouter(prefix="/customers-mgmt", tags=["Customers"])
+router = APIRouter(
+    prefix="/customers-mgmt",
+    tags=["Customers"],
+    dependencies=[Depends(require_permission("page_customers"))],
+)
 
 
 # ── Schemas ────────────────────────────────────────────
@@ -984,6 +988,7 @@ function logout(){
     localStorage.removeItem("user_name");
     localStorage.removeItem("user_role");
     localStorage.removeItem("user_permissions");
+    document.cookie = "access_token=; Max-Age=0; path=/; SameSite=Lax";
     window.location.href = "/";
 }
   function requirePageAccess(permission){

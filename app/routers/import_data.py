@@ -3,12 +3,17 @@ from fastapi.responses import HTMLResponse
 from sqlalchemy.orm import Session
 import openpyxl, io
 
+from app.core.permissions import require_permission
 from app.database import get_db
 from app.models.product import Product
 from app.models.customer import Customer
 from app.models.inventory import StockMove
 
-router = APIRouter(prefix="/import", tags=["Import"])
+router = APIRouter(
+    prefix="/import",
+    tags=["Import"],
+    dependencies=[Depends(require_permission("page_import"))],
+)
 
 
 def find_col(raw_headers, names):
@@ -495,6 +500,7 @@ function logout(){
     localStorage.removeItem("user_name");
     localStorage.removeItem("user_role");
     localStorage.removeItem("user_permissions");
+    document.cookie = "access_token=; Max-Age=0; path=/; SameSite=Lax";
     window.location.href = "/";
 }
   function requirePageAccess(permission){

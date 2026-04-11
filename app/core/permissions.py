@@ -1,35 +1,72 @@
-from fastapi import Depends, HTTPException, Header
-from sqlalchemy.orm import Session
-from app.database import get_db
+from typing import Iterable, Set
+
+from fastapi import Depends, HTTPException, status
+
+from app.core.permission_catalog import get_role_permissions, is_known_permission
+from app.core.security import get_current_user
 from app.models.user import User
-from app.core.security import decode_token
 
 
-def get_current_user(authorization: str = Header(None), db: Session = Depends(get_db)):
-    if not authorization:
-        raise HTTPException(401, "Not authenticated")
+def normalize_permissions(raw_permissions: str | None) -> Set[str]:
+    return {
+        permission.strip()
+        for permission in (raw_permissions or "").split(",")
+        if permission and permission.strip() and is_known_permission(permission.strip())
+    }
 
-    token = authorization.split(" ")[-1]
-    payload = decode_token(token)
-    user_id = int(payload.get("sub", 0))
 
-    user = db.query(User).filter(User.id == user_id).first()
-    if not user:
-        raise HTTPException(401, "User not found")
+def serialize_permissions(permissions: Iterable[str]) -> str:
+    return ",".join(
+        sorted(
+            {
+                permission.strip()
+                for permission in permissions
+                if permission and permission.strip() and is_known_permission(permission.strip())
+            }
+        )
+    )
 
-    return user
+
+def get_effective_permissions(role: str | None, raw_permissions: str | None) -> Set[str]:
+    role_permissions = get_role_permissions(role)
+    if "*" in role_permissions:
+        return {"*"}
+    return role_permissions | normalize_permissions(raw_permissions)
+
+
+def get_custom_permissions(role: str | None, selected_permissions: Iterable[str]) -> Set[str]:
+    cleaned = {
+        permission.strip()
+        for permission in selected_permissions
+        if permission and permission.strip() and is_known_permission(permission.strip())
+    }
+    role_permissions = get_role_permissions(role)
+    if "*" in role_permissions:
+        return set()
+    return cleaned - role_permissions
+
+
+def has_permission(user: User, permission: str) -> bool:
+    effective_permissions = get_effective_permissions(user.role, user.permissions)
+    return "*" in effective_permissions or permission in effective_permissions
 
 
 def require_permission(permission: str):
     def checker(user: User = Depends(get_current_user)):
-        if user.role == "admin":
-            return user
-
-        perms = (user.permissions or "").split(",")
-
-        if permission not in perms:
-            raise HTTPException(403, "Permission denied")
-
+        if not has_permission(user, permission):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Permission denied: {permission}",
+            )
         return user
 
     return checker
+
+
+def require_admin(user: User = Depends(get_current_user)):
+    if user.role != "admin":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Admin access required",
+        )
+    return user

@@ -6,7 +6,7 @@ from typing import Optional, List
 from pydantic import BaseModel
 
 from app.database import get_db
-from app.core.permissions import get_current_user
+from app.core.permissions import get_current_user, require_permission
 from app.core.log import record
 from app.models.accounting import Account, Journal, JournalEntry
 from app.models.b2b import B2BClient, B2BInvoice, B2BInvoiceItem, Consignment
@@ -15,7 +15,11 @@ from app.models.inventory import StockMove
 from app.models.user import User
 from decimal import Decimal
 
-router = APIRouter(prefix="/accounting", tags=["Accounting"])
+router = APIRouter(
+    prefix="/accounting",
+    tags=["Accounting"],
+    dependencies=[Depends(require_permission("page_accounting"))],
+)
 
 
 # ── Schemas ────────────────────────────────────────────
@@ -153,7 +157,7 @@ def get_journal(journal_id: int, db: Session = Depends(get_db)):
         ],
     }
 
-@router.post("/api/journals")
+@router.post("/api/journals", dependencies=[Depends(require_permission("action_accounting_post_journal"))])
 def create_journal(data: JournalCreate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     total_debit  = sum(e.debit  for e in data.entries)
     total_credit = sum(e.credit for e in data.entries)
@@ -890,6 +894,7 @@ function logout(){
     localStorage.removeItem("user_name");
     localStorage.removeItem("user_role");
     localStorage.removeItem("user_permissions");
+    document.cookie = "access_token=; Max-Age=0; path=/; SameSite=Lax";
     window.location.href = "/";
 }
   function requirePageAccess(permission){

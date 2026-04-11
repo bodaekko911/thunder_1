@@ -5,13 +5,17 @@ from typing import Optional, List
 from pydantic import BaseModel
 
 from app.database import get_db
-from app.core.permissions import get_current_user
+from app.core.permissions import get_current_user, require_permission
 from app.models.supplier import Supplier, Purchase, PurchaseItem
 from app.models.user import User
 from app.models.product import Product
 from app.models.inventory import StockMove
 
-router = APIRouter(prefix="/suppliers", tags=["Suppliers"])
+router = APIRouter(
+    prefix="/suppliers",
+    tags=["Suppliers"],
+    dependencies=[Depends(require_permission("page_suppliers"))],
+)
 
 
 # ── Schemas ────────────────────────────────────────────
@@ -635,6 +639,7 @@ function logout(){
     localStorage.removeItem("user_name");
     localStorage.removeItem("user_role");
     localStorage.removeItem("user_permissions");
+    document.cookie = "access_token=; Max-Age=0; path=/; SameSite=Lax";
     window.location.href = "/";
 }
   function requirePageAccess(permission){
