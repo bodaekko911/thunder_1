@@ -55,16 +55,6 @@ def _run_safe_alterations() -> None:
                 "ADD COLUMN IF NOT EXISTS discount_pct NUMERIC(6,2) DEFAULT 0"
             )
         )
-        conn.execute(
-            text(
-                """
-                UPDATE b2b_clients
-                SET discount_pct = credit_limit,
-                    credit_limit = 0
-                WHERE discount_pct = 0 AND credit_limit > 0
-                """
-            )
-        )
 
 
 def _seed_expense_categories() -> None:

@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Response
 from fastapi.responses import HTMLResponse
 from sqlalchemy.orm import Session
 
@@ -6,6 +6,7 @@ from app.core.permission_catalog import get_permission_catalog
 from app.core.permissions import (
     get_effective_permissions,
     normalize_permissions,
+    require_admin,
     serialize_permissions,
 )
 from app.core.security import (
@@ -188,11 +189,9 @@ def login_page():
                 document.getElementById("error").style.display = "block";
                 return;
             }
-            localStorage.setItem("token", data.access_token);
             localStorage.setItem("user_name", data.name);
             localStorage.setItem("user_role", data.role);
             localStorage.setItem("user_permissions", data.permissions || "");
-            document.cookie = "access_token=" + encodeURIComponent(data.access_token) + "; path=/; SameSite=Lax";
             const permissions = new Set((data.permissions || "").split(",").map(v => v.trim()).filter(Boolean));
             const landingPages = [
                 ["/dashboard", "page_dashboard"],
@@ -229,7 +228,11 @@ def login_page():
 
 
 @router.post("/auth/login")
-def login(data: UserLogin, db: Session = Depends(get_db)):
+def login(
+    data: UserLogin,
+    response: Response,
+    db: Session = Depends(get_db),
+):
     from app.core.log import record
     user = db.query(User).filter(User.email == data.email).first()
     if not user or not verify_password(data.password, user.password):
@@ -246,13 +249,19 @@ def login(data: UserLogin, db: Session = Depends(get_db)):
     token = create_access_token(
         {"sub": user.id, "role": user.role, "permissions": permissions}
     )
+    response.set_cookie(
+        key="access_token",
+        value=token,
+        httponly=True,
+        samesite="lax",
+        secure=False,
+        path="/",
+    )
     record(db, "Auth", "login",
            f"User logged in: {user.name} ({user.role})",
            user=user, ref_type="user", ref_id=user.id)
     db.commit()
     return {
-        "access_token": token,
-        "token_type": "bearer",
         "role": user.role,
         "name": user.name,
         "permissions": permissions,
@@ -284,7 +293,11 @@ def permissions_catalog(current_user: User = Depends(get_current_user)):
 
 
 @router.post("/auth/register", response_model=UserOut, status_code=201)
-def register(data: UserCreate, db: Session = Depends(get_db)):
+def register(
+    data: UserCreate,
+    db: Session = Depends(get_db),
+    _: User = Depends(require_admin),
+):
     if db.query(User).filter(User.email == data.email).first():
         raise HTTPException(status_code=400, detail="Email already registered")
     user = User(

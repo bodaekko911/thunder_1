@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import HTMLResponse
 from sqlalchemy.orm import Session
 from decimal import Decimal
@@ -708,7 +708,6 @@ body.light .toast{background:var(--card);}
   applyNavPermissions();
   initializeColorMode();
   setUserInfo();
-  let beep = new Audio("/static/sounds/beep.wav");
 let customers=[], products=[], cart=[], lastCart=[];
 let selectedCustomer = null;
 let selectedPayMethod = "cash";
@@ -973,7 +972,6 @@ function addWithRipple(e, sku, name, price){
 function add(sku,name,price){
     let ex=cart.find(c=>c.sku===sku);
     ex?ex.qty++:cart.push({sku,name,price:parseFloat(price),qty:1});
-    beep.currentTime=0; beep.play().catch(()=>{});
     drawCart();
 }
 function inc(sku){ cart.find(c=>c.sku===sku).qty++; drawCart(); }

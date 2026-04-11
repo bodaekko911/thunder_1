@@ -4,31 +4,58 @@ from app.models.customer import Customer
 from app.models.product import Product
 
 
+def _normalize_column_name(value) -> str:
+    return " ".join(str(value or "").strip().lower().split())
+
+
+def _build_column_lookup(df: pd.DataFrame) -> dict:
+    return {_normalize_column_name(column): column for column in df.columns}
+
+
+def _get_row_value(row, columns: dict, *aliases, default=""):
+    for alias in aliases:
+        actual = columns.get(_normalize_column_name(alias))
+        if actual is not None:
+            return row.get(actual, default)
+    return default
+
+
 def import_customers(filepath: str, db: Session) -> dict:
     df = pd.read_excel(filepath)
+    columns = _build_column_lookup(df)
 
     added   = 0
     skipped = 0
 
     for _, row in df.iterrows():
-        customer_id = str(row.get("ID", "")).strip()
-        name        = str(row.get("Vendor  ", "")).strip()
+        customer_id = str(_get_row_value(row, columns, "ID", default="")).strip()
+        name = str(
+            _get_row_value(row, columns, "Vendor", "Vendor  ", "Customer", "Customer Name", default="")
+        ).strip()
 
         if not name or name == "nan":
             skipped += 1
             continue
 
-        # Skip if already exists by name
-        exists = db.query(Customer).filter(Customer.name == name).first()
-        if exists:
-            skipped += 1
-            continue
-
-        phone    = str(row.get("Mobile No", "")).strip()
-        address  = str(row.get("Location", "")).strip()
+        phone = str(_get_row_value(row, columns, "Mobile No", "Phone", "Phone Number", default="")).strip()
+        address = str(_get_row_value(row, columns, "Location", "Address", default="")).strip()
 
         phone   = None if phone   == "nan" else phone
         address = None if address == "nan" else address
+
+        existing_by_phone = None
+        existing_by_name = None
+
+        if phone:
+            existing_by_phone = db.query(Customer).filter(Customer.phone == phone).first()
+        if name:
+            existing_by_name = db.query(Customer).filter(Customer.name == name).first()
+
+        exists = existing_by_phone or (existing_by_name if not phone else None)
+
+        if exists:
+            skipped += 1
+            continue
 
         customer = Customer(
             name    = name,
