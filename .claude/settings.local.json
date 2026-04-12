@@ -14,7 +14,8 @@
       "Bash(python3 -c \"import os; print\\(os.listdir\\('c:/Users/Abdallah Abo zaid/erp/app/static'\\)\\)\")",
       "Bash(python3 -c \"import os; p='c:/Users/Abdallah Abo zaid/erp/app/static'; print\\(os.path.exists\\(p\\), os.listdir\\(p\\) if os.path.exists\\(p\\) else 'N/A'\\)\")",
       "Bash(python -c \"import os; p='app/static'; print\\(os.path.exists\\(p\\), os.listdir\\(p\\) if os.path.exists\\(p\\) else 'N/A'\\)\")",
-      "Bash(cmd /c \"dir /b \\\\\"c:\\\\Users\\\\Abdallah Abo zaid\\\\erp\\\\app\\\\static\\\\\" 2>&1\")"
+      "Bash(cmd /c \"dir /b \\\\\"c:\\\\Users\\\\Abdallah Abo zaid\\\\erp\\\\app\\\\static\\\\\" 2>&1\")",
+      "Bash(git -C \"C:/Users/Abdallah Abo zaid/erp\" status)"
     ]
   }
 }

@@ -1,12 +1,12 @@
 from typing import Optional
 from fastapi import APIRouter, Depends, Query
 from fastapi.responses import HTMLResponse
-from sqlalchemy.orm import Session
-from sqlalchemy import or_
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import or_, select, func
 
 from app.core.log import ActivityLog
 from app.core.permissions import require_admin
-from app.database import get_db
+from app.database import get_async_session
 
 router = APIRouter(prefix="/audit-log", tags=["Audit Log"])
 
@@ -14,7 +14,7 @@ router = APIRouter(prefix="/audit-log", tags=["Audit Log"])
 # ── Data API ──────────────────────────────────────────────────────────────────
 
 @router.get("/data")
-def audit_log_data(
+async def audit_log_data(
     module:     Optional[str] = None,
     action:     Optional[str] = None,
     user_name:  Optional[str] = None,
@@ -23,26 +23,35 @@ def audit_log_data(
     search:     Optional[str] = None,
     page:       int = Query(1, ge=1),
     page_size:  int = Query(50, ge=1, le=500),
-    db:         Session = Depends(get_db),
+    db:         AsyncSession = Depends(get_async_session),
     _=Depends(require_admin),
 ):
-    q = db.query(ActivityLog).order_by(ActivityLog.created_at.desc())
-
-    if module:    q = q.filter(ActivityLog.module    == module)
-    if action:    q = q.filter(ActivityLog.action    == action)
-    if user_name: q = q.filter(ActivityLog.user_name == user_name)
-    if date_from: q = q.filter(ActivityLog.created_at >= date_from)
-    if date_to:   q = q.filter(ActivityLog.created_at <= date_to + " 23:59:59")
+    conditions = []
+    if module:    conditions.append(ActivityLog.module    == module)
+    if action:    conditions.append(ActivityLog.action    == action)
+    if user_name: conditions.append(ActivityLog.user_name == user_name)
+    if date_from: conditions.append(ActivityLog.created_at >= date_from)
+    if date_to:   conditions.append(ActivityLog.created_at <= date_to + " 23:59:59")
     if search:
         like = f"%{search}%"
-        q = q.filter(or_(
+        conditions.append(or_(
             ActivityLog.description.ilike(like),
             ActivityLog.user_name.ilike(like),
             ActivityLog.ref_id.ilike(like),
         ))
 
-    total = q.count()
-    rows  = q.offset((page - 1) * page_size).limit(page_size).all()
+    cnt_result = await db.execute(
+        select(func.count()).select_from(ActivityLog).where(*conditions)
+    )
+    total = cnt_result.scalar()
+
+    result = await db.execute(
+        select(ActivityLog).where(*conditions)
+        .order_by(ActivityLog.created_at.desc())
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+    )
+    rows = result.scalars().all()
 
     return {
         "total": total,
@@ -66,11 +75,14 @@ def audit_log_data(
 
 
 @router.get("/meta")
-def audit_log_meta(db: Session = Depends(get_db), _=Depends(require_admin)):
+async def audit_log_meta(db: AsyncSession = Depends(get_async_session), _=Depends(require_admin)):
     """Return distinct values for filter dropdowns."""
-    modules  = [r[0] for r in db.query(ActivityLog.module).distinct().order_by(ActivityLog.module).all() if r[0]]
-    actions  = [r[0] for r in db.query(ActivityLog.action).distinct().order_by(ActivityLog.action).all() if r[0]]
-    users    = [r[0] for r in db.query(ActivityLog.user_name).distinct().order_by(ActivityLog.user_name).all() if r[0]]
+    res_mod  = await db.execute(select(ActivityLog.module).distinct().order_by(ActivityLog.module))
+    res_act  = await db.execute(select(ActivityLog.action).distinct().order_by(ActivityLog.action))
+    res_usr  = await db.execute(select(ActivityLog.user_name).distinct().order_by(ActivityLog.user_name))
+    modules  = [r[0] for r in res_mod.all() if r[0]]
+    actions  = [r[0] for r in res_act.all() if r[0]]
+    users    = [r[0] for r in res_usr.all() if r[0]]
     return {"modules": modules, "actions": actions, "users": users}
 
 
@@ -315,8 +327,11 @@ tbody td{padding:12px 14px;font-size:13px;vertical-align:top}
 <div class="pagination" id="pagination"></div>
 
 <script>
-const TOKEN = localStorage.getItem("token");
-if (!TOKEN) { window.location.href = "/"; }
+// Auth guard: redirect to login if the readable session cookie is absent
+function _hasAuthCookie() {
+    return document.cookie.split(";").some(c => c.trim().startsWith("logged_in="));
+}
+if (!_hasAuthCookie()) { window.location.href = "/"; }
 
 // ── colour mode ──
 if (localStorage.getItem("colorMode") === "light") {
@@ -342,7 +357,7 @@ async function init(){
 
 async function loadMeta(){
     try {
-        const r = await fetch("/audit-log/meta", { headers: { Authorization: "Bearer " + TOKEN } });
+        const r = await fetch("/audit-log/meta");
         if (!r.ok) return;
         const d = await r.json();
         fillSelect("f-module", d.modules);
@@ -394,9 +409,7 @@ async function loadPage(page){
     if (to)     params.set("date_to",   to);
 
     try {
-        const r = await fetch("/audit-log/data?" + params.toString(), {
-            headers: { Authorization: "Bearer " + TOKEN }
-        });
+        const r = await fetch("/audit-log/data?" + params.toString());
         if (r.status === 401 || r.status === 403) {
             document.getElementById("log-tbody").innerHTML =
                 '<tr class="loading-row"><td colspan="6">Access denied — admin only.</td></tr>';

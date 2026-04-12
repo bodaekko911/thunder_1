@@ -1,13 +1,13 @@
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import HTMLResponse, StreamingResponse
-from sqlalchemy.orm import Session
-from sqlalchemy import func
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import func, select
 from typing import Optional
 from pydantic import BaseModel
 from datetime import datetime, date
 import io
 
-from app.database import get_db
+from app.database import get_async_session
 from app.core.permissions import get_current_user, require_permission
 from app.core.log import record
 from app.models.product import Product
@@ -64,22 +64,24 @@ class StockAdjustment(BaseModel):
 
 # ── API ────────────────────────────────────────────────
 @router.get("/api/stock")
-def get_stock(
+async def get_stock(
     q:         str  = "",
     low_stock: bool = False,
     skip:      int  = 0,
     limit:     int  = 50,
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_async_session),
 ):
-    query = db.query(Product).filter(Product.is_active == True)
+    stmt = select(Product).where(Product.is_active == True)
     if q:
-        query = query.filter(
+        stmt = stmt.where(
             Product.name.ilike(f"%{q}%") | Product.sku.ilike(f"%{q}%")
         )
     if low_stock:
-        query = query.filter(Product.stock <= Product.min_stock)
-    total = query.count()
-    items = query.order_by(Product.name).offset(skip).limit(limit).all()
+        stmt = stmt.where(Product.stock <= Product.min_stock)
+    cnt_result = await db.execute(select(func.count()).select_from(stmt.subquery()))
+    total = cnt_result.scalar()
+    result = await db.execute(stmt.order_by(Product.name).offset(skip).limit(limit))
+    items = result.scalars().all()
     return {
         "total": total,
         "items": [
@@ -98,20 +100,20 @@ def get_stock(
 
 
 @router.get("/api/moves")
-def get_moves(
+async def get_moves(
     q:         str = "",
     date_from: str = None,
     date_to:   str = None,
     product_id: int = None,
     skip:       int = 0,
     limit:      int = 100,
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_async_session),
 ):
-    query = db.query(StockMove).join(Product, StockMove.product_id == Product.id)
+    stmt = select(StockMove).join(Product, StockMove.product_id == Product.id)
     if product_id:
-        query = query.filter(StockMove.product_id == product_id)
+        stmt = stmt.where(StockMove.product_id == product_id)
     if q:
-        query = query.filter(
+        stmt = stmt.where(
             Product.name.ilike(f"%{q}%") |
             Product.sku.ilike(f"%{q}%") |
             StockMove.ref_type.ilike(f"%{q}%") |
@@ -120,17 +122,19 @@ def get_moves(
     if date_from:
         try:
             dt_from = datetime.fromisoformat(date_from)
-            query = query.filter(StockMove.created_at >= dt_from)
+            stmt = stmt.where(StockMove.created_at >= dt_from)
         except ValueError:
             pass
     if date_to:
         try:
             dt_to = datetime.fromisoformat(date_to).replace(hour=23, minute=59, second=59)
-            query = query.filter(StockMove.created_at <= dt_to)
+            stmt = stmt.where(StockMove.created_at <= dt_to)
         except ValueError:
             pass
-    total = query.count()
-    moves = query.order_by(StockMove.created_at.desc()).offset(skip).limit(limit).all()
+    cnt_result = await db.execute(select(func.count()).select_from(stmt.subquery()))
+    total = cnt_result.scalar()
+    result = await db.execute(stmt.order_by(StockMove.created_at.desc()).offset(skip).limit(limit))
+    moves = result.scalars().all()
     return {
         "total": total,
         "moves": [
@@ -153,14 +157,14 @@ def get_moves(
 
 
 @router.get("/export/moves")
-def export_moves(
+async def export_moves(
     q:         str = "",
     date_from: str = None,
     date_to:   str = None,
     product_id: int = None,
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_async_session),
 ):
-    data = get_moves(q=q, date_from=date_from, date_to=date_to, product_id=product_id, skip=0, limit=100000, db=db)
+    data = await get_moves(q=q, date_from=date_from, date_to=date_to, product_id=product_id, skip=0, limit=100000, db=db)
     rows = [
         [m["created_at"], m["product"], m["sku"], m["type"], m["qty"], m["qty_before"], m["qty_after"], m["ref_type"], m["ref_id"], m["note"]]
         for m in data["moves"]
@@ -178,8 +182,9 @@ def export_moves(
 
 
 @router.post("/api/adjust", dependencies=[Depends(require_permission("action_inventory_adjust"))])
-def adjust_stock(data: StockAdjustment, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    product = db.query(Product).filter(Product.id == data.product_id).first()
+async def adjust_stock(data: StockAdjustment, db: AsyncSession = Depends(get_async_session), current_user: User = Depends(get_current_user)):
+    result = await db.execute(select(Product).where(Product.id == data.product_id))
+    product = result.scalar_one_or_none()
     if not product:
         raise HTTPException(status_code=404, detail="Product not found")
 
@@ -205,20 +210,24 @@ def adjust_stock(data: StockAdjustment, db: Session = Depends(get_db), current_u
            f"Stock adjusted: {product.name} — {before:+.3g} → {after:.3g} (Δ{data.qty:+.3g})"
            + (f" — {data.note}" if data.note else ""),
            ref_type="stock_move", ref_id=move.id if hasattr(move, 'id') else None)
-    db.commit()
+    await db.commit()
     return {"ok": True, "new_stock": after}
 
 
 @router.get("/api/summary")
-def get_summary(db: Session = Depends(get_db)):
-    total_products = db.query(func.count(Product.id)).filter(Product.is_active == True).scalar() or 0
-    low_stock      = db.query(func.count(Product.id)).filter(
+async def get_summary(db: AsyncSession = Depends(get_async_session)):
+    r1 = await db.execute(select(func.count(Product.id)).where(Product.is_active == True))
+    total_products = r1.scalar() or 0
+    r2 = await db.execute(select(func.count(Product.id)).where(
         Product.is_active == True, Product.stock <= Product.min_stock
-    ).scalar() or 0
-    out_of_stock   = db.query(func.count(Product.id)).filter(
+    ))
+    low_stock = r2.scalar() or 0
+    r3 = await db.execute(select(func.count(Product.id)).where(
         Product.is_active == True, Product.stock <= 0
-    ).scalar() or 0
-    total_moves    = db.query(func.count(StockMove.id)).scalar() or 0
+    ))
+    out_of_stock = r3.scalar() or 0
+    r4 = await db.execute(select(func.count(StockMove.id)))
+    total_moves = r4.scalar() or 0
     return {
         "total_products": total_products,
         "low_stock":      low_stock,
@@ -639,14 +648,12 @@ td.mono { font-family: var(--mono); }
 <div class="toast" id="toast"></div>
 
 <script>
-  const __erpToken = localStorage.getItem("token");
-  const __erpUserRole = localStorage.getItem("user_role") || "";
-  const __erpUserPermissions = new Set(
-      (localStorage.getItem("user_permissions") || "")
-          .split(",")
-          .map(p => p.trim())
-          .filter(Boolean)
-  );
+  // Auth guard: redirect to login if the readable session cookie is absent
+  function _hasAuthCookie() {
+      return document.cookie.split(";").some(c => c.trim().startsWith("logged_in="));
+  }
+  if (!_hasAuthCookie()) { window.location.href = "/"; }
+
   function setModeButton(isLight){
     const btn = document.getElementById("mode-btn");
     if(btn) btn.innerText = isLight ? "☀️" : "🌙";
@@ -661,72 +668,33 @@ function initializeColorMode(){
     document.body.classList.toggle("light", isLight);
     setModeButton(isLight);
 }
-function setUserInfo(){
-    const name = localStorage.getItem("user_name") || "Admin";
-    const avatar = document.getElementById("user-avatar");
-    const userName = document.getElementById("user-name");
-    if(avatar) avatar.innerText = name.charAt(0).toUpperCase();
-    if(userName) userName.innerText = name;
+async function initUser() {
+    try {
+        const r = await fetch("/auth/me");
+        if (!r.ok) { window.location.href = "/"; return; }
+        const u = await r.json();
+        const nameEl = document.getElementById("user-name");
+        const avatarEl = document.getElementById("user-avatar");
+        if (nameEl) nameEl.innerText = u.name;
+        if (avatarEl) avatarEl.innerText = u.name.charAt(0).toUpperCase();
+        return u;
+    } catch(e) { window.location.href = "/"; }
 }
-function logout(){
-    localStorage.removeItem("token");
-    localStorage.removeItem("user_name");
-    localStorage.removeItem("user_role");
-    localStorage.removeItem("user_permissions");
-    document.cookie = "access_token=; Max-Age=0; path=/; SameSite=Lax";
+async function logout(){
+    await fetch("/auth/logout", { method: "POST" });
     window.location.href = "/";
 }
-  function requirePageAccess(permission){
-      if(!__erpToken){
-          window.location.href = "/";
-          throw new Error("Not authenticated");
-      }
-      if(__erpUserRole === "admin" || __erpUserPermissions.has(permission)) return;
-      document.body.innerHTML = `<div style="display:flex;align-items:center;justify-content:center;height:100vh;flex-direction:column;gap:16px;color:#445066;font-family:'Outfit',sans-serif;background:#060810"><div style="font-size:48px">🔒</div><div style="font-size:20px;font-weight:800;color:#f0f4ff">Access Restricted</div><div style="font-size:14px">You do not have permission to open this page.</div><a href="/home" style="color:#00ff9d;text-decoration:none;font-weight:700">Back to Home</a></div>`;
-      throw new Error("Access denied");
+  function hasPermission(permission, u){
+      const role = u ? (u.role || "") : "";
+      const perms = new Set(u ? (u.permissions || []) : []);
+      return role === "admin" || perms.has(permission);
   }
-  function applyNavPermissions(){
-      const navPermissions = {
-          "/home": null,
-          "/dashboard": "page_dashboard",
-          "/pos": "page_pos",
-          "/b2b/": "page_b2b",
-          "/inventory/": "page_inventory",
-          "/products/": "page_products",
-          "/customers-mgmt/": "page_customers",
-          "/suppliers/": "page_suppliers",
-          "/production/": "page_production",
-          "/farm/": "page_farm",
-          "/hr/": "page_hr",
-          "/accounting/": "page_accounting",
-          "/reports/": "page_reports",
-          "/import": "page_import",
-          "/users/": "admin_only"
-      };
-      document.querySelectorAll("a.nav-link[href]").forEach(link => {
-          const href = link.getAttribute("href");
-          const requirement = navPermissions[href];
-          if(requirement === undefined || requirement === null) return;
-          if(requirement === "admin_only"){
-              if(__erpUserRole !== "admin") link.style.display = "none";
-              return;
-          }
-          if(__erpUserRole !== "admin" && !__erpUserPermissions.has(requirement)){
-              link.style.display = "none";
-          }
-      });
-  }
-  function hasPermission(permission){
-      return __erpUserRole === "admin" || __erpUserPermissions.has(permission);
-  }
-  function applyInventoryActionPermissions(){
-      if(hasPermission("action_inventory_adjust")) return;
+  function applyInventoryActionPermissions(u){
+      if(hasPermission("action_inventory_adjust", u)) return;
       document.querySelectorAll("#stock-body tr td:last-child button").forEach(btn => btn.remove());
   }
-  requirePageAccess("page_inventory");
-  applyNavPermissions();
   initializeColorMode();
-  setUserInfo();
+  initUser().then(u => { if(u) applyInventoryActionPermissions(u); });
   let currentTab   = "stock";
 let stockPage    = 0;
 let movesPage    = 0;

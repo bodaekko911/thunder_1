@@ -574,13 +574,29 @@ body {
 </div>
 
 <script>
-function setGreeting(){
-    let name  = localStorage.getItem("user_name") || "there";
+// Auth guard: redirect to login if the readable session cookie is absent
+function _hasAuthCookie() {
+    return document.cookie.split(";").some(c => c.trim().startsWith("logged_in="));
+}
+if (!_hasAuthCookie()) { window.location.href = "/"; }
+
+async function initUser() {
+    try {
+        const r = await fetch("/auth/me");
+        if (!r.ok) { window.location.href = "/"; return; }
+        const u = await r.json();
+        const nameEl = document.getElementById("user-name");
+        const avatarEl = document.getElementById("user-avatar");
+        if (nameEl) nameEl.innerText = u.name;
+        if (avatarEl) avatarEl.innerText = u.name.charAt(0).toUpperCase();
+        return u;
+    } catch(e) { window.location.href = "/"; }
+}
+
+function setGreeting(name){
     let h     = new Date().getHours();
     let greet = h < 12 ? "Good morning" : h < 17 ? "Good afternoon" : "Good evening";
-    document.getElementById("greeting").innerHTML   = `${greet}, <em>${name}</em>`;
-    document.getElementById("user-avatar").innerText = name.charAt(0).toUpperCase();
-    document.getElementById("user-name").innerText   = name;
+    document.getElementById("greeting").innerHTML = `${greet}, <em>${name || "there"}</em>`;
 }
 
 function setDateTime(){
@@ -590,12 +606,8 @@ function setDateTime(){
     document.getElementById("footer-time").innerText = now.toLocaleTimeString("en-GB", {hour:"2-digit",minute:"2-digit"});
 }
 
-function logout(){
-    localStorage.removeItem("token");
-    localStorage.removeItem("user_name");
-    localStorage.removeItem("user_role");
-    localStorage.removeItem("user_permissions");
-    document.cookie = "access_token=; Max-Age=0; path=/; SameSite=Lax";
+async function logout(){
+    await fetch("/auth/logout", { method: "POST" });
     window.location.href = "/";
 }
 
@@ -605,46 +617,40 @@ function toggleMode(){
     localStorage.setItem("colorMode", isLight ? "light" : "dark");
 }
 
-// Guard — redirect to login if no token
-if(!localStorage.getItem("token")){
-    window.location.href = "/";
-}
-
-// Show Users card for admin only
-const userRole = localStorage.getItem("user_role") || "";
-const userPermissions = new Set(
-    (localStorage.getItem("user_permissions") || "")
-        .split(",")
-        .map(p => p.trim())
-        .filter(Boolean)
-);
-
-function canAccess(permission){
-    return userRole === "admin" || userPermissions.has(permission);
-}
-
-document.querySelectorAll(".module-card[data-permission]").forEach(card => {
-    if(!canAccess(card.dataset.permission)){
-        card.style.display = "none";
-    }
-});
-
-if(userRole === "admin"){
-    let c = document.getElementById("card-users");
-    if(c) c.style.display = "";
-    let a = document.getElementById("card-audit");
-    if(a) a.style.display = "";
-}
-
 // Restore saved colour mode
 if(localStorage.getItem("colorMode") === "light"){
     document.body.classList.add("light");
     document.getElementById("mode-btn").innerHTML = "&#9728;&#65039;";
 }
 
-setGreeting();
 setDateTime();
 setInterval(setDateTime, 30000);
+
+(async () => {
+    const u = await initUser();
+    if (!u) return;
+    setGreeting(u.name);
+
+    const userRole = u.role || "";
+    const userPermissions = new Set(u.permissions || []);
+
+    function canAccess(permission){
+        return userRole === "admin" || userPermissions.has(permission);
+    }
+
+    document.querySelectorAll(".module-card[data-permission]").forEach(card => {
+        if(!canAccess(card.dataset.permission)){
+            card.style.display = "none";
+        }
+    });
+
+    if(userRole === "admin"){
+        let c = document.getElementById("card-users");
+        if(c) c.style.display = "";
+        let a = document.getElementById("card-audit");
+        if(a) a.style.display = "";
+    }
+})();
 </script>
 </body>
 </html>

@@ -1,10 +1,11 @@
 from fastapi import APIRouter, UploadFile, File, Depends
 from fastapi.responses import HTMLResponse
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select
 import openpyxl, io
 
 from app.core.permissions import require_permission
-from app.database import get_db
+from app.database import get_async_session
 from app.models.product import Product
 from app.models.customer import Customer
 from app.models.inventory import StockMove
@@ -49,8 +50,8 @@ async def preview_file(file: UploadFile = File(...)):
 
 # ── PRODUCTS ───────────────────────────────────────────
 @router.post("/api/products")
-def import_products(file: UploadFile = File(...), db: Session = Depends(get_db)):
-    contents = file.file.read()
+async def import_products(file: UploadFile = File(...), db: AsyncSession = Depends(get_async_session)):
+    contents = await file.read()
     wb = openpyxl.load_workbook(io.BytesIO(contents), data_only=True)
     ws = wb.active
     hdrs = [str(ws.cell(1, c).value or "").strip().lower() for c in range(1, ws.max_column + 2)]
@@ -78,7 +79,6 @@ def import_products(file: UploadFile = File(...), db: Session = Depends(get_db))
         name = v(col_name)
         if not name or name.lower() == "none": continue
 
-        # SKU: convert numeric float like 10001.0 → "10001"
         raw_sku = ws.cell(row, col_sku).value if col_sku else None
         if raw_sku is not None:
             try:    sku = str(int(float(str(raw_sku))))
@@ -86,10 +86,10 @@ def import_products(file: UploadFile = File(...), db: Session = Depends(get_db))
         else:
             sku = None
 
-        # Auto-generate SKU if missing
         if not sku:
+            all_r = await db.execute(select(Product))
             nums = []
-            for p in db.query(Product).all():
+            for p in all_r.scalars().all():
                 try: nums.append(int(p.sku))
                 except (ValueError, TypeError): pass
             sku = str(max(nums) + 1) if nums else "10001"
@@ -102,10 +102,11 @@ def import_products(file: UploadFile = File(...), db: Session = Depends(get_db))
         raw_t = v(col_type) or ""
         item_type = "raw" if "raw" in raw_t.lower() else "finished"
 
-        # Find existing by SKU then by name
-        existing = db.query(Product).filter(Product.sku == sku).first()
+        ex_r = await db.execute(select(Product).where(Product.sku == sku))
+        existing = ex_r.scalar_one_or_none()
         if not existing:
-            existing = db.query(Product).filter(Product.name == name, Product.is_active == True).first()
+            ex_r = await db.execute(select(Product).where(Product.name == name, Product.is_active == True))
+            existing = ex_r.scalar_one_or_none()
 
         if existing:
             existing.name = name
@@ -125,9 +126,9 @@ def import_products(file: UploadFile = File(...), db: Session = Depends(get_db))
             created += 1
 
     try:
-        db.commit()
+        await db.commit()
     except Exception as e:
-        db.rollback()
+        await db.rollback()
         return {"error": str(e)}
 
     return {"ok": True, "created": created, "updated": updated,
@@ -136,8 +137,8 @@ def import_products(file: UploadFile = File(...), db: Session = Depends(get_db))
 
 # ── STOCK ──────────────────────────────────────────────
 @router.post("/api/stock")
-def import_stock(file: UploadFile = File(...), db: Session = Depends(get_db)):
-    contents = file.file.read()
+async def import_stock(file: UploadFile = File(...), db: AsyncSession = Depends(get_async_session)):
+    contents = await file.read()
     wb = openpyxl.load_workbook(io.BytesIO(contents), data_only=True)
     ws = wb.active
     hdrs = [str(ws.cell(1, c).value or "").strip().lower() for c in range(1, ws.max_column + 2)]
@@ -161,7 +162,6 @@ def import_stock(file: UploadFile = File(...), db: Session = Depends(get_db)):
         new_stock = safe_float(stock_raw)
         if new_stock is None: continue
 
-        # Normalise SKU
         if sku_raw is not None:
             try:    sku = str(int(float(str(sku_raw))))
             except (ValueError, TypeError): sku = str(sku_raw).strip()
@@ -170,9 +170,11 @@ def import_stock(file: UploadFile = File(...), db: Session = Depends(get_db)):
 
         product = None
         if sku:
-            product = db.query(Product).filter(Product.sku == sku, Product.is_active == True).first()
+            _r = await db.execute(select(Product).where(Product.sku == sku, Product.is_active == True))
+            product = _r.scalar_one_or_none()
         if not product and name_raw:
-            product = db.query(Product).filter(Product.name == str(name_raw).strip(), Product.is_active == True).first()
+            _r = await db.execute(select(Product).where(Product.name == str(name_raw).strip(), Product.is_active == True))
+            product = _r.scalar_one_or_none()
 
         if product:
             before = float(product.stock)
@@ -189,9 +191,9 @@ def import_stock(file: UploadFile = File(...), db: Session = Depends(get_db)):
             not_found.append(label)
 
     try:
-        db.commit()
+        await db.commit()
     except Exception as e:
-        db.rollback()
+        await db.rollback()
         return {"error": str(e)}
 
     return {"ok": True, "updated": updated, "not_found": not_found[:30],
@@ -200,8 +202,8 @@ def import_stock(file: UploadFile = File(...), db: Session = Depends(get_db)):
 
 # ── CUSTOMERS ──────────────────────────────────────────
 @router.post("/api/customers")
-def import_customers(file: UploadFile = File(...), db: Session = Depends(get_db)):
-    contents = file.file.read()
+async def import_customers(file: UploadFile = File(...), db: AsyncSession = Depends(get_async_session)):
+    contents = await file.read()
     wb = openpyxl.load_workbook(io.BytesIO(contents), data_only=True)
     ws = wb.active
     hdrs = [str(ws.cell(1, c).value or "").strip().lower() for c in range(1, ws.max_column + 2)]
@@ -228,18 +230,21 @@ def import_customers(file: UploadFile = File(...), db: Session = Depends(get_db)
         email = v(col_email)
         addr  = v(col_addr)
 
-        if phone and db.query(Customer).filter(Customer.phone == phone).first():
-            skipped += 1; continue
-        if db.query(Customer).filter(Customer.name == name).first():
+        if phone:
+            _r = await db.execute(select(Customer).where(Customer.phone == phone))
+            if _r.scalar_one_or_none():
+                skipped += 1; continue
+        _r = await db.execute(select(Customer).where(Customer.name == name))
+        if _r.scalar_one_or_none():
             skipped += 1; continue
 
         db.add(Customer(name=name, phone=phone, email=email, address=addr))
         created += 1
 
     try:
-        db.commit()
+        await db.commit()
     except Exception as e:
-        db.rollback()
+        await db.rollback()
         return {"error": str(e)}
 
     return {"ok": True, "created": created, "skipped": skipped,
@@ -466,14 +471,12 @@ td{padding:8px 12px;border-top:1px solid var(--border);color:var(--sub);white-sp
 </div>
 
 <script>
-  const __erpToken = localStorage.getItem("token");
-  const __erpUserRole = localStorage.getItem("user_role") || "";
-  const __erpUserPermissions = new Set(
-      (localStorage.getItem("user_permissions") || "")
-          .split(",")
-          .map(p => p.trim())
-          .filter(Boolean)
-  );
+  // Auth guard: redirect to login if the readable session cookie is absent
+  function _hasAuthCookie() {
+      return document.cookie.split(";").some(c => c.trim().startsWith("logged_in="));
+  }
+  if (!_hasAuthCookie()) { window.location.href = "/"; }
+
   function setModeButton(isLight){
     const btn = document.getElementById("mode-btn");
     if(btn) btn.innerText = isLight ? "☀️" : "🌙";
@@ -488,65 +491,24 @@ function initializeColorMode(){
     document.body.classList.toggle("light", isLight);
     setModeButton(isLight);
 }
-function setUserInfo(){
-    const name = localStorage.getItem("user_name") || "Admin";
-    const avatar = document.getElementById("user-avatar");
-    const userName = document.getElementById("user-name");
-    if(avatar) avatar.innerText = name.charAt(0).toUpperCase();
-    if(userName) userName.innerText = name;
+async function initUser() {
+    try {
+        const r = await fetch("/auth/me");
+        if (!r.ok) { window.location.href = "/"; return; }
+        const u = await r.json();
+        const nameEl = document.getElementById("user-name");
+        const avatarEl = document.getElementById("user-avatar");
+        if (nameEl) nameEl.innerText = u.name;
+        if (avatarEl) avatarEl.innerText = u.name.charAt(0).toUpperCase();
+        return u;
+    } catch(e) { window.location.href = "/"; }
 }
-function logout(){
-    localStorage.removeItem("token");
-    localStorage.removeItem("user_name");
-    localStorage.removeItem("user_role");
-    localStorage.removeItem("user_permissions");
-    document.cookie = "access_token=; Max-Age=0; path=/; SameSite=Lax";
+async function logout(){
+    await fetch("/auth/logout", { method: "POST" });
     window.location.href = "/";
 }
-  function requirePageAccess(permission){
-      if(!__erpToken){
-          window.location.href = "/";
-          throw new Error("Not authenticated");
-      }
-      if(__erpUserRole === "admin" || __erpUserPermissions.has(permission)) return;
-      document.body.innerHTML = `<div style="display:flex;align-items:center;justify-content:center;height:100vh;flex-direction:column;gap:16px;color:#445066;font-family:'Outfit',sans-serif;background:#060810"><div style="font-size:48px">🔒</div><div style="font-size:20px;font-weight:800;color:#f0f4ff">Access Restricted</div><div style="font-size:14px">You do not have permission to open this page.</div><a href="/home" style="color:#00ff9d;text-decoration:none;font-weight:700">Back to Home</a></div>`;
-      throw new Error("Access denied");
-  }
-  function applyNavPermissions(){
-      const navPermissions = {
-          "/home": null,
-          "/dashboard": "page_dashboard",
-          "/pos": "page_pos",
-          "/b2b/": "page_b2b",
-          "/inventory/": "page_inventory",
-          "/products/": "page_products",
-          "/customers-mgmt/": "page_customers",
-          "/suppliers/": "page_suppliers",
-          "/production/": "page_production",
-          "/farm/": "page_farm",
-          "/hr/": "page_hr",
-          "/accounting/": "page_accounting",
-          "/reports/": "page_reports",
-          "/import": "page_import",
-          "/users/": "admin_only"
-      };
-      document.querySelectorAll("a.nav-link[href]").forEach(link => {
-          const href = link.getAttribute("href");
-          const requirement = navPermissions[href];
-          if(requirement === undefined || requirement === null) return;
-          if(requirement === "admin_only"){
-              if(__erpUserRole !== "admin") link.style.display = "none";
-              return;
-          }
-          if(__erpUserRole !== "admin" && !__erpUserPermissions.has(requirement)){
-              link.style.display = "none";
-          }
-      });
-  }
-  requirePageAccess("page_import");
-  applyNavPermissions();
   initializeColorMode();
-  setUserInfo();
+  initUser();
   const files = {products:null, stock:null, customers:null};
 
 function onDrag(e,t){ e.preventDefault(); document.getElementById('drop-'+t).classList.add('drag-over'); }

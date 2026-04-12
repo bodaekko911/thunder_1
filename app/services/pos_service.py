@@ -1,4 +1,5 @@
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select
 from fastapi import HTTPException
 from decimal import Decimal
 
@@ -11,11 +12,13 @@ from app.schemas.invoice import InvoiceCreate
 from app.core.log import record
 
 
-def _post_journal(db, description, entries, user_id=None):
+async def _post_journal(db: AsyncSession, description: str, entries: list, user_id=None):
     journal = Journal(ref_type="invoice", description=description, user_id=user_id)
-    db.add(journal); db.flush()
+    db.add(journal)
+    await db.flush()
     for code, debit, credit in entries:
-        acc = db.query(Account).filter(Account.code == code).first()
+        _r = await db.execute(select(Account).where(Account.code == code))
+        acc = _r.scalar_one_or_none()
         if acc:
             db.add(JournalEntry(
                 journal_id=journal.id, account_id=acc.id,
@@ -24,20 +27,17 @@ def _post_journal(db, description, entries, user_id=None):
             acc.balance += Decimal(str(debit)) - Decimal(str(credit))
 
 
-def _get_walk_in_customer_id(db: Session) -> int:
-    customer = (
-        db.query(Customer)
-        .filter(Customer.name == "Walk-in Customer")
-        .first()
-    )
+async def _get_walk_in_customer_id(db: AsyncSession) -> int:
+    _r = await db.execute(select(Customer).where(Customer.name == "Walk-in Customer"))
+    customer = _r.scalar_one_or_none()
     if not customer:
         customer = Customer(name="Walk-in Customer", phone="", email="", address="")
         db.add(customer)
-        db.flush()
+        await db.flush()
     return customer.id
 
 
-def create_invoice(db: Session, data: InvoiceCreate, user_id: int) -> Invoice:
+async def create_invoice(db: AsyncSession, data: InvoiceCreate, user_id: int) -> Invoice:
     try:
         if not data.items:
             raise HTTPException(status_code=400, detail="Cart is empty")
@@ -46,7 +46,8 @@ def create_invoice(db: Session, data: InvoiceCreate, user_id: int) -> Invoice:
         line_items = []
 
         for item in data.items:
-            product = db.query(Product).filter(Product.sku == item.sku).first()
+            _r = await db.execute(select(Product).where(Product.sku == item.sku))
+            product = _r.scalar_one_or_none()
             if not product:
                 raise HTTPException(status_code=404, detail=f"Product not found: {item.sku}")
             if product.stock < item.qty:
@@ -61,11 +62,10 @@ def create_invoice(db: Session, data: InvoiceCreate, user_id: int) -> Invoice:
         discount_amount = subtotal * (data.discount_percent / 100)
         total = subtotal - discount_amount
 
-        # settle_later means unpaid
         is_settle_later = getattr(data, "settle_later", False)
         payment_method = getattr(data, "payment_method", "cash") or "cash"
         status = "unpaid" if is_settle_later else "paid"
-        customer_id = data.customer_id or _get_walk_in_customer_id(db)
+        customer_id = data.customer_id or await _get_walk_in_customer_id(db)
 
         invoice = Invoice(
             customer_id=customer_id,
@@ -77,7 +77,8 @@ def create_invoice(db: Session, data: InvoiceCreate, user_id: int) -> Invoice:
             notes=data.notes,
             status=status,
         )
-        db.add(invoice); db.flush()
+        db.add(invoice)
+        await db.flush()
         invoice.invoice_number = f"INV-{str(invoice.id).zfill(5)}"
 
         for product, qty, line_total in line_items:
@@ -104,28 +105,26 @@ def create_invoice(db: Session, data: InvoiceCreate, user_id: int) -> Invoice:
                 note=f"Sale - {invoice.invoice_number}",
             ))
 
-        # Journal entry - only for paid invoices
         if not is_settle_later:
-            acc_code = "1000"  # Cash for cash, same for visa (both physical receipt)
-            _post_journal(db, f"Sale - {invoice.invoice_number}", [
+            acc_code = "1000"
+            await _post_journal(db, f"Sale - {invoice.invoice_number}", [
                 (acc_code, round(total, 2), 0),
                 ("4000", 0, round(total, 2)),
             ], user_id=user_id)
         else:
-            # Settle later -> Accounts Receivable
-            _post_journal(db, f"Unpaid Sale - {invoice.invoice_number}", [
+            await _post_journal(db, f"Unpaid Sale - {invoice.invoice_number}", [
                 ("1100", round(total, 2), 0),
                 ("4000", 0, round(total, 2)),
             ], user_id=user_id)
 
-        db.commit()
-        db.refresh(invoice)
+        await db.commit()
+        await db.refresh(invoice)
 
-        # Log the sale
         from app.models.user import User as UserModel
-
-        user_obj = db.query(UserModel).filter(UserModel.id == user_id).first()
-        cust_obj = db.query(Customer).filter(Customer.id == invoice.customer_id).first()
+        _ur = await db.execute(select(UserModel).where(UserModel.id == user_id))
+        user_obj = _ur.scalar_one_or_none()
+        _cr = await db.execute(select(Customer).where(Customer.id == invoice.customer_id))
+        cust_obj = _cr.scalar_one_or_none()
         cust_name = cust_obj.name if cust_obj else "Walk-in"
         record(
             db,
@@ -136,8 +135,8 @@ def create_invoice(db: Session, data: InvoiceCreate, user_id: int) -> Invoice:
             ref_type="invoice",
             ref_id=invoice.id,
         )
-        db.commit()
+        await db.commit()
         return invoice
     except Exception:
-        db.rollback()
+        await db.rollback()
         raise

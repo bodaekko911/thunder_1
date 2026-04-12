@@ -1,13 +1,14 @@
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import HTMLResponse
-from sqlalchemy.orm import Session
-from sqlalchemy import func
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
+from sqlalchemy import func, select
 from typing import Optional, List
 from pydantic import BaseModel
 from decimal import Decimal
 from datetime import date, datetime
 
-from app.database import get_db
+from app.database import get_async_session
 from app.core.permissions import get_current_user, require_permission
 from app.core.log import record
 from app.models.b2b import B2BClient, B2BInvoice, B2BInvoiceItem, Consignment, ConsignmentItem, B2BRefund, B2BRefundItem, B2BClientPrice
@@ -78,23 +79,27 @@ class ClientRefundCreate(BaseModel):
 
 
 # ── HELPERS ────────────────────────────────────────────
-def _next_b2b_number(db):
-    max_id = db.query(func.max(B2BInvoice.id)).scalar() or 0
+async def _next_b2b_number(db: AsyncSession) -> str:
+    _r = await db.execute(select(func.max(B2BInvoice.id)))
+    max_id = _r.scalar() or 0
     return f"B2B-{str(max_id + 1).zfill(5)}"
 
-def _next_cons_number(db):
-    max_id = db.query(func.max(Consignment.id)).scalar() or 0
+async def _next_cons_number(db: AsyncSession) -> str:
+    _r = await db.execute(select(func.max(Consignment.id)))
+    max_id = _r.scalar() or 0
     return f"CONS-{str(max_id + 1).zfill(4)}"
 
-def _next_refund_number(db):
-    max_id = db.query(func.max(B2BRefund.id)).scalar() or 0
+async def _next_refund_number(db: AsyncSession) -> str:
+    _r = await db.execute(select(func.max(B2BRefund.id)))
+    max_id = _r.scalar() or 0
     return f"RFD-{str(max_id + 1).zfill(5)}"
 
-def _post_journal(db, description, ref_type, entries, user_id=None):
+async def _post_journal(db: AsyncSession, description, ref_type, entries, user_id=None):
     journal = Journal(ref_type=ref_type, description=description, user_id=user_id)
-    db.add(journal); db.flush()
+    db.add(journal); await db.flush()
     for code, debit, credit in entries:
-        acc = db.query(Account).filter(Account.code == code).first()
+        _r = await db.execute(select(Account).where(Account.code == code))
+        acc = _r.scalar_one_or_none()
         if acc:
             db.add(JournalEntry(
                 journal_id=journal.id, account_id=acc.id,
@@ -102,15 +107,16 @@ def _post_journal(db, description, ref_type, entries, user_id=None):
             ))
             acc.balance += Decimal(str(debit)) - Decimal(str(credit))
 
-def _seed_deferred_revenue(db):
+async def _seed_deferred_revenue(db: AsyncSession):
     """Make sure account 2200 Deferred Revenue exists."""
-    acc = db.query(Account).filter(Account.code == "2200").first()
+    _r = await db.execute(select(Account).where(Account.code == "2200"))
+    acc = _r.scalar_one_or_none()
     if not acc:
         db.add(Account(
             code="2200", name="Deferred Revenue",
             account_type="liability", balance=Decimal("0"),
         ))
-        db.commit()
+        await db.commit()
 
 def _normalized_client_terms(client: B2BClient) -> str:
     terms = (client.payment_terms or "cash").strip().lower()
@@ -125,9 +131,10 @@ def _normalized_client_terms(client: B2BClient) -> str:
 def _client_discount_pct(client: B2BClient) -> float:
     return float(client.discount_pct or 0)
 
-def _reverse_invoice_stock(invoice, db):
+async def _reverse_invoice_stock(invoice, db: AsyncSession):
     for item in invoice.items:
-        product = db.query(Product).filter(Product.id == item.product_id).first()
+        _r = await db.execute(select(Product).where(Product.id == item.product_id))
+        product = _r.scalar_one_or_none()
         if product:
             before = float(product.stock)
             after  = before + float(item.qty)
@@ -139,17 +146,17 @@ def _reverse_invoice_stock(invoice, db):
                 note=f"Edit/Delete reversal — {invoice.invoice_number}",
             ))
 
-def _reverse_invoice_journal(invoice, db):
+async def _reverse_invoice_journal(invoice, db: AsyncSession):
     total = float(invoice.total)
     if invoice.invoice_type == "cash":
         # Reverse: debit Revenue, credit Cash
-        _post_journal(db, f"Reversal — {invoice.invoice_number}", "b2b_reversal", [
+        await _post_journal(db, f"Reversal — {invoice.invoice_number}", "b2b_reversal", [
             ("1000", 0, total),
             ("4000", total, 0),
         ])
     elif invoice.invoice_type in ("full_payment", "consignment"):
         # Reverse: debit Deferred Revenue, credit AR
-        _post_journal(db, f"Reversal — {invoice.invoice_number}", "b2b_reversal", [
+        await _post_journal(db, f"Reversal — {invoice.invoice_number}", "b2b_reversal", [
             ("2200", total, 0),   # Debit Deferred Revenue (reversal)
             ("1100", 0, total),   # Credit AR
         ])
@@ -164,21 +171,23 @@ def _reverse_invoice_journal(invoice, db):
 
 # ── SEED DEFERRED REVENUE ──────────────────────────────
 @router.post("/api/seed-accounts")
-def seed_accounts(db: Session = Depends(get_db)):
-    _seed_deferred_revenue(db)
+async def seed_accounts(db: AsyncSession = Depends(get_async_session)):
+    await _seed_deferred_revenue(db)
     return {"ok": True}
 
 
 # ── CLIENT API ─────────────────────────────────────────
 @router.get("/api/clients")
-def get_clients(q: str = "", db: Session = Depends(get_db)):
-    query = db.query(B2BClient).filter(B2BClient.is_active == True)
+async def get_clients(q: str = "", db: AsyncSession = Depends(get_async_session)):
+    stmt = select(B2BClient).where(B2BClient.is_active == True).options(selectinload(B2BClient.invoices))
     if q:
-        query = query.filter(
+        stmt = stmt.where(
             B2BClient.name.ilike(f"%{q}%") |
             B2BClient.phone.ilike(f"%{q}%")
         )
-    clients = query.order_by(B2BClient.name).all()
+    stmt = stmt.order_by(B2BClient.name)
+    _r = await db.execute(stmt)
+    clients = _r.scalars().all()
     return [
         {
             "id":             c.id,
@@ -198,7 +207,7 @@ def get_clients(q: str = "", db: Session = Depends(get_db)):
     ]
 
 @router.post("/api/clients")
-def create_client(data: ClientCreate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+async def create_client(data: ClientCreate, db: AsyncSession = Depends(get_async_session), current_user: User = Depends(get_current_user)):
     c = B2BClient(
         name=data.name, contact_person=data.contact_person,
         phone=data.phone, email=data.email, address=data.address,
@@ -207,12 +216,13 @@ def create_client(data: ClientCreate, db: Session = Depends(get_db), current_use
         credit_limit=data.credit_limit,
         notes=data.notes,
     )
-    db.add(c); db.commit(); db.refresh(c)
+    db.add(c); await db.commit(); await db.refresh(c)
     return {"id": c.id, "name": c.name}
 
 @router.put("/api/clients/{client_id}")
-def update_client(client_id: int, data: ClientUpdate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    c = db.query(B2BClient).filter(B2BClient.id == client_id).first()
+async def update_client(client_id: int, data: ClientUpdate, db: AsyncSession = Depends(get_async_session), current_user: User = Depends(get_current_user)):
+    _r = await db.execute(select(B2BClient).where(B2BClient.id == client_id))
+    c = _r.scalar_one_or_none()
     if not c:
         raise HTTPException(status_code=404, detail="Client not found")
     if data.name is not None:           c.name           = data.name
@@ -224,27 +234,38 @@ def update_client(client_id: int, data: ClientUpdate, db: Session = Depends(get_
     if data.discount_pct is not None:   c.discount_pct   = data.discount_pct
     if data.credit_limit is not None:   c.credit_limit   = data.credit_limit
     if data.notes is not None:          c.notes          = data.notes
-    db.commit()
+    await db.commit()
     return {"ok": True}
 
 @router.delete("/api/clients/{client_id}")
-def delete_client(client_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    c = db.query(B2BClient).filter(B2BClient.id == client_id).first()
+async def delete_client(client_id: int, db: AsyncSession = Depends(get_async_session), current_user: User = Depends(get_current_user)):
+    _r = await db.execute(select(B2BClient).where(B2BClient.id == client_id))
+    c = _r.scalar_one_or_none()
     if not c:
         raise HTTPException(status_code=404, detail="Client not found")
     c.is_active = False
-    db.commit()
+    await db.commit()
     return {"ok": True}
 
 
 # ── INVOICE API ────────────────────────────────────────
 @router.get("/api/invoices")
-def get_invoices(client_id: int = None, skip: int = 0, limit: int = 100, db: Session = Depends(get_db)):
-    query = db.query(B2BInvoice)
+async def get_invoices(client_id: int = None, skip: int = 0, limit: int = 100, db: AsyncSession = Depends(get_async_session)):
+    where = []
     if client_id:
-        query = query.filter(B2BInvoice.client_id == client_id)
-    total    = query.count()
-    invoices = query.order_by(B2BInvoice.created_at.desc()).offset(skip).limit(limit).all()
+        where.append(B2BInvoice.client_id == client_id)
+    cnt_r = await db.execute(select(func.count()).select_from(B2BInvoice).where(*where))
+    total = cnt_r.scalar()
+    inv_r = await db.execute(
+        select(B2BInvoice)
+        .where(*where)
+        .options(
+            selectinload(B2BInvoice.client),
+            selectinload(B2BInvoice.items).selectinload(B2BInvoiceItem.product),
+        )
+        .order_by(B2BInvoice.created_at.desc()).offset(skip).limit(limit)
+    )
+    invoices = inv_r.scalars().all()
     return {
         "total": total,
         "invoices": [
@@ -280,17 +301,19 @@ def get_invoices(client_id: int = None, skip: int = 0, limit: int = 100, db: Ses
     }
 
 @router.post("/api/invoices")
-def create_invoice(data: InvoiceCreate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    _seed_deferred_revenue(db)
+async def create_invoice(data: InvoiceCreate, db: AsyncSession = Depends(get_async_session), current_user: User = Depends(get_current_user)):
+    await _seed_deferred_revenue(db)
 
-    client = db.query(B2BClient).filter(B2BClient.id == data.client_id).first()
+    _r = await db.execute(select(B2BClient).where(B2BClient.id == data.client_id))
+    client = _r.scalar_one_or_none()
     if not client:
         raise HTTPException(status_code=404, detail="Client not found")
     if not data.items:
         raise HTTPException(status_code=400, detail="Invoice must have at least one item")
 
     for item in data.items:
-        product = db.query(Product).filter(Product.id == item.product_id).first()
+        _r = await db.execute(select(Product).where(Product.id == item.product_id))
+        product = _r.scalar_one_or_none()
         if not product:
             raise HTTPException(status_code=404, detail=f"Product not found: {item.product_id}")
         if float(product.stock) < item.qty:
@@ -302,7 +325,7 @@ def create_invoice(data: InvoiceCreate, db: Session = Depends(get_db), current_u
     subtotal        = sum(i.qty * i.unit_price for i in data.items)
     discount_amount = round(subtotal * (discount_pct / 100), 2)
     total           = round(subtotal - discount_amount, 2)
-    invoice_number  = _next_b2b_number(db)
+    invoice_number  = await _next_b2b_number(db)
     status = "paid" if invoice_type == "cash" else "unpaid"
 
     invoice = B2BInvoice(
@@ -316,10 +339,11 @@ def create_invoice(data: InvoiceCreate, db: Session = Depends(get_db), current_u
         amount_paid=total if invoice_type == "cash" else 0,
         notes=data.notes,
     )
-    db.add(invoice); db.flush()
+    db.add(invoice); await db.flush()
 
     for item in data.items:
-        product = db.query(Product).filter(Product.id == item.product_id).first()
+        _r = await db.execute(select(Product).where(Product.id == item.product_id))
+        product = _r.scalar_one_or_none()
         db.add(B2BInvoiceItem(
             invoice_id=invoice.id, product_id=product.id,
             qty=item.qty, unit_price=item.unit_price,
@@ -337,34 +361,31 @@ def create_invoice(data: InvoiceCreate, db: Session = Depends(get_db), current_u
 
     # ── ACCOUNTING ──────────────────────────────────────
     if invoice_type == "cash":
-        # Cash: immediate revenue
-        _post_journal(db, f"B2B Cash Sale - {invoice_number}", "b2b", [
-            ("1000", total, 0),   # Debit Cash
-            ("4000", 0, total),   # Credit Sales Revenue
+        await _post_journal(db, f"B2B Cash Sale - {invoice_number}", "b2b", [
+            ("1000", total, 0),
+            ("4000", 0, total),
         ], user_id=current_user.id)
 
     elif invoice_type == "full_payment":
-        # Full Payment: AR → Deferred Revenue (not yet earned)
-        _post_journal(db, f"B2B Full Payment Invoice - {invoice_number}", "b2b", [
-            ("1100", total, 0),   # Debit AR
-            ("2200", 0, total),   # Credit Deferred Revenue
+        await _post_journal(db, f"B2B Full Payment Invoice - {invoice_number}", "b2b", [
+            ("1100", total, 0),
+            ("2200", 0, total),
         ], user_id=current_user.id)
         client.outstanding = Decimal(str(float(client.outstanding) + total))
 
     elif invoice_type == "consignment":
-        # Consignment: AR → Deferred Revenue
-        _post_journal(db, f"B2B Consignment Invoice - {invoice_number}", "b2b", [
-            ("1100", total, 0),   # Debit AR
-            ("2200", 0, total),   # Credit Deferred Revenue
+        await _post_journal(db, f"B2B Consignment Invoice - {invoice_number}", "b2b", [
+            ("1100", total, 0),
+            ("2200", 0, total),
         ], user_id=current_user.id)
         client.outstanding = Decimal(str(float(client.outstanding) + total))
 
-        cons_ref = _next_cons_number(db)
+        cons_ref = await _next_cons_number(db)
         consignment = Consignment(
             ref_number=cons_ref, client_id=data.client_id,
             invoice_id=invoice.id, user_id=current_user.id, status="active", notes=data.notes,
         )
-        db.add(consignment); db.flush()
+        db.add(consignment); await db.flush()
         for item in data.items:
             db.add(ConsignmentItem(
                 consignment_id=consignment.id, product_id=item.product_id,
@@ -375,42 +396,60 @@ def create_invoice(data: InvoiceCreate, db: Session = Depends(get_db), current_u
     record(db, "B2B", "create_invoice",
            f"B2B invoice {invoice_number} — {client.name} — {total:.2f} — {invoice_type}",
            user=current_user, ref_type="b2b_invoice", ref_id=invoice.id)
-    db.commit(); db.refresh(invoice)
+    await db.commit(); await db.refresh(invoice)
     return {"id": invoice.id, "invoice_number": invoice_number, "total": total}
 
 
 @router.put("/api/invoices/{invoice_id}")
-def edit_invoice(invoice_id: int, data: InvoiceCreate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    invoice = db.query(B2BInvoice).filter(B2BInvoice.id == invoice_id).first()
+async def edit_invoice(invoice_id: int, data: InvoiceCreate, db: AsyncSession = Depends(get_async_session), current_user: User = Depends(get_current_user)):
+    _r = await db.execute(
+        select(B2BInvoice)
+        .where(B2BInvoice.id == invoice_id)
+        .options(
+            selectinload(B2BInvoice.items),
+            selectinload(B2BInvoice.client),
+        )
+    )
+    invoice = _r.scalar_one_or_none()
     if not invoice:
         raise HTTPException(status_code=404, detail="Invoice not found")
     if invoice.status == "paid" and float(invoice.amount_paid) > 0 and invoice.invoice_type == "cash":
         raise HTTPException(status_code=400, detail="Cannot edit a paid cash invoice.")
     if invoice.invoice_type == "consignment":
-        cons = db.query(Consignment).filter(Consignment.invoice_id == invoice_id).first()
-        if cons and any(float(ci.qty_sold) > 0 for ci in cons.items):
+        cons_r = await db.execute(
+            select(Consignment).where(Consignment.invoice_id == invoice_id)
+            .options(selectinload(Consignment.items))
+        )
+        cons_chk = cons_r.scalar_one_or_none()
+        if cons_chk and any(float(ci.qty_sold) > 0 for ci in cons_chk.items):
             raise HTTPException(status_code=400, detail="Cannot edit a consignment that has sales recorded.")
 
-    _reverse_invoice_stock(invoice, db)
-    _reverse_invoice_journal(invoice, db)
+    await _reverse_invoice_stock(invoice, db)
+    await _reverse_invoice_journal(invoice, db)
 
     for item in invoice.items:
-        db.delete(item)
-    old_cons = db.query(Consignment).filter(Consignment.invoice_id == invoice_id).first()
+        await db.delete(item)
+    old_cons_r = await db.execute(
+        select(Consignment).where(Consignment.invoice_id == invoice_id)
+        .options(selectinload(Consignment.items))
+    )
+    old_cons = old_cons_r.scalar_one_or_none()
     if old_cons:
         for ci in old_cons.items:
-            db.delete(ci)
-        db.delete(old_cons)
+            await db.delete(ci)
+        await db.delete(old_cons)
 
     for item in data.items:
-        product = db.query(Product).filter(Product.id == item.product_id).first()
+        _r = await db.execute(select(Product).where(Product.id == item.product_id))
+        product = _r.scalar_one_or_none()
         if not product:
             raise HTTPException(status_code=404, detail=f"Product not found: {item.product_id}")
         if float(product.stock) < item.qty:
             raise HTTPException(status_code=400,
                 detail=f"Not enough stock for '{product.name}'. Available: {float(product.stock)}")
 
-    client = db.query(B2BClient).filter(B2BClient.id == data.client_id).first()
+    _r = await db.execute(select(B2BClient).where(B2BClient.id == data.client_id))
+    client = _r.scalar_one_or_none()
     if not client:
         raise HTTPException(status_code=404, detail="Client not found")
 
@@ -432,7 +471,8 @@ def edit_invoice(invoice_id: int, data: InvoiceCreate, db: Session = Depends(get
     invoice.notes          = data.notes
 
     for item in data.items:
-        product = db.query(Product).filter(Product.id == item.product_id).first()
+        _r = await db.execute(select(Product).where(Product.id == item.product_id))
+        product = _r.scalar_one_or_none()
         db.add(B2BInvoiceItem(
             invoice_id=invoice.id, product_id=product.id,
             qty=item.qty, unit_price=item.unit_price,
@@ -449,24 +489,24 @@ def edit_invoice(invoice_id: int, data: InvoiceCreate, db: Session = Depends(get
         ))
 
     if invoice_type == "cash":
-        _post_journal(db, f"B2B Cash Sale (edited) - {invoice.invoice_number}", "b2b", [
+        await _post_journal(db, f"B2B Cash Sale (edited) - {invoice.invoice_number}", "b2b", [
             ("1000", total, 0),
             ("4000", 0, total),
         ], user_id=current_user.id)
     elif invoice_type in ("full_payment", "consignment"):
-        _post_journal(db, f"B2B {invoice_type} Invoice (edited) - {invoice.invoice_number}", "b2b", [
+        await _post_journal(db, f"B2B {invoice_type} Invoice (edited) - {invoice.invoice_number}", "b2b", [
             ("1100", total, 0),
             ("2200", 0, total),
         ], user_id=current_user.id)
         if client:
             client.outstanding = Decimal(str(float(client.outstanding) + total))
         if invoice_type == "consignment":
-            cons_ref = _next_cons_number(db)
+            cons_ref = await _next_cons_number(db)
             consignment = Consignment(
                 ref_number=cons_ref, client_id=data.client_id,
                 invoice_id=invoice.id, user_id=current_user.id, status="active", notes=data.notes,
             )
-            db.add(consignment); db.flush()
+            db.add(consignment); await db.flush()
             for item in data.items:
                 db.add(ConsignmentItem(
                     consignment_id=consignment.id, product_id=item.product_id,
@@ -477,38 +517,55 @@ def edit_invoice(invoice_id: int, data: InvoiceCreate, db: Session = Depends(get
     record(db, "B2B", "edit_invoice",
            f"Edited B2B invoice {invoice.invoice_number} — {total:.2f}",
            user=current_user, ref_type="b2b_invoice", ref_id=invoice_id)
-    db.commit()
+    await db.commit()
     return {"ok": True, "invoice_number": invoice.invoice_number, "total": total}
 
 
 @router.delete("/api/invoices/{invoice_id}", dependencies=[Depends(require_permission("action_b2b_delete"))])
-def delete_invoice(invoice_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    invoice = db.query(B2BInvoice).filter(B2BInvoice.id == invoice_id).first()
+async def delete_invoice(invoice_id: int, db: AsyncSession = Depends(get_async_session), current_user: User = Depends(get_current_user)):
+    _r = await db.execute(
+        select(B2BInvoice)
+        .where(B2BInvoice.id == invoice_id)
+        .options(
+            selectinload(B2BInvoice.items),
+            selectinload(B2BInvoice.client),
+        )
+    )
+    invoice = _r.scalar_one_or_none()
     if not invoice:
         raise HTTPException(status_code=404, detail="Invoice not found")
     inv_num = invoice.invoice_number
-    _reverse_invoice_stock(invoice, db)
-    _reverse_invoice_journal(invoice, db)
-    cons = db.query(Consignment).filter(Consignment.invoice_id == invoice_id).first()
+    await _reverse_invoice_stock(invoice, db)
+    await _reverse_invoice_journal(invoice, db)
+    cons_r = await db.execute(
+        select(Consignment).where(Consignment.invoice_id == invoice_id)
+        .options(selectinload(Consignment.items))
+    )
+    cons = cons_r.scalar_one_or_none()
     if cons:
         for ci in cons.items:
-            db.delete(ci)
-        db.delete(cons)
-    db.delete(invoice)
+            await db.delete(ci)
+        await db.delete(cons)
+    await db.delete(invoice)
     record(db, "B2B", "delete_invoice",
            f"Deleted B2B invoice {inv_num} — stock and journal reversed",
            ref_type="b2b_invoice", ref_id=invoice_id)
-    db.commit()
+    await db.commit()
     return {"ok": True}
 
 
 @router.post("/api/invoices/{invoice_id}/pay", dependencies=[Depends(require_permission("action_b2b_collect"))])
-def record_payment(invoice_id: int, data: PaymentRecord, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+async def record_payment(invoice_id: int, data: PaymentRecord, db: AsyncSession = Depends(get_async_session), current_user: User = Depends(get_current_user)):
     """
     Collect payment on a full_payment invoice.
     Moves amount from Deferred Revenue → Sales Revenue, and Cash ← AR.
     """
-    invoice = db.query(B2BInvoice).filter(B2BInvoice.id == invoice_id).first()
+    _r = await db.execute(
+        select(B2BInvoice)
+        .where(B2BInvoice.id == invoice_id)
+        .options(selectinload(B2BInvoice.client))
+    )
+    invoice = _r.scalar_one_or_none()
     if not invoice:
         raise HTTPException(status_code=404, detail="Invoice not found")
     balance = float(invoice.total) - float(invoice.amount_paid)
@@ -522,22 +579,29 @@ def record_payment(invoice_id: int, data: PaymentRecord, db: Session = Depends(g
     client = invoice.client
     client.outstanding = Decimal(str(max(0, float(client.outstanding) - amount)))
 
-    # Deferred Revenue → Sales Revenue + Cash ← AR
-    _post_journal(db, f"Payment received - {invoice.invoice_number}", "b2b_payment", [
-        ("1000", amount, 0),    # Debit Cash
-        ("1100", 0, amount),    # Credit AR
-        ("2200", amount, 0),    # Debit Deferred Revenue
-        ("4000", 0, amount),    # Credit Sales Revenue
+    await _post_journal(db, f"Payment received - {invoice.invoice_number}", "b2b_payment", [
+        ("1000", amount, 0),
+        ("1100", 0, amount),
+        ("2200", amount, 0),
+        ("4000", 0, amount),
     ], user_id=current_user.id)
 
-    db.commit()
+    await db.commit()
     return {"ok": True, "status": invoice.status}
 
 
 # ── CONSIGNMENT API ────────────────────────────────────
 @router.get("/api/consignments")
-def get_consignments(db: Session = Depends(get_db)):
-    conses = db.query(Consignment).order_by(Consignment.created_at.desc()).all()
+async def get_consignments(db: AsyncSession = Depends(get_async_session)):
+    _r = await db.execute(
+        select(Consignment)
+        .options(
+            selectinload(Consignment.client),
+            selectinload(Consignment.items).selectinload(ConsignmentItem.product),
+        )
+        .order_by(Consignment.created_at.desc())
+    )
+    conses = _r.scalars().all()
     return [
         {
             "id":         c.id,
@@ -570,12 +634,20 @@ def get_consignments(db: Session = Depends(get_db)):
     ]
 
 @router.post("/api/consignments/{cons_id}/settle")
-def settle_consignment(cons_id: int, data: ConsignmentSettle, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+async def settle_consignment(cons_id: int, data: ConsignmentSettle, db: AsyncSession = Depends(get_async_session), current_user: User = Depends(get_current_user)):
     """
     Settle consignment — for each qty sold, move from Deferred Revenue → Sales Revenue.
     Returned items restore stock.
     """
-    cons = db.query(Consignment).filter(Consignment.id == cons_id).first()
+    _r = await db.execute(
+        select(Consignment)
+        .where(Consignment.id == cons_id)
+        .options(
+            selectinload(Consignment.items).selectinload(ConsignmentItem.product),
+            selectinload(Consignment.client),
+        )
+    )
+    cons = _r.scalar_one_or_none()
     if not cons:
         raise HTTPException(status_code=404, detail="Consignment not found")
     if cons.status == "closed":
@@ -583,7 +655,12 @@ def settle_consignment(cons_id: int, data: ConsignmentSettle, db: Session = Depe
 
     total_revenue = 0
     for entry in data.items:
-        ci = db.query(ConsignmentItem).filter(ConsignmentItem.id == entry["consignment_item_id"]).first()
+        ci_r = await db.execute(
+            select(ConsignmentItem)
+            .where(ConsignmentItem.id == entry["consignment_item_id"])
+            .options(selectinload(ConsignmentItem.product))
+        )
+        ci = ci_r.scalar_one_or_none()
         if not ci: continue
         qty_sold     = float(entry.get("qty_sold", 0))
         qty_returned = float(entry.get("qty_returned", 0))
@@ -610,11 +687,11 @@ def settle_consignment(cons_id: int, data: ConsignmentSettle, db: Session = Depe
         amount = round(total_revenue, 2)
         # Deferred Revenue → Sales Revenue (earned on settlement)
         # Cash ← AR (client paid for what they sold)
-        _post_journal(db, f"Consignment settlement - {cons.ref_number}", "consignment_settlement", [
-            ("1000", amount, 0),    # Debit Cash
-            ("1100", 0, amount),    # Credit AR
-            ("2200", amount, 0),    # Debit Deferred Revenue
-            ("4000", 0, amount),    # Credit Sales Revenue
+        await _post_journal(db, f"Consignment settlement - {cons.ref_number}", "consignment_settlement", [
+            ("1000", amount, 0),
+            ("1100", 0, amount),
+            ("2200", amount, 0),
+            ("4000", 0, amount),
         ], user_id=current_user.id)
         cons.client.outstanding = Decimal(str(max(0, float(cons.client.outstanding) - amount)))
 
@@ -626,22 +703,27 @@ def settle_consignment(cons_id: int, data: ConsignmentSettle, db: Session = Depe
     if all_done:
         cons.settled_at = datetime.utcnow()
 
-    db.commit()
+    await db.commit()
     return {"ok": True, "total_revenue": round(total_revenue, 2), "status": cons.status}
 
 
 class ConsignmentPayment(BaseModel):
     amount:      float
-    month_label: Optional[str] = None   # e.g. "March 2025"
+    month_label: Optional[str] = None
     notes:       Optional[str] = None
 
 @router.post("/api/invoices/{invoice_id}/consignment-payment", dependencies=[Depends(require_permission("action_b2b_collect"))])
-def consignment_payment(invoice_id: int, data: ConsignmentPayment, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+async def consignment_payment(invoice_id: int, data: ConsignmentPayment, db: AsyncSession = Depends(get_async_session), current_user: User = Depends(get_current_user)):
     """
     Record a cash payment from a consignment client.
     Moves amount: Deferred Revenue → Sales Revenue, Cash ← AR.
     """
-    invoice = db.query(B2BInvoice).filter(B2BInvoice.id == invoice_id).first()
+    _r = await db.execute(
+        select(B2BInvoice)
+        .where(B2BInvoice.id == invoice_id)
+        .options(selectinload(B2BInvoice.client))
+    )
+    invoice = _r.scalar_one_or_none()
     if not invoice:
         raise HTTPException(status_code=404, detail="Invoice not found")
     if invoice.invoice_type != "consignment":
@@ -663,36 +745,37 @@ def consignment_payment(invoice_id: int, data: ConsignmentPayment, db: Session =
     if data.month_label:
         note += f" - {data.month_label}"
 
-    _post_journal(db, note, "consignment_payment", [
-        ("1000", amount, 0),    # Debit Cash
-        ("1100", 0, amount),    # Credit AR
-        ("2200", amount, 0),    # Debit Deferred Revenue
-        ("4000", 0, amount),    # Credit Sales Revenue
+    await _post_journal(db, note, "consignment_payment", [
+        ("1000", amount, 0),
+        ("1100", 0, amount),
+        ("2200", amount, 0),
+        ("4000", 0, amount),
     ], user_id=current_user.id)
 
-    db.commit()
+    await db.commit()
     return {"ok": True, "invoice_number": invoice.invoice_number, "amount": amount, "status": invoice.status}
 
 @router.post("/api/refunds")
-def create_client_refund(data: ClientRefundCreate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    client = db.query(B2BClient).filter(B2BClient.id == data.client_id, B2BClient.is_active == True).first()
+async def create_client_refund(data: ClientRefundCreate, db: AsyncSession = Depends(get_async_session), current_user: User = Depends(get_current_user)):
+    _r = await db.execute(select(B2BClient).where(B2BClient.id == data.client_id, B2BClient.is_active == True))
+    client = _r.scalar_one_or_none()
     if not client:
         raise HTTPException(status_code=404, detail="Client not found")
     if not data.items:
         raise HTTPException(status_code=400, detail="Refund must have at least one item")
 
-    refund_number = _next_refund_number(db)
+    refund_number = await _next_refund_number(db)
     subtotal = 0.0
     for item in data.items:
-        product = db.query(Product).filter(Product.id == item.product_id).first()
+        _r = await db.execute(select(Product).where(Product.id == item.product_id))
+        product = _r.scalar_one_or_none()
         if not product:
             raise HTTPException(status_code=404, detail=f"Product not found: {item.product_id}")
         if item.qty <= 0:
             raise HTTPException(status_code=400, detail="Refund quantities must be greater than 0")
         if item.unit_price < 0:
             raise HTTPException(status_code=400, detail="Unit price cannot be negative")
-        line_total = round(item.qty * item.unit_price, 2)
-        subtotal += line_total
+        subtotal += round(item.qty * item.unit_price, 2)
 
     subtotal = round(subtotal, 2)
     discount_pct = _client_discount_pct(client)
@@ -712,10 +795,11 @@ def create_client_refund(data: ClientRefundCreate, db: Session = Depends(get_db)
         total=total,
         notes=(data.notes or "").strip() or None,
     )
-    db.add(refund); db.flush()
+    db.add(refund); await db.flush()
 
     for item in data.items:
-        product = db.query(Product).filter(Product.id == item.product_id).first()
+        _r = await db.execute(select(Product).where(Product.id == item.product_id))
+        product = _r.scalar_one_or_none()
         line_total = round(item.qty * item.unit_price, 2)
         db.add(B2BRefundItem(
             refund_id=refund.id,
@@ -741,12 +825,12 @@ def create_client_refund(data: ClientRefundCreate, db: Session = Depends(get_db)
     desc = f"B2B client refund - {refund_number} - {client.name}"
     if note:
         desc += f" - {note}"
-    _post_journal(db, desc, "b2b_refund", [
+    await _post_journal(db, desc, "b2b_refund", [
         ("2200", total, 0),
         ("1100", 0, total),
     ], user_id=current_user.id)
 
-    db.commit()
+    await db.commit()
     return {
         "ok": True,
         "refund_id": refund.id,
@@ -762,35 +846,40 @@ def create_client_refund(data: ClientRefundCreate, db: Session = Depends(get_db)
 
 # ── STATS ──────────────────────────────────────────────
 @router.get("/api/stats")
-def get_stats(db: Session = Depends(get_db)):
+async def get_stats(db: AsyncSession = Depends(get_async_session)):
+    r1 = await db.execute(select(func.count(B2BClient.id)).where(B2BClient.is_active == True))
+    r2 = await db.execute(select(func.sum(B2BClient.outstanding)).where(B2BClient.is_active == True))
+    r3 = await db.execute(select(func.count(B2BInvoice.id)).where(
+        B2BInvoice.status.in_(["unpaid","partial"]),
+        B2BInvoice.invoice_type.in_(["cash", "full_payment"]),
+    ))
+    r4 = await db.execute(select(func.count(Consignment.id)).where(Consignment.status == "active"))
     return {
-        "total_clients":     db.query(func.count(B2BClient.id)).filter(B2BClient.is_active == True).scalar() or 0,
-        "total_outstanding": float(db.query(func.sum(B2BClient.outstanding)).filter(B2BClient.is_active == True).scalar() or 0),
-        "unpaid_invoices":   db.query(func.count(B2BInvoice.id)).filter(
-            B2BInvoice.status.in_(["unpaid","partial"]),
-            B2BInvoice.invoice_type.in_(["cash", "full_payment"]),
-        ).scalar() or 0,
-        "active_consign":    db.query(func.count(Consignment.id)).filter(Consignment.status == "active").scalar() or 0,
+        "total_clients":     r1.scalar() or 0,
+        "total_outstanding": float(r2.scalar() or 0),
+        "unpaid_invoices":   r3.scalar() or 0,
+        "active_consign":    r4.scalar() or 0,
     }
 
 @router.get("/api/products-list")
-def products_list(client_id: int = None, db: Session = Depends(get_db)):
-    products = db.query(Product).filter(Product.is_active == True).order_by(Product.name).all()
-    # Build custom-price lookup for this client
+async def products_list(client_id: int = None, db: AsyncSession = Depends(get_async_session)):
+    _r = await db.execute(select(Product).where(Product.is_active == True).order_by(Product.name))
+    products = _r.scalars().all()
     custom = {}
     if client_id:
-        for cp in db.query(B2BClientPrice).filter(B2BClientPrice.client_id == client_id).all():
+        cp_r = await db.execute(select(B2BClientPrice).where(B2BClientPrice.client_id == client_id))
+        for cp in cp_r.scalars().all():
             custom[cp.product_id] = float(cp.price)
     return [
         {
-            "id":           p.id,
-            "name":         p.name,
-            "sku":          p.sku,
-            "price":        custom.get(p.id, float(p.price)),
+            "id":            p.id,
+            "name":          p.name,
+            "sku":           p.sku,
+            "price":         custom.get(p.id, float(p.price)),
             "default_price": float(p.price),
-            "has_custom":   p.id in custom,
-            "stock":        float(p.stock),
-            "unit":         p.unit,
+            "has_custom":    p.id in custom,
+            "stock":         float(p.stock),
+            "unit":          p.unit,
         }
         for p in products
     ]
@@ -798,11 +887,17 @@ def products_list(client_id: int = None, db: Session = Depends(get_db)):
 
 # ── CLIENT PRICE LIST API ──────────────────────────────
 @router.get("/api/clients/{client_id}/prices")
-def get_client_prices(client_id: int, db: Session = Depends(get_db)):
-    client = db.query(B2BClient).filter(B2BClient.id == client_id).first()
+async def get_client_prices(client_id: int, db: AsyncSession = Depends(get_async_session)):
+    _r = await db.execute(select(B2BClient).where(B2BClient.id == client_id))
+    client = _r.scalar_one_or_none()
     if not client:
         raise HTTPException(status_code=404, detail="Client not found")
-    prices = db.query(B2BClientPrice).filter(B2BClientPrice.client_id == client_id).all()
+    cp_r = await db.execute(
+        select(B2BClientPrice)
+        .where(B2BClientPrice.client_id == client_id)
+        .options(selectinload(B2BClientPrice.product))
+    )
+    prices = cp_r.scalars().all()
     return [
         {
             "id":            cp.id,
@@ -821,95 +916,107 @@ class ClientPriceUpsert(BaseModel):
     price:      float
 
 @router.put("/api/clients/{client_id}/prices")
-def upsert_client_price(client_id: int, data: ClientPriceUpsert,
-                         db: Session = Depends(get_db),
-                         current_user: User = Depends(get_current_user)):
-    client = db.query(B2BClient).filter(B2BClient.id == client_id).first()
+async def upsert_client_price(client_id: int, data: ClientPriceUpsert,
+                               db: AsyncSession = Depends(get_async_session),
+                               current_user: User = Depends(get_current_user)):
+    _r = await db.execute(select(B2BClient).where(B2BClient.id == client_id))
+    client = _r.scalar_one_or_none()
     if not client:
         raise HTTPException(status_code=404, detail="Client not found")
     if data.price < 0:
         raise HTTPException(status_code=400, detail="Price must be >= 0")
-    cp = db.query(B2BClientPrice).filter(
+    cp_r = await db.execute(select(B2BClientPrice).where(
         B2BClientPrice.client_id == client_id,
         B2BClientPrice.product_id == data.product_id,
-    ).first()
+    ))
+    cp = cp_r.scalar_one_or_none()
     if cp:
         cp.price = data.price
     else:
         db.add(B2BClientPrice(client_id=client_id, product_id=data.product_id, price=data.price))
-    db.commit()
+    await db.commit()
     return {"ok": True}
 
 
 @router.delete("/api/clients/{client_id}/prices/{product_id}")
-def delete_client_price(client_id: int, product_id: int,
-                         db: Session = Depends(get_db),
-                         current_user: User = Depends(get_current_user)):
-    cp = db.query(B2BClientPrice).filter(
+async def delete_client_price(client_id: int, product_id: int,
+                               db: AsyncSession = Depends(get_async_session),
+                               current_user: User = Depends(get_current_user)):
+    cp_r = await db.execute(select(B2BClientPrice).where(
         B2BClientPrice.client_id == client_id,
         B2BClientPrice.product_id == product_id,
-    ).first()
+    ))
+    cp = cp_r.scalar_one_or_none()
     if cp:
-        db.delete(cp)
-        db.commit()
+        await db.delete(cp)
+        await db.commit()
     return {"ok": True}
 
 @router.get("/api/refund-products/{client_id}")
-def refund_products(client_id: int, db: Session = Depends(get_db)):
-    client = db.query(B2BClient).filter(B2BClient.id == client_id, B2BClient.is_active == True).first()
+async def refund_products(client_id: int, db: AsyncSession = Depends(get_async_session)):
+    _r = await db.execute(select(B2BClient).where(B2BClient.id == client_id, B2BClient.is_active == True))
+    client = _r.scalar_one_or_none()
     if not client:
         raise HTTPException(status_code=404, detail="Client not found")
 
     latest_prices = {}
-    items = (
-        db.query(B2BInvoiceItem, B2BInvoice)
+    items_r = await db.execute(
+        select(B2BInvoiceItem, B2BInvoice)
         .join(B2BInvoice, B2BInvoice.id == B2BInvoiceItem.invoice_id)
-        .filter(B2BInvoice.client_id == client_id)
+        .where(B2BInvoice.client_id == client_id)
         .order_by(B2BInvoice.created_at.desc(), B2BInvoice.id.desc(), B2BInvoiceItem.id.desc())
-        .all()
     )
-    for item, invoice in items:
+    for item, _inv in items_r.all():
         if item.product_id not in latest_prices:
             latest_prices[item.product_id] = float(item.unit_price)
 
-    products = db.query(Product).filter(Product.is_active == True).order_by(Product.name).all()
+    prod_r = await db.execute(select(Product).where(Product.is_active == True).order_by(Product.name))
+    products = prod_r.scalars().all()
     return [
         {
-            "id": p.id,
-            "name": p.name,
-            "sku": p.sku,
+            "id":    p.id,
+            "name":  p.name,
+            "sku":   p.sku,
             "price": latest_prices.get(p.id, float(p.price)),
             "stock": float(p.stock),
-            "unit": p.unit,
+            "unit":  p.unit,
         }
         for p in products
     ]
 
 @router.get("/api/refunds")
-def get_refunds(client_id: int = None, db: Session = Depends(get_db)):
-    query = db.query(B2BRefund)
+async def get_refunds(client_id: int = None, db: AsyncSession = Depends(get_async_session)):
+    stmt = (
+        select(B2BRefund)
+        .options(
+            selectinload(B2BRefund.client),
+            selectinload(B2BRefund.items).selectinload(B2BRefundItem.product),
+        )
+        .order_by(B2BRefund.created_at.desc(), B2BRefund.id.desc())
+    )
     if client_id:
-        query = query.filter(B2BRefund.client_id == client_id)
-    refunds = query.order_by(B2BRefund.created_at.desc(), B2BRefund.id.desc()).all()
+        stmt = stmt.where(B2BRefund.client_id == client_id)
+    _r = await db.execute(stmt)
+    refunds = _r.scalars().all()
     return [
         {
-            "id": r.id,
+            "id":           r.id,
             "refund_number": r.refund_number,
-            "client": r.client.name if r.client else "—",
-            "client_id": r.client_id,
-            "subtotal": float(r.subtotal),
-            "discount": float(r.discount),
+            "client":       r.client.name if r.client else "—",
+            "client_id":    r.client_id,
+            "subtotal":     float(r.subtotal),
+            "discount":     float(r.discount),
             "discount_pct": round(float(r.discount) / float(r.subtotal) * 100, 1) if float(r.subtotal) > 0 else 0,
-            "total": float(r.total),
-            "notes": r.notes or "",
-            "created_at": r.created_at.strftime("%Y-%m-%d %H:%M") if r.created_at else "—",
+            "total":        float(r.total),
+            "notes":        r.notes or "",
+            "created_at":   r.created_at.strftime("%Y-%m-%d %H:%M") if r.created_at else "—",
             "items": [
                 {
-                    "product": item.product.name if item.product else "—",
-                    "sku": item.product.sku if item.product else "—",
-                    "qty": float(item.qty),
+                    "product":    item.product.name if item.product else "—",
+                    "sku":        item.product.sku if item.product else "—",
+                    "qty":        float(item.qty),
                     "unit_price": float(item.unit_price),
-                    "total": float(item.total),
+                    "total":      float(item.total),
                 }
                 for item in r.items
             ],
@@ -919,12 +1026,20 @@ def get_refunds(client_id: int = None, db: Session = Depends(get_db)):
 
 
 @router.get("/invoice/{invoice_id}/print", response_class=HTMLResponse)
-def print_invoice(invoice_id: int, db: Session = Depends(get_db)):
-    inv = db.query(B2BInvoice).filter(B2BInvoice.id == invoice_id).first()
+async def print_invoice(invoice_id: int, db: AsyncSession = Depends(get_async_session)):
+    _r = await db.execute(
+        select(B2BInvoice)
+        .where(B2BInvoice.id == invoice_id)
+        .options(
+            selectinload(B2BInvoice.client),
+            selectinload(B2BInvoice.items).selectinload(B2BInvoiceItem.product),
+        )
+    )
+    inv = _r.scalar_one_or_none()
     if not inv:
         raise HTTPException(status_code=404, detail="Invoice not found")
-    client = db.query(B2BClient).filter(B2BClient.id == inv.client_id).first()
-    items  = db.query(B2BInvoiceItem).filter(B2BInvoiceItem.invoice_id == invoice_id).all()
+    client = inv.client
+    items  = inv.items
 
     rows_html = ""
     for item in items:
@@ -1198,8 +1313,16 @@ table.totals .amount {{ text-align: right; font-family: monospace; font-weight: 
 
 
 @router.get("/refund/{refund_id}/print", response_class=HTMLResponse)
-def print_refund(refund_id: int, db: Session = Depends(get_db)):
-    refund = db.query(B2BRefund).filter(B2BRefund.id == refund_id).first()
+async def print_refund(refund_id: int, db: AsyncSession = Depends(get_async_session)):
+    _r = await db.execute(
+        select(B2BRefund)
+        .where(B2BRefund.id == refund_id)
+        .options(
+            selectinload(B2BRefund.client),
+            selectinload(B2BRefund.items).selectinload(B2BRefundItem.product),
+        )
+    )
+    refund = _r.scalar_one_or_none()
     if not refund:
         raise HTTPException(status_code=404, detail="Refund not found")
 
@@ -1467,23 +1590,24 @@ table.totals .amount {{ text-align: right; font-family: monospace; font-weight: 
 
 # ── CLIENT STATEMENT ───────────────────────────────────
 @router.get("/api/clients/{client_id}/statement")
-def client_statement_data(client_id: int, db: Session = Depends(get_db)):
-    client = db.query(B2BClient).filter(B2BClient.id == client_id).first()
+async def client_statement_data(client_id: int, db: AsyncSession = Depends(get_async_session)):
+    _r = await db.execute(select(B2BClient).where(B2BClient.id == client_id))
+    client = _r.scalar_one_or_none()
     if not client:
         raise HTTPException(status_code=404, detail="Client not found")
 
-    invoices = (
-        db.query(B2BInvoice)
-        .filter(B2BInvoice.client_id == client_id)
+    inv_r = await db.execute(
+        select(B2BInvoice)
+        .where(B2BInvoice.client_id == client_id)
         .order_by(B2BInvoice.created_at)
-        .all()
     )
-    refunds = (
-        db.query(B2BRefund)
-        .filter(B2BRefund.client_id == client_id)
+    invoices = inv_r.scalars().all()
+    ref_r = await db.execute(
+        select(B2BRefund)
+        .where(B2BRefund.client_id == client_id)
         .order_by(B2BRefund.created_at)
-        .all()
     )
+    refunds = ref_r.scalars().all()
 
     # Merge into chronological transactions
     txns = []
@@ -1546,23 +1670,24 @@ def client_statement_data(client_id: int, db: Session = Depends(get_db)):
 
 
 @router.get("/client/{client_id}/statement", response_class=HTMLResponse)
-def client_statement_print(client_id: int, db: Session = Depends(get_db)):
-    client = db.query(B2BClient).filter(B2BClient.id == client_id).first()
+async def client_statement_print(client_id: int, db: AsyncSession = Depends(get_async_session)):
+    _r = await db.execute(select(B2BClient).where(B2BClient.id == client_id))
+    client = _r.scalar_one_or_none()
     if not client:
         raise HTTPException(status_code=404, detail="Client not found")
 
-    invoices = (
-        db.query(B2BInvoice)
-        .filter(B2BInvoice.client_id == client_id)
+    inv_r = await db.execute(
+        select(B2BInvoice)
+        .where(B2BInvoice.client_id == client_id)
         .order_by(B2BInvoice.created_at)
-        .all()
     )
-    refunds = (
-        db.query(B2BRefund)
-        .filter(B2BRefund.client_id == client_id)
+    invoices = inv_r.scalars().all()
+    ref_r = await db.execute(
+        select(B2BRefund)
+        .where(B2BRefund.client_id == client_id)
         .order_by(B2BRefund.created_at)
-        .all()
     )
+    refunds = ref_r.scalars().all()
 
     txns = []
     for inv in invoices:
@@ -2355,24 +2480,12 @@ td.name{color:var(--text);font-weight:600;}
 <div class="toast" id="toast"></div>
 
 <script>
-  const __erpToken = localStorage.getItem("token");
-  const __erpUserRole = localStorage.getItem("user_role") || "";
-  const __erpUserPermissions = new Set(
-      (localStorage.getItem("user_permissions") || "")
-          .split(",")
-          .map(p => p.trim())
-          .filter(Boolean)
-  );
-  const __erpFetch = window.fetch.bind(window);
-  window.fetch = (input, init = {}) => {
-      const url = typeof input === "string" ? input : (input && input.url) || "";
-      const isRelativeUrl = typeof url === "string" && !(url.startsWith("http://") || url.startsWith("https://"));
-      const headers = new Headers(init.headers || (input instanceof Request ? input.headers : undefined));
-      if(__erpToken && isRelativeUrl && !headers.has("Authorization")){
-          headers.set("Authorization", "Bearer " + __erpToken);
-      }
-      return __erpFetch(input, {...init, headers});
-  };
+  // Auth guard: redirect to login if the readable session cookie is absent
+  function _hasAuthCookie() {
+      return document.cookie.split(";").some(c => c.trim().startsWith("logged_in="));
+  }
+  if (!_hasAuthCookie()) { window.location.href = "/"; }
+
   function setModeButton(isLight){
     const btn = document.getElementById("mode-btn");
     if(btn) btn.innerText = isLight ? "☀️" : "🌙";
@@ -2387,84 +2500,45 @@ function initializeColorMode(){
     document.body.classList.toggle("light", isLight);
     setModeButton(isLight);
 }
-function setUserInfo(){
-    const name = localStorage.getItem("user_name") || "Admin";
-    const avatar = document.getElementById("user-avatar");
-    const userName = document.getElementById("user-name");
-    if(avatar) avatar.innerText = name.charAt(0).toUpperCase();
-    if(userName) userName.innerText = name;
+async function initUser() {
+    try {
+        const r = await fetch("/auth/me");
+        if (!r.ok) { window.location.href = "/"; return; }
+        const u = await r.json();
+        const nameEl = document.getElementById("user-name");
+        const avatarEl = document.getElementById("user-avatar");
+        if (nameEl) nameEl.innerText = u.name;
+        if (avatarEl) avatarEl.innerText = u.name.charAt(0).toUpperCase();
+        return u;
+    } catch(e) { window.location.href = "/"; }
 }
-function logout(){
-    localStorage.removeItem("token");
-    localStorage.removeItem("user_name");
-    localStorage.removeItem("user_role");
-    localStorage.removeItem("user_permissions");
-    document.cookie = "access_token=; Max-Age=0; path=/; SameSite=Lax";
+async function logout(){
+    await fetch("/auth/logout", { method: "POST" });
     window.location.href = "/";
 }
-  function requirePageAccess(permission){
-      if(!__erpToken){
-          window.location.href = "/";
-          throw new Error("Not authenticated");
-      }
-      if(__erpUserRole === "admin" || __erpUserPermissions.has(permission)) return;
-      document.body.innerHTML = `<div style="display:flex;align-items:center;justify-content:center;height:100vh;flex-direction:column;gap:16px;color:#445066;font-family:'Outfit',sans-serif;background:#060810"><div style="font-size:48px">🔒</div><div style="font-size:20px;font-weight:800;color:#f0f4ff">Access Restricted</div><div style="font-size:14px">You do not have permission to open this page.</div><a href="/home" style="color:#00ff9d;text-decoration:none;font-weight:700">Back to Home</a></div>`;
-      throw new Error("Access denied");
+  function hasPermission(permission, u){
+      const role = u ? (u.role || "") : "";
+      const perms = new Set(u ? (u.permissions || []) : []);
+      return role === "admin" || perms.has(permission);
   }
-  function applyNavPermissions(){
-      const navPermissions = {
-          "/home": null,
-          "/dashboard": "page_dashboard",
-          "/pos": "page_pos",
-          "/b2b/": "page_b2b",
-          "/inventory/": "page_inventory",
-          "/products/": "page_products",
-          "/customers-mgmt/": "page_customers",
-          "/suppliers/": "page_suppliers",
-          "/production/": "page_production",
-          "/farm/": "page_farm",
-          "/hr/": "page_hr",
-          "/accounting/": "page_accounting",
-          "/reports/": "page_reports",
-          "/import": "page_import",
-          "/users/": "admin_only"
-      };
-      document.querySelectorAll("a.nav-link[href]").forEach(link => {
-          const href = link.getAttribute("href");
-          const requirement = navPermissions[href];
-          if(requirement === undefined || requirement === null) return;
-          if(requirement === "admin_only"){
-              if(__erpUserRole !== "admin") link.style.display = "none";
-              return;
-          }
-          if(__erpUserRole !== "admin" && !__erpUserPermissions.has(requirement)){
-              link.style.display = "none";
-          }
-      });
-  }
-  function hasPermission(permission){
-      return __erpUserRole === "admin" || __erpUserPermissions.has(permission);
-  }
-  function configureB2BPermissions(){
-      if(!hasPermission("tab_b2b_clients")){
+  function configureB2BPermissions(u){
+      isAdmin = u.role === "admin";
+      if(!hasPermission("tab_b2b_clients", u)){
           let el = document.getElementById("tab-clients");
           if(el) el.style.display = "none";
       }
-    if(!hasPermission("tab_b2b_invoices")){
+    if(!hasPermission("tab_b2b_invoices", u)){
           let el = document.getElementById("tab-invoices");
           if(el) el.style.display = "none";
           let refundEl = document.getElementById("tab-refunds");
           if(refundEl) refundEl.style.display = "none";
       }
-      if(!hasPermission("tab_b2b_clients") && hasPermission("tab_b2b_invoices")){
+      if(!hasPermission("tab_b2b_clients", u) && hasPermission("tab_b2b_invoices", u)){
           setTimeout(() => switchTab("invoices"), 0);
       }
   }
-  requirePageAccess("page_b2b");
-  applyNavPermissions();
   initializeColorMode();
-  setUserInfo();
-  configureB2BPermissions();
+  initUser().then(u => { if(u) configureB2BPermissions(u); });
 let allProducts   = [];
 let refundProducts = [];
 let allClients    = [];
@@ -2476,7 +2550,7 @@ let editingInvoiceId = null;
 let payingInvoiceId  = null;
 let settlingConsId   = null;
 let searchTimer      = null;
-let isAdmin = localStorage.getItem("user_role") === "admin";
+let isAdmin = false; // set by initUser() via configureB2BPermissions(u)
 
 async function init(){
     // Seed deferred revenue account

@@ -1,12 +1,13 @@
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import HTMLResponse
-from sqlalchemy.orm import Session
-from sqlalchemy import func
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
+from sqlalchemy import func, select
 from typing import Optional, List
 from pydantic import BaseModel
 from datetime import date
 
-from app.database import get_db
+from app.database import get_async_session
 from app.core.log import record
 from app.core.permissions import get_current_user, require_permission
 from app.models.farm import Farm, FarmDelivery, FarmDeliveryItem, WeatherLog
@@ -38,19 +39,25 @@ class DeliveryCreate(BaseModel):
 
 # ── SEED FARMS ─────────────────────────────────────────
 @router.post("/api/seed-farms")
-def seed_farms(db: Session = Depends(get_db)):
-    if db.query(Farm).count() > 0:
+async def seed_farms(db: AsyncSession = Depends(get_async_session)):
+    cnt_result = await db.execute(select(func.count()).select_from(Farm))
+    count = cnt_result.scalar()
+    if count > 0:
         return {"message": "Farms already exist"}
     db.add(Farm(name="Organic Farm",      location="Nuweiba, South Sinai"))
     db.add(Farm(name="Regenerative Farm", location="Nuweiba, South Sinai"))
-    db.commit()
+    await db.commit()
     return {"message": "2 farms created"}
 
 
 # ── FARM API ───────────────────────────────────────────
 @router.get("/api/farms")
-def get_farms(db: Session = Depends(get_db)):
-    farms = db.query(Farm).filter(Farm.is_active == 1).order_by(Farm.name).all()
+async def get_farms(db: AsyncSession = Depends(get_async_session)):
+    result = await db.execute(
+        select(Farm).where(Farm.is_active == 1).order_by(Farm.name)
+        .options(selectinload(Farm.deliveries))
+    )
+    farms = result.scalars().all()
     return [
         {
             "id":             f.id,
@@ -62,22 +69,35 @@ def get_farms(db: Session = Depends(get_db)):
     ]
 
 @router.post("/api/farms")
-def create_farm(name: str, location: str = "", db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    if db.query(Farm).filter(Farm.name == name).first():
+async def create_farm(name: str, location: str = "", db: AsyncSession = Depends(get_async_session), current_user: User = Depends(get_current_user)):
+    result = await db.execute(select(Farm).where(Farm.name == name))
+    if result.scalar_one_or_none():
         raise HTTPException(status_code=400, detail="Farm name already exists")
     f = Farm(name=name, location=location)
-    db.add(f); db.commit(); db.refresh(f)
+    db.add(f); await db.commit(); await db.refresh(f)
     return {"id": f.id, "name": f.name}
 
 
 # ── DELIVERY API ───────────────────────────────────────
 @router.get("/api/deliveries")
-def get_deliveries(farm_id: int = None, skip: int = 0, limit: int = 50, db: Session = Depends(get_db)):
-    query = db.query(FarmDelivery)
+async def get_deliveries(farm_id: int = None, skip: int = 0, limit: int = 50, db: AsyncSession = Depends(get_async_session)):
+    base_where = []
     if farm_id:
-        query = query.filter(FarmDelivery.farm_id == farm_id)
-    total      = query.count()
-    deliveries = query.order_by(FarmDelivery.delivery_date.desc(), FarmDelivery.created_at.desc()).offset(skip).limit(limit).all()
+        base_where.append(FarmDelivery.farm_id == farm_id)
+    cnt_result = await db.execute(select(func.count()).select_from(FarmDelivery).where(*base_where))
+    total = cnt_result.scalar()
+    stmt = (
+        select(FarmDelivery)
+        .options(
+            selectinload(FarmDelivery.items).selectinload(FarmDeliveryItem.product),
+            selectinload(FarmDelivery.farm),
+        )
+        .where(*base_where)
+        .order_by(FarmDelivery.delivery_date.desc(), FarmDelivery.created_at.desc())
+        .offset(skip).limit(limit)
+    )
+    result = await db.execute(stmt)
+    deliveries = result.scalars().all()
     return {
         "total": total,
         "deliveries": [
@@ -109,14 +129,16 @@ def get_deliveries(farm_id: int = None, skip: int = 0, limit: int = 50, db: Sess
     }
 
 @router.post("/api/deliveries")
-def create_delivery(data: DeliveryCreate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    farm = db.query(Farm).filter(Farm.id == data.farm_id).first()
+async def create_delivery(data: DeliveryCreate, db: AsyncSession = Depends(get_async_session), current_user: User = Depends(get_current_user)):
+    result = await db.execute(select(Farm).where(Farm.id == data.farm_id))
+    farm = result.scalar_one_or_none()
     if not farm:
         raise HTTPException(status_code=404, detail="Farm not found")
     if not data.items:
         raise HTTPException(status_code=400, detail="Delivery must have at least one item")
 
-    max_id = db.query(func.max(FarmDelivery.id)).scalar() or 0
+    max_id_result = await db.execute(select(func.max(FarmDelivery.id)))
+    max_id = max_id_result.scalar() or 0
     number = f"FD-{str(max_id + 1).zfill(4)}"
 
     delivery = FarmDelivery(
@@ -128,10 +150,11 @@ def create_delivery(data: DeliveryCreate, db: Session = Depends(get_db), current
         quality_notes=data.quality_notes,
         notes=data.notes,
     )
-    db.add(delivery); db.flush()
+    db.add(delivery); await db.flush()
 
     for item in data.items:
-        product = db.query(Product).filter(Product.id == item.product_id).first()
+        prod_result = await db.execute(select(Product).where(Product.id == item.product_id))
+        product = prod_result.scalar_one_or_none()
         if not product:
             raise HTTPException(status_code=404, detail=f"Product not found: {item.product_id}")
         db.add(FarmDeliveryItem(
@@ -155,22 +178,29 @@ def create_delivery(data: DeliveryCreate, db: Session = Depends(get_db), current
     record(db, "Farm", "create_delivery",
            f"Delivery {number} from {farm.name} — {len(data.items)} product(s)",
            user=current_user, ref_type="farm_delivery", ref_id=delivery.id)
-    db.commit(); db.refresh(delivery)
+    await db.commit(); await db.refresh(delivery)
     return {"id": delivery.id, "delivery_number": number, "items_count": len(data.items)}
 
 @router.put("/api/deliveries/{delivery_id}")
-def edit_delivery(delivery_id: int, data: DeliveryCreate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    delivery = db.query(FarmDelivery).filter(FarmDelivery.id == delivery_id).first()
+async def edit_delivery(delivery_id: int, data: DeliveryCreate, db: AsyncSession = Depends(get_async_session), current_user: User = Depends(get_current_user)):
+    del_result = await db.execute(
+        select(FarmDelivery)
+        .options(selectinload(FarmDelivery.items))
+        .where(FarmDelivery.id == delivery_id)
+    )
+    delivery = del_result.scalar_one_or_none()
     if not delivery:
         raise HTTPException(status_code=404, detail="Delivery not found")
 
-    farm = db.query(Farm).filter(Farm.id == data.farm_id).first()
+    farm_result = await db.execute(select(Farm).where(Farm.id == data.farm_id))
+    farm = farm_result.scalar_one_or_none()
     if not farm:
         raise HTTPException(status_code=404, detail="Farm not found")
 
     # Reverse old stock moves
     for item in delivery.items:
-        product = db.query(Product).filter(Product.id == item.product_id).first()
+        prod_result = await db.execute(select(Product).where(Product.id == item.product_id))
+        product = prod_result.scalar_one_or_none()
         if product:
             before = float(product.stock)
             after  = before - float(item.qty)
@@ -182,7 +212,7 @@ def edit_delivery(delivery_id: int, data: DeliveryCreate, db: Session = Depends(
                 ref_type="farm_intake_reversal", ref_id=delivery.id,
                 note=f"Edit reversal — {delivery.delivery_number}",
             ))
-        db.delete(item)
+        await db.delete(item)
 
     # Update delivery header
     delivery.farm_id       = data.farm_id
@@ -194,7 +224,8 @@ def edit_delivery(delivery_id: int, data: DeliveryCreate, db: Session = Depends(
 
     # Apply new items
     for item in data.items:
-        product = db.query(Product).filter(Product.id == item.product_id).first()
+        prod_result2 = await db.execute(select(Product).where(Product.id == item.product_id))
+        product = prod_result2.scalar_one_or_none()
         if not product:
             raise HTTPException(status_code=404, detail=f"Product not found: {item.product_id}")
         before = float(product.stock)
@@ -218,16 +249,22 @@ def edit_delivery(delivery_id: int, data: DeliveryCreate, db: Session = Depends(
     record(db, "Farm", "edit_delivery",
            f"Edited delivery {delivery.delivery_number}",
            user=current_user, ref_type="farm_delivery", ref_id=delivery.id)
-    db.commit()
+    await db.commit()
     return {"ok": True, "delivery_number": delivery.delivery_number}
 
 @router.delete("/api/deliveries/{delivery_id}")
-def delete_delivery(delivery_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    delivery = db.query(FarmDelivery).filter(FarmDelivery.id == delivery_id).first()
+async def delete_delivery(delivery_id: int, db: AsyncSession = Depends(get_async_session), current_user: User = Depends(get_current_user)):
+    del_result = await db.execute(
+        select(FarmDelivery)
+        .options(selectinload(FarmDelivery.items))
+        .where(FarmDelivery.id == delivery_id)
+    )
+    delivery = del_result.scalar_one_or_none()
     if not delivery:
         raise HTTPException(status_code=404, detail="Delivery not found")
     for item in delivery.items:
-        product = db.query(Product).filter(Product.id == item.product_id).first()
+        prod_result = await db.execute(select(Product).where(Product.id == item.product_id))
+        product = prod_result.scalar_one_or_none()
         if product:
             before = float(product.stock)
             after  = before - float(item.qty)
@@ -241,26 +278,30 @@ def delete_delivery(delivery_id: int, db: Session = Depends(get_db), current_use
     record(db, "Farm", "delete_delivery",
            f"Deleted delivery {delivery.delivery_number} — stock reversed",
            ref_type="farm_delivery", ref_id=delivery_id)
-    db.delete(delivery)
-    db.commit()
+    await db.delete(delivery)
+    await db.commit()
     return {"ok": True}
 
 
 # ── STATS API ──────────────────────────────────────────
 @router.get("/api/stats")
-def get_stats(db: Session = Depends(get_db)):
+async def get_stats(db: AsyncSession = Depends(get_async_session)):
     from datetime import datetime
     now         = datetime.utcnow()
     month_start = date(now.year, now.month, 1)
+    r1 = await db.execute(select(func.count(Farm.id)).where(Farm.is_active == 1))
+    r2 = await db.execute(select(func.count(FarmDelivery.id)))
+    r3 = await db.execute(select(func.count(FarmDelivery.id)).where(FarmDelivery.delivery_date >= month_start))
     return {
-        "total_farms":      db.query(func.count(Farm.id)).filter(Farm.is_active == 1).scalar() or 0,
-        "total_deliveries": db.query(func.count(FarmDelivery.id)).scalar() or 0,
-        "this_month":       db.query(func.count(FarmDelivery.id)).filter(FarmDelivery.delivery_date >= month_start).scalar() or 0,
+        "total_farms":      r1.scalar() or 0,
+        "total_deliveries": r2.scalar() or 0,
+        "this_month":       r3.scalar() or 0,
     }
 
 @router.get("/api/products-list")
-def products_list(db: Session = Depends(get_db)):
-    products = db.query(Product).filter(Product.is_active == True).order_by(Product.name).all()
+async def products_list(db: AsyncSession = Depends(get_async_session)):
+    result = await db.execute(select(Product).where(Product.is_active == True).order_by(Product.name))
+    products = result.scalars().all()
     return [{"id": p.id, "name": p.name, "sku": p.sku, "stock": float(p.stock), "unit": p.unit} for p in products]
 
 
@@ -275,11 +316,13 @@ class WeatherLogIn(BaseModel):
     notes:        Optional[str]  = None
 
 @router.get("/api/weather-logs")
-def get_weather_logs(farm_id: Optional[int] = None, limit: int = 90, db: Session = Depends(get_db)):
-    q = db.query(WeatherLog)
+async def get_weather_logs(farm_id: Optional[int] = None, limit: int = 90, db: AsyncSession = Depends(get_async_session)):
+    stmt = select(WeatherLog).options(selectinload(WeatherLog.farm))
     if farm_id:
-        q = q.filter(WeatherLog.farm_id == farm_id)
-    logs = q.order_by(WeatherLog.log_date.desc()).limit(limit).all()
+        stmt = stmt.where(WeatherLog.farm_id == farm_id)
+    stmt = stmt.order_by(WeatherLog.log_date.desc()).limit(limit)
+    result = await db.execute(stmt)
+    logs = result.scalars().all()
     return [
         {
             "id":           w.id,
@@ -296,8 +339,9 @@ def get_weather_logs(farm_id: Optional[int] = None, limit: int = 90, db: Session
     ]
 
 @router.post("/api/weather-logs")
-def create_weather_log(data: WeatherLogIn, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    farm = db.query(Farm).filter(Farm.id == data.farm_id).first()
+async def create_weather_log(data: WeatherLogIn, db: AsyncSession = Depends(get_async_session), current_user: User = Depends(get_current_user)):
+    farm_result = await db.execute(select(Farm).where(Farm.id == data.farm_id))
+    farm = farm_result.scalar_one_or_none()
     if not farm:
         raise HTTPException(status_code=404, detail="Farm not found")
     try:
@@ -313,12 +357,13 @@ def create_weather_log(data: WeatherLogIn, db: Session = Depends(get_db), curren
         humidity_pct=data.humidity_pct,
         notes=(data.notes or "").strip() or None,
     )
-    db.add(w); db.commit(); db.refresh(w)
+    db.add(w); await db.commit(); await db.refresh(w)
     return {"id": w.id, "log_date": str(w.log_date)}
 
 @router.put("/api/weather-logs/{log_id}")
-def update_weather_log(log_id: int, data: WeatherLogIn, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    w = db.query(WeatherLog).filter(WeatherLog.id == log_id).first()
+async def update_weather_log(log_id: int, data: WeatherLogIn, db: AsyncSession = Depends(get_async_session), current_user: User = Depends(get_current_user)):
+    result = await db.execute(select(WeatherLog).where(WeatherLog.id == log_id))
+    w = result.scalar_one_or_none()
     if not w:
         raise HTTPException(status_code=404, detail="Log not found")
     try:
@@ -331,15 +376,16 @@ def update_weather_log(log_id: int, data: WeatherLogIn, db: Session = Depends(ge
     w.rainfall_mm  = data.rainfall_mm
     w.humidity_pct = data.humidity_pct
     w.notes        = (data.notes or "").strip() or None
-    db.commit()
+    await db.commit()
     return {"ok": True}
 
 @router.delete("/api/weather-logs/{log_id}")
-def delete_weather_log(log_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    w = db.query(WeatherLog).filter(WeatherLog.id == log_id).first()
+async def delete_weather_log(log_id: int, db: AsyncSession = Depends(get_async_session), current_user: User = Depends(get_current_user)):
+    result = await db.execute(select(WeatherLog).where(WeatherLog.id == log_id))
+    w = result.scalar_one_or_none()
     if not w:
         raise HTTPException(status_code=404, detail="Log not found")
-    db.delete(w); db.commit()
+    await db.delete(w); await db.commit()
     return {"ok": True}
 
 
@@ -785,24 +831,12 @@ td.name{color:var(--text);font-weight:600;}
 <div class="toast" id="toast"></div>
 
 <script>
-  const __erpToken = localStorage.getItem("token");
-  const __erpUserRole = localStorage.getItem("user_role") || "";
-  const __erpUserPermissions = new Set(
-      (localStorage.getItem("user_permissions") || "")
-          .split(",")
-          .map(p => p.trim())
-          .filter(Boolean)
-  );
-  const __erpFetch = window.fetch.bind(window);
-  window.fetch = (input, init = {}) => {
-      const url = typeof input === "string" ? input : (input && input.url) || "";
-      const isRelativeUrl = typeof url === "string" && !(url.startsWith("http://") || url.startsWith("https://"));
-      const headers = new Headers(init.headers || (input instanceof Request ? input.headers : undefined));
-      if(__erpToken && isRelativeUrl && !headers.has("Authorization")){
-          headers.set("Authorization", "Bearer " + __erpToken);
-      }
-      return __erpFetch(input, {...init, headers});
-  };
+  // Auth guard: redirect to login if the readable session cookie is absent
+  function _hasAuthCookie() {
+      return document.cookie.split(";").some(c => c.trim().startsWith("logged_in="));
+  }
+  if (!_hasAuthCookie()) { window.location.href = "/"; }
+
   function setModeButton(isLight){
     const btn = document.getElementById("mode-btn");
     if(btn) btn.innerText = isLight ? "☀️" : "🌙";
@@ -817,65 +851,24 @@ function initializeColorMode(){
     document.body.classList.toggle("light", isLight);
     setModeButton(isLight);
 }
-function setUserInfo(){
-    const name = localStorage.getItem("user_name") || "Admin";
-    const avatar = document.getElementById("user-avatar");
-    const userName = document.getElementById("user-name");
-    if(avatar) avatar.innerText = name.charAt(0).toUpperCase();
-    if(userName) userName.innerText = name;
+async function initUser() {
+    try {
+        const r = await fetch("/auth/me");
+        if (!r.ok) { window.location.href = "/"; return; }
+        const u = await r.json();
+        const nameEl = document.getElementById("user-name");
+        const avatarEl = document.getElementById("user-avatar");
+        if (nameEl) nameEl.innerText = u.name;
+        if (avatarEl) avatarEl.innerText = u.name.charAt(0).toUpperCase();
+        return u;
+    } catch(e) { window.location.href = "/"; }
 }
-function logout(){
-    localStorage.removeItem("token");
-    localStorage.removeItem("user_name");
-    localStorage.removeItem("user_role");
-    localStorage.removeItem("user_permissions");
-    document.cookie = "access_token=; Max-Age=0; path=/; SameSite=Lax";
+async function logout(){
+    await fetch("/auth/logout", { method: "POST" });
     window.location.href = "/";
 }
-  function requirePageAccess(permission){
-      if(!__erpToken){
-          window.location.href = "/";
-          throw new Error("Not authenticated");
-      }
-      if(__erpUserRole === "admin" || __erpUserPermissions.has(permission)) return;
-      document.body.innerHTML = `<div style="display:flex;align-items:center;justify-content:center;height:100vh;flex-direction:column;gap:16px;color:#445066;font-family:'Outfit',sans-serif;background:#060810"><div style="font-size:48px">🔒</div><div style="font-size:20px;font-weight:800;color:#f0f4ff">Access Restricted</div><div style="font-size:14px">You do not have permission to open this page.</div><a href="/home" style="color:#00ff9d;text-decoration:none;font-weight:700">Back to Home</a></div>`;
-      throw new Error("Access denied");
-  }
-  function applyNavPermissions(){
-      const navPermissions = {
-          "/home": null,
-          "/dashboard": "page_dashboard",
-          "/pos": "page_pos",
-          "/b2b/": "page_b2b",
-          "/inventory/": "page_inventory",
-          "/products/": "page_products",
-          "/customers-mgmt/": "page_customers",
-          "/suppliers/": "page_suppliers",
-          "/production/": "page_production",
-          "/farm/": "page_farm",
-          "/hr/": "page_hr",
-          "/accounting/": "page_accounting",
-          "/reports/": "page_reports",
-          "/import": "page_import",
-          "/users/": "admin_only"
-      };
-      document.querySelectorAll("a.nav-link[href]").forEach(link => {
-          const href = link.getAttribute("href");
-          const requirement = navPermissions[href];
-          if(requirement === undefined || requirement === null) return;
-          if(requirement === "admin_only"){
-              if(__erpUserRole !== "admin") link.style.display = "none";
-              return;
-          }
-          if(__erpUserRole !== "admin" && !__erpUserPermissions.has(requirement)){
-              link.style.display = "none";
-          }
-      });
-  }
-  requirePageAccess("page_farm");
-  applyNavPermissions();
   initializeColorMode();
-  setUserInfo();
+  initUser().then(u => { if(u) isAdmin = (u.role === "admin"); });
   let allProducts     = [];
 let allFarms        = [];
 let selectedFarmId  = null;
@@ -883,7 +876,7 @@ let editingDeliveryId = null;   // null = creating new, number = editing existin
 let deliveryPage    = 0;
 let pageSize        = 20;
 let totalDeliveries = 0;
-let isAdmin         = localStorage.getItem("user_role") === "admin";
+let isAdmin         = false;
 
 async function init(){
     await fetch("/farm/api/seed-farms", {method:"POST"});
@@ -1368,7 +1361,7 @@ async function autoFillWeather(){
 
     let location = farm.location && farm.location !== "—" ? farm.location : farm.name;
     // Normalize: "Nuweiba, South Sinai" → "Nuweiba+South+Sinai"
-    let query = location.replace(/,\s*/g, "+").replace(/\s+/g, "+");
+    let query = location.replace(/,\\s*/g, "+").replace(/\\s+/g, "+");
     setWeatherStatus(`Fetching weather for "${location}" from wttr.in…`, true);
 
     try {

@@ -1,5 +1,6 @@
 import pandas as pd
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select
 from app.models.customer import Customer
 from app.models.product import Product
 
@@ -20,7 +21,7 @@ def _get_row_value(row, columns: dict, *aliases, default=""):
     return default
 
 
-def import_customers(filepath: str, db: Session) -> dict:
+async def import_customers(filepath: str, db: AsyncSession) -> dict:
     df = pd.read_excel(filepath)
     columns = _build_column_lookup(df)
 
@@ -28,7 +29,6 @@ def import_customers(filepath: str, db: Session) -> dict:
     skipped = 0
 
     for _, row in df.iterrows():
-        customer_id = str(_get_row_value(row, columns, "ID", default="")).strip()
         name = str(
             _get_row_value(row, columns, "Vendor", "Vendor  ", "Customer", "Customer Name", default="")
         ).strip()
@@ -47,9 +47,11 @@ def import_customers(filepath: str, db: Session) -> dict:
         existing_by_name = None
 
         if phone:
-            existing_by_phone = db.query(Customer).filter(Customer.phone == phone).first()
+            _r = await db.execute(select(Customer).where(Customer.phone == phone))
+            existing_by_phone = _r.scalar_one_or_none()
         if name:
-            existing_by_name = db.query(Customer).filter(Customer.name == name).first()
+            _r = await db.execute(select(Customer).where(Customer.name == name))
+            existing_by_name = _r.scalar_one_or_none()
 
         exists = existing_by_phone or (existing_by_name if not phone else None)
 
@@ -57,23 +59,17 @@ def import_customers(filepath: str, db: Session) -> dict:
             skipped += 1
             continue
 
-        customer = Customer(
-            name    = name,
-            phone   = phone,
-            address = address,
-        )
-        db.add(customer)
+        db.add(Customer(name=name, phone=phone, address=address))
         added += 1
 
-    db.commit()
+    await db.commit()
     return {"added": added, "skipped": skipped}
 
 
-def import_products(products_path: str, soh_path: str, db: Session) -> dict:
+async def import_products(products_path: str, soh_path: str, db: AsyncSession) -> dict:
     df_products = pd.read_excel(products_path)
     df_soh      = pd.read_excel(soh_path)
 
-    # Build stock lookup from SOH file
     stock_lookup = {}
     for _, row in df_soh.iterrows():
         sku   = str(row.get("SKU", "")).strip()
@@ -92,9 +88,8 @@ def import_products(products_path: str, soh_path: str, db: Session) -> dict:
             skipped += 1
             continue
 
-        # Skip if already exists
-        exists = db.query(Product).filter(Product.sku == sku).first()
-        if exists:
+        _r = await db.execute(select(Product).where(Product.sku == sku))
+        if _r.scalar_one_or_none():
             skipped += 1
             continue
 
@@ -106,18 +101,11 @@ def import_products(products_path: str, soh_path: str, db: Session) -> dict:
         cost  = float(cost)  if str(cost)  != "nan" else 0.0
         price = float(price) if str(price) != "nan" else 0.0
 
-        product = Product(
-            sku       = sku,
-            name      = name,
-            price     = price,
-            cost      = cost,
-            stock     = stock,
-            min_stock = 5,
-            unit      = unit,
-            is_active = True,
-        )
-        db.add(product)
+        db.add(Product(
+            sku=sku, name=name, price=price, cost=cost,
+            stock=stock, min_stock=5, unit=unit, is_active=True,
+        ))
         added += 1
 
-    db.commit()
+    await db.commit()
     return {"added": added, "skipped": skipped}

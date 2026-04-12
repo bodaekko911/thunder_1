@@ -28,6 +28,7 @@ from app.models.production import (
 from app.models.refund import RetailRefund, RetailRefundItem
 from app.models.spoilage import SpoilageRecord
 from app.models.supplier import Purchase, PurchaseItem, Supplier
+from app.models.refresh_token import RefreshToken
 from app.models.user import User
 
 __all__ = [
@@ -59,6 +60,7 @@ __all__ = [
     "Product",
     "ProductionBatch",
     "Purchase",
+    "RefreshToken",
     "PurchaseItem",
     "Recipe",
     "RecipeInput",

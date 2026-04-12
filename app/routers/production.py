@@ -1,13 +1,14 @@
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import HTMLResponse
-from sqlalchemy.orm import Session
-from sqlalchemy import func
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
+from sqlalchemy import func, select
 from typing import Optional, List
 from pydantic import BaseModel
 from decimal import Decimal
 from datetime import date as date_type
 
-from app.database import get_db
+from app.database import get_async_session
 from app.core.permissions import get_current_user, require_permission
 from app.core.log import record as log_record
 from app.models.product import Product
@@ -60,8 +61,15 @@ class SpoilageCreate(BaseModel):
 
 # ── RECIPE API ─────────────────────────────────────────
 @router.get("/api/recipes")
-def get_recipes(db: Session = Depends(get_db)):
-    recipes = db.query(Recipe).filter(Recipe.is_active == True).order_by(Recipe.name).all()
+async def get_recipes(db: AsyncSession = Depends(get_async_session)):
+    result = await db.execute(
+        select(Recipe).where(Recipe.is_active == True).order_by(Recipe.name)
+        .options(
+            selectinload(Recipe.inputs).selectinload(RecipeInput.product),
+            selectinload(Recipe.outputs).selectinload(RecipeOutput.product),
+        )
+    )
+    recipes = result.scalars().all()
     return [
         {
             "id":          r.id,
@@ -74,33 +82,44 @@ def get_recipes(db: Session = Depends(get_db)):
     ]
 
 @router.post("/api/recipes")
-def create_recipe(data: RecipeCreate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+async def create_recipe(data: RecipeCreate, db: AsyncSession = Depends(get_async_session), current_user: User = Depends(get_current_user)):
     if not data.inputs or not data.outputs:
         raise HTTPException(status_code=400, detail="Recipe must have at least one input and one output")
     recipe = Recipe(name=data.name, description=data.description)
-    db.add(recipe); db.flush()
+    db.add(recipe); await db.flush()
     for item in data.inputs:
         db.add(RecipeInput(recipe_id=recipe.id, product_id=item.product_id, qty=item.qty))
     for item in data.outputs:
         db.add(RecipeOutput(recipe_id=recipe.id, product_id=item.product_id, qty=item.qty))
-    db.commit(); db.refresh(recipe)
+    await db.commit(); await db.refresh(recipe)
     return {"id": recipe.id, "name": recipe.name}
 
 @router.delete("/api/recipes/{recipe_id}")
-def delete_recipe(recipe_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    r = db.query(Recipe).filter(Recipe.id == recipe_id).first()
+async def delete_recipe(recipe_id: int, db: AsyncSession = Depends(get_async_session), current_user: User = Depends(get_current_user)):
+    result = await db.execute(select(Recipe).where(Recipe.id == recipe_id))
+    r = result.scalar_one_or_none()
     if not r:
         raise HTTPException(status_code=404, detail="Recipe not found")
     r.is_active = False
-    db.commit()
+    await db.commit()
     return {"ok": True}
 
 
 # ── BATCH API ──────────────────────────────────────────
 @router.get("/api/batches")
-def get_batches(skip: int = 0, limit: int = 50, db: Session = Depends(get_db)):
-    total   = db.query(ProductionBatch).count()
-    batches = db.query(ProductionBatch).order_by(ProductionBatch.created_at.desc()).offset(skip).limit(limit).all()
+async def get_batches(skip: int = 0, limit: int = 50, db: AsyncSession = Depends(get_async_session)):
+    cnt_result = await db.execute(select(func.count()).select_from(ProductionBatch))
+    total = cnt_result.scalar()
+    result = await db.execute(
+        select(ProductionBatch)
+        .options(
+            selectinload(ProductionBatch.inputs).selectinload(BatchInput.product),
+            selectinload(ProductionBatch.outputs).selectinload(BatchOutput.product),
+            selectinload(ProductionBatch.recipe),
+        )
+        .order_by(ProductionBatch.created_at.desc()).offset(skip).limit(limit)
+    )
+    batches = result.scalars().all()
     return {
         "total": total,
         "batches": [
@@ -121,25 +140,40 @@ def get_batches(skip: int = 0, limit: int = 50, db: Session = Depends(get_db)):
     }
 
 @router.post("/api/batches")
-def create_batch(data: BatchCreate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+async def create_batch(data: BatchCreate, db: AsyncSession = Depends(get_async_session), current_user: User = Depends(get_current_user)):
     if not data.inputs or not data.outputs:
         raise HTTPException(status_code=400, detail="Batch must have at least one input and one output")
     for item in data.inputs:
-        product = db.query(Product).filter(Product.id == item.product_id).first()
+        prod_result = await db.execute(select(Product).where(Product.id == item.product_id))
+        product = prod_result.scalar_one_or_none()
         if not product:
             raise HTTPException(status_code=404, detail=f"Product not found: {item.product_id}")
         if float(product.stock) < item.qty:
             raise HTTPException(status_code=400, detail=f"Not enough stock for '{product.name}'. Available: {float(product.stock)}")
 
     prefix = "PKG" if data.batch_type == "packaging" else "BATCH"
-    max_id = db.query(func.max(ProductionBatch.id)).scalar() or 0
+    max_id_result = await db.execute(select(func.max(ProductionBatch.id)))
+    max_id = max_id_result.scalar() or 0
     batch_number = f"{prefix}-{str(max_id + 1).zfill(4)}"
 
     WEIGHT_UNITS = {"gram","g","kg","ltr","ml","liter","litre"}
+    # Build a product-unit lookup from what we already fetched for stock check
+    product_units: dict[int, str] = {}
+    for item in data.inputs:
+        pr = await db.execute(select(Product).where(Product.id == item.product_id))
+        p = pr.scalar_one_or_none()
+        if p:
+            product_units[p.id] = p.unit
+    for item in data.outputs:
+        pr = await db.execute(select(Product).where(Product.id == item.product_id))
+        p = pr.scalar_one_or_none()
+        if p:
+            product_units[p.id] = p.unit
+
     if data.batch_type == "processing":
         def is_weight(pid):
-            p = db.query(Product).filter(Product.id == pid).first()
-            return p and p.unit.lower() in WEIGHT_UNITS
+            unit = product_units.get(pid, "")
+            return unit.lower() in WEIGHT_UNITS
         total_in  = sum(i.qty for i in data.inputs  if is_weight(i.product_id))
         total_out = sum(o.qty for o in data.outputs if is_weight(o.product_id))
         auto_waste = round(((total_in - total_out) / total_in * 100), 2) if total_in > 0 else 0
@@ -147,16 +181,18 @@ def create_batch(data: BatchCreate, db: Session = Depends(get_db), current_user:
         auto_waste = data.waste_pct
 
     batch = ProductionBatch(batch_number=batch_number, recipe_id=data.recipe_id, user_id=current_user.id, waste_pct=auto_waste, notes=data.notes, status="completed")
-    db.add(batch); db.flush()
+    db.add(batch); await db.flush()
 
     for item in data.inputs:
-        product = db.query(Product).filter(Product.id == item.product_id).first()
+        prod_r = await db.execute(select(Product).where(Product.id == item.product_id))
+        product = prod_r.scalar_one_or_none()
         before = float(product.stock); after = before - item.qty; product.stock = after
         db.add(BatchInput(batch_id=batch.id, product_id=product.id, qty=item.qty))
         db.add(StockMove(product_id=product.id, type="out", user_id=current_user.id, qty=-item.qty, qty_before=before, qty_after=after, ref_type="production", ref_id=batch.id, note=f"Used in {batch_number}"))
 
     for item in data.outputs:
-        product = db.query(Product).filter(Product.id == item.product_id).first()
+        prod_r = await db.execute(select(Product).where(Product.id == item.product_id))
+        product = prod_r.scalar_one_or_none()
         if not product:
             raise HTTPException(status_code=404, detail=f"Output product not found: {item.product_id}")
         before = float(product.stock); after = before + item.qty; product.stock = after
@@ -166,48 +202,71 @@ def create_batch(data: BatchCreate, db: Session = Depends(get_db), current_user:
     log_record(db, "Production", "create_batch",
            f"Batch {batch_number} — {len(data.inputs)} input(s), {len(data.outputs)} output(s), waste {float(batch.waste_pct):.1f}%",
            user=current_user, ref_type="production_batch", ref_id=batch.id)
-    db.commit(); db.refresh(batch)
+    await db.commit(); await db.refresh(batch)
     return {"id": batch.id, "batch_number": batch_number, "waste_pct": float(batch.waste_pct)}
 
 
 @router.put("/api/batches/{batch_id}")
-def edit_batch(batch_id: int, data: BatchCreate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    batch = db.query(ProductionBatch).filter(ProductionBatch.id == batch_id).first()
+async def edit_batch(batch_id: int, data: BatchCreate, db: AsyncSession = Depends(get_async_session), current_user: User = Depends(get_current_user)):
+    batch_result = await db.execute(
+        select(ProductionBatch)
+        .options(
+            selectinload(ProductionBatch.inputs),
+            selectinload(ProductionBatch.outputs),
+        )
+        .where(ProductionBatch.id == batch_id)
+    )
+    batch = batch_result.scalar_one_or_none()
     if not batch:
         raise HTTPException(status_code=404, detail="Batch not found")
     for item in batch.inputs:
-        product = db.query(Product).filter(Product.id == item.product_id).first()
+        prod_r = await db.execute(select(Product).where(Product.id == item.product_id))
+        product = prod_r.scalar_one_or_none()
         if product:
             before = float(product.stock); after = before + float(item.qty); product.stock = after
             db.add(StockMove(product_id=product.id, type="in", user_id=current_user.id, qty=float(item.qty), qty_before=before, qty_after=after, ref_type="production_reversal", ref_id=batch.id, note=f"Edit reversal — {batch.batch_number}"))
-        db.delete(item)
+        await db.delete(item)
     for item in batch.outputs:
-        product = db.query(Product).filter(Product.id == item.product_id).first()
+        prod_r = await db.execute(select(Product).where(Product.id == item.product_id))
+        product = prod_r.scalar_one_or_none()
         if product:
             before = float(product.stock); after = before - float(item.qty); product.stock = after
             db.add(StockMove(product_id=product.id, type="out", user_id=current_user.id, qty=-float(item.qty), qty_before=before, qty_after=after, ref_type="production_reversal", ref_id=batch.id, note=f"Edit reversal — {batch.batch_number}"))
-        db.delete(item)
+        await db.delete(item)
     for item in data.inputs:
-        product = db.query(Product).filter(Product.id == item.product_id).first()
+        prod_r = await db.execute(select(Product).where(Product.id == item.product_id))
+        product = prod_r.scalar_one_or_none()
         if not product:
             raise HTTPException(status_code=404, detail=f"Product not found: {item.product_id}")
         if float(product.stock) < item.qty:
             raise HTTPException(status_code=400, detail=f"Not enough stock for '{product.name}'.")
     batch.recipe_id = data.recipe_id; batch.notes = data.notes; batch.user_id = current_user.id
     WEIGHT_UNITS = {"gram","g","kg","ltr","ml","liter","litre"}
+    product_units2: dict[int, str] = {}
+    for item in data.inputs:
+        pr = await db.execute(select(Product).where(Product.id == item.product_id))
+        p = pr.scalar_one_or_none()
+        if p:
+            product_units2[p.id] = p.unit
+    for item in data.outputs:
+        pr = await db.execute(select(Product).where(Product.id == item.product_id))
+        p = pr.scalar_one_or_none()
+        if p:
+            product_units2[p.id] = p.unit
     def is_weight2(pid):
-        p = db.query(Product).filter(Product.id == pid).first()
-        return p and p.unit.lower() in WEIGHT_UNITS
+        return product_units2.get(pid, "").lower() in WEIGHT_UNITS
     total_in  = sum(i.qty for i in data.inputs  if is_weight2(i.product_id))
     total_out = sum(o.qty for o in data.outputs if is_weight2(o.product_id))
     batch.waste_pct = round(((total_in - total_out) / total_in * 100), 2) if total_in > 0 else 0
     for item in data.inputs:
-        product = db.query(Product).filter(Product.id == item.product_id).first()
+        prod_r2 = await db.execute(select(Product).where(Product.id == item.product_id))
+        product = prod_r2.scalar_one_or_none()
         before = float(product.stock); after = before - item.qty; product.stock = after
         db.add(BatchInput(batch_id=batch.id, product_id=product.id, qty=item.qty))
         db.add(StockMove(product_id=product.id, type="out", user_id=current_user.id, qty=-item.qty, qty_before=before, qty_after=after, ref_type="production", ref_id=batch.id, note=f"Used in {batch.batch_number} (edited)"))
     for item in data.outputs:
-        product = db.query(Product).filter(Product.id == item.product_id).first()
+        prod_r2 = await db.execute(select(Product).where(Product.id == item.product_id))
+        product = prod_r2.scalar_one_or_none()
         if not product:
             raise HTTPException(status_code=404, detail=f"Output product not found: {item.product_id}")
         before = float(product.stock); after = before + item.qty; product.stock = after
@@ -216,37 +275,51 @@ def edit_batch(batch_id: int, data: BatchCreate, db: Session = Depends(get_db), 
     log_record(db, "Production", "edit_batch",
            f"Edited batch {batch.batch_number} — waste {float(batch.waste_pct):.1f}%",
            user=current_user, ref_type="production_batch", ref_id=batch.id)
-    db.commit()
+    await db.commit()
     return {"ok": True, "batch_number": batch.batch_number, "waste_pct": float(batch.waste_pct)}
 
 
 @router.delete("/api/batches/{batch_id}")
-def delete_batch(batch_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    batch = db.query(ProductionBatch).filter(ProductionBatch.id == batch_id).first()
+async def delete_batch(batch_id: int, db: AsyncSession = Depends(get_async_session), current_user: User = Depends(get_current_user)):
+    batch_result = await db.execute(
+        select(ProductionBatch)
+        .options(selectinload(ProductionBatch.inputs), selectinload(ProductionBatch.outputs))
+        .where(ProductionBatch.id == batch_id)
+    )
+    batch = batch_result.scalar_one_or_none()
     if not batch:
         raise HTTPException(status_code=404, detail="Batch not found")
     for item in batch.inputs:
-        product = db.query(Product).filter(Product.id == item.product_id).first()
+        prod_r = await db.execute(select(Product).where(Product.id == item.product_id))
+        product = prod_r.scalar_one_or_none()
         if product:
             before = float(product.stock); after = before + float(item.qty); product.stock = after
             db.add(StockMove(product_id=product.id, type="in", qty=float(item.qty), qty_before=before, qty_after=after, ref_type="production_reversal", ref_id=batch.id, note=f"Deleted batch — {batch.batch_number}"))
     for item in batch.outputs:
-        product = db.query(Product).filter(Product.id == item.product_id).first()
+        prod_r = await db.execute(select(Product).where(Product.id == item.product_id))
+        product = prod_r.scalar_one_or_none()
         if product:
             before = float(product.stock); after = before - float(item.qty); product.stock = after
             db.add(StockMove(product_id=product.id, type="out", qty=-float(item.qty), qty_before=before, qty_after=after, ref_type="production_reversal", ref_id=batch.id, note=f"Deleted batch — {batch.batch_number}"))
     log_record(db, "Production", "delete_batch",
            f"Deleted batch {batch.batch_number} — stock reversed",
            ref_type="production_batch", ref_id=batch_id)
-    db.delete(batch); db.commit()
+    await db.delete(batch); await db.commit()
     return {"ok": True}
 
 
 # ── SPOILAGE API ───────────────────────────────────────
 @router.get("/api/spoilage")
-def get_spoilage(skip: int = 0, limit: int = 100, db: Session = Depends(get_db)):
-    total   = db.query(SpoilageRecord).count()
-    records = db.query(SpoilageRecord).order_by(SpoilageRecord.spoilage_date.desc(), SpoilageRecord.created_at.desc()).offset(skip).limit(limit).all()
+async def get_spoilage(skip: int = 0, limit: int = 100, db: AsyncSession = Depends(get_async_session)):
+    cnt_r = await db.execute(select(func.count()).select_from(SpoilageRecord))
+    total = cnt_r.scalar()
+    rec_r = await db.execute(
+        select(SpoilageRecord)
+        .options(selectinload(SpoilageRecord.product), selectinload(SpoilageRecord.farm))
+        .order_by(SpoilageRecord.spoilage_date.desc(), SpoilageRecord.created_at.desc())
+        .offset(skip).limit(limit)
+    )
+    records = rec_r.scalars().all()
     return {
         "total": total,
         "records": [
@@ -268,67 +341,73 @@ def get_spoilage(skip: int = 0, limit: int = 100, db: Session = Depends(get_db))
     }
 
 @router.post("/api/spoilage")
-def create_spoilage(data: SpoilageCreate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+async def create_spoilage(data: SpoilageCreate, db: AsyncSession = Depends(get_async_session), current_user: User = Depends(get_current_user)):
     from app.models.accounting import Account, Journal, JournalEntry
-    product = db.query(Product).filter(Product.id == data.product_id).first()
+    prod_r = await db.execute(select(Product).where(Product.id == data.product_id))
+    product = prod_r.scalar_one_or_none()
     if not product:
         raise HTTPException(status_code=404, detail="Product not found")
     if float(product.stock) < data.qty:
         raise HTTPException(status_code=400, detail=f"Not enough stock. Available: {float(product.stock)} {product.unit}")
-    max_id = db.query(func.max(SpoilageRecord.id)).scalar() or 0
+    max_id_r = await db.execute(select(func.max(SpoilageRecord.id)))
+    max_id = max_id_r.scalar() or 0
     ref    = f"SPL-{str(max_id + 1).zfill(4)}"
-    record = SpoilageRecord(
+    spoilage_rec = SpoilageRecord(
         ref_number=ref, product_id=data.product_id, qty=data.qty,
         user_id=current_user.id,
         spoilage_date=date_type.fromisoformat(data.spoilage_date),
         reason=data.reason, farm_id=data.farm_id, notes=data.notes,
     )
-    db.add(record); db.flush()
+    db.add(spoilage_rec); await db.flush()
     before = float(product.stock); after = before - data.qty; product.stock = after
-    db.add(StockMove(product_id=product.id, type="out", user_id=current_user.id, qty=-data.qty, qty_before=before, qty_after=after, ref_type="spoilage", ref_id=record.id, note=f"Spoilage — {ref}"))
+    db.add(StockMove(product_id=product.id, type="out", user_id=current_user.id, qty=-data.qty, qty_before=before, qty_after=after, ref_type="spoilage", ref_id=spoilage_rec.id, note=f"Spoilage — {ref}"))
     cost_per_unit = float(product.cost) if product.cost else 0
     loss_value    = round(data.qty * cost_per_unit, 2)
     if loss_value > 0:
         journal = Journal(ref_type="spoilage", description=f"Spoilage — {ref} — {product.name}", user_id=current_user.id)
-        db.add(journal); db.flush()
+        db.add(journal); await db.flush()
         for code, debit, credit in [("5600", loss_value, 0), ("1200", 0, loss_value)]:
-            acc = db.query(Account).filter(Account.code == code).first()
+            acc_r = await db.execute(select(Account).where(Account.code == code))
+            acc = acc_r.scalar_one_or_none()
             if acc:
                 db.add(JournalEntry(journal_id=journal.id, account_id=acc.id, debit=debit, credit=credit))
                 acc.balance += Decimal(str(debit)) - Decimal(str(credit))
-    db.commit()
     log_record(db, "Production", "create_spoilage",
                f"Spoilage {ref} — {product.name} — qty: {data.qty}"
                + (f" — {data.reason}" if data.reason else ""),
-               user=current_user, ref_type="spoilage", ref_id=record.id)
-    db.commit()
-    return {"id": record.id, "ref_number": ref, "qty": data.qty, "product": product.name}
+               user=current_user, ref_type="spoilage", ref_id=spoilage_rec.id)
+    await db.commit()
+    return {"id": spoilage_rec.id, "ref_number": ref, "qty": data.qty, "product": product.name}
 
 @router.delete("/api/spoilage/{record_id}")
-def delete_spoilage(record_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    record = db.query(SpoilageRecord).filter(SpoilageRecord.id == record_id).first()
-    if not record:
+async def delete_spoilage(record_id: int, db: AsyncSession = Depends(get_async_session), current_user: User = Depends(get_current_user)):
+    rec_r = await db.execute(select(SpoilageRecord).where(SpoilageRecord.id == record_id))
+    spoilage_rec = rec_r.scalar_one_or_none()
+    if not spoilage_rec:
         raise HTTPException(status_code=404, detail="Record not found")
-    product = db.query(Product).filter(Product.id == record.product_id).first()
+    prod_r = await db.execute(select(Product).where(Product.id == spoilage_rec.product_id))
+    product = prod_r.scalar_one_or_none()
     if product:
-        before = float(product.stock); after = before + float(record.qty); product.stock = after
-        db.add(StockMove(product_id=product.id, type="in", qty=float(record.qty), qty_before=before, qty_after=after, ref_type="spoilage_reversal", ref_id=record.id, note=f"Spoilage deleted — {record.ref_number}"))
+        before = float(product.stock); after = before + float(spoilage_rec.qty); product.stock = after
+        db.add(StockMove(product_id=product.id, type="in", qty=float(spoilage_rec.qty), qty_before=before, qty_after=after, ref_type="spoilage_reversal", ref_id=spoilage_rec.id, note=f"Spoilage deleted — {spoilage_rec.ref_number}"))
     log_record(db, "Production", "delete_spoilage",
-               f"Deleted spoilage {record.ref_number} — stock restored",
+               f"Deleted spoilage {spoilage_rec.ref_number} — stock restored",
                ref_type="spoilage", ref_id=record_id)
-    db.delete(record); db.commit()
+    await db.delete(spoilage_rec); await db.commit()
     return {"ok": True}
 
 
 @router.get("/api/products-list")
-def products_list(db: Session = Depends(get_db)):
-    products = db.query(Product).filter(Product.is_active == True).order_by(Product.name).all()
+async def products_list(db: AsyncSession = Depends(get_async_session)):
+    prod_r = await db.execute(select(Product).where(Product.is_active == True).order_by(Product.name))
+    products = prod_r.scalars().all()
     return [{"id": p.id, "sku": p.sku, "name": p.name, "stock": float(p.stock), "unit": p.unit} for p in products]
 
 @router.get("/api/farms-list")
-def farms_list(db: Session = Depends(get_db)):
+async def farms_list(db: AsyncSession = Depends(get_async_session)):
     from app.models.farm import Farm
-    farms = db.query(Farm).filter(Farm.is_active == 1).all()
+    farm_r = await db.execute(select(Farm).where(Farm.is_active == 1))
+    farms = farm_r.scalars().all()
     return [{"id": f.id, "name": f.name} for f in farms]
 
 
@@ -690,24 +769,12 @@ td.name{color:var(--text);font-weight:600;}
 <div class="toast" id="toast"></div>
 
 <script>
-  const __erpToken = localStorage.getItem("token");
-  const __erpUserRole = localStorage.getItem("user_role") || "";
-  const __erpUserPermissions = new Set(
-      (localStorage.getItem("user_permissions") || "")
-          .split(",")
-          .map(p => p.trim())
-          .filter(Boolean)
-  );
-  const __erpFetch = window.fetch.bind(window);
-  window.fetch = (input, init = {}) => {
-      const url = typeof input === "string" ? input : (input && input.url) || "";
-      const isRelativeUrl = typeof url === "string" && !(url.startsWith("http://") || url.startsWith("https://"));
-      const headers = new Headers(init.headers || (input instanceof Request ? input.headers : undefined));
-      if(__erpToken && isRelativeUrl && !headers.has("Authorization")){
-          headers.set("Authorization", "Bearer " + __erpToken);
-      }
-      return __erpFetch(input, {...init, headers});
-  };
+  // Auth guard: redirect to login if the readable session cookie is absent
+  function _hasAuthCookie() {
+      return document.cookie.split(";").some(c => c.trim().startsWith("logged_in="));
+  }
+  if (!_hasAuthCookie()) { window.location.href = "/"; }
+
   function setModeButton(isLight){
     const btn = document.getElementById("mode-btn");
     if(btn) btn.innerText = isLight ? "☀️" : "🌙";
@@ -722,65 +789,28 @@ function initializeColorMode(){
     document.body.classList.toggle("light", isLight);
     setModeButton(isLight);
 }
-function setUserInfo(){
-    const name = localStorage.getItem("user_name") || "Admin";
-    const avatar = document.getElementById("user-avatar");
-    const userName = document.getElementById("user-name");
-    if(avatar) avatar.innerText = name.charAt(0).toUpperCase();
-    if(userName) userName.innerText = name;
+async function initUser() {
+    try {
+        const r = await fetch("/auth/me");
+        if (!r.ok) { window.location.href = "/"; return; }
+        const u = await r.json();
+        const nameEl = document.getElementById("user-name");
+        const avatarEl = document.getElementById("user-avatar");
+        if (nameEl) nameEl.innerText = u.name;
+        if (avatarEl) avatarEl.innerText = u.name.charAt(0).toUpperCase();
+        return u;
+    } catch(e) { window.location.href = "/"; }
 }
-function logout(){
-    localStorage.removeItem("token");
-    localStorage.removeItem("user_name");
-    localStorage.removeItem("user_role");
-    localStorage.removeItem("user_permissions");
-    document.cookie = "access_token=; Max-Age=0; path=/; SameSite=Lax";
+async function logout(){
+    await fetch("/auth/logout", { method: "POST" });
     window.location.href = "/";
 }
-  function requirePageAccess(permission){
-      if(!__erpToken){
-          window.location.href = "/";
-          throw new Error("Not authenticated");
-      }
-      if(__erpUserRole === "admin" || __erpUserPermissions.has(permission)) return;
-      document.body.innerHTML = `<div style="display:flex;align-items:center;justify-content:center;height:100vh;flex-direction:column;gap:16px;color:#445066;font-family:'Outfit',sans-serif;background:#060810"><div style="font-size:48px">🔒</div><div style="font-size:20px;font-weight:800;color:#f0f4ff">Access Restricted</div><div style="font-size:14px">You do not have permission to open this page.</div><a href="/home" style="color:#00ff9d;text-decoration:none;font-weight:700">Back to Home</a></div>`;
-      throw new Error("Access denied");
+  function hasPermission(permission, u){
+      const role = u ? (u.role || "") : "";
+      const perms = new Set(u ? (u.permissions || []) : []);
+      return role === "admin" || perms.has(permission);
   }
-  function applyNavPermissions(){
-      const navPermissions = {
-          "/home": null,
-          "/dashboard": "page_dashboard",
-          "/pos": "page_pos",
-          "/b2b/": "page_b2b",
-          "/inventory/": "page_inventory",
-          "/products/": "page_products",
-          "/customers-mgmt/": "page_customers",
-          "/suppliers/": "page_suppliers",
-          "/production/": "page_production",
-          "/farm/": "page_farm",
-          "/hr/": "page_hr",
-          "/accounting/": "page_accounting",
-          "/reports/": "page_reports",
-          "/import": "page_import",
-          "/users/": "admin_only"
-      };
-      document.querySelectorAll("a.nav-link[href]").forEach(link => {
-          const href = link.getAttribute("href");
-          const requirement = navPermissions[href];
-          if(requirement === undefined || requirement === null) return;
-          if(requirement === "admin_only"){
-              if(__erpUserRole !== "admin") link.style.display = "none";
-              return;
-          }
-          if(__erpUserRole !== "admin" && !__erpUserPermissions.has(requirement)){
-              link.style.display = "none";
-          }
-      });
-  }
-  function hasPermission(permission){
-      return __erpUserRole === "admin" || __erpUserPermissions.has(permission);
-  }
-  function configureProductionPermissions(){
+  function configureProductionPermissions(u){
       const tabMap = [
           {id:"tab-batches", permission:"tab_production_batches", tab:"batches"},
           {id:"tab-packaging", permission:"tab_production_packaging", tab:"packaging"},
@@ -791,16 +821,17 @@ function logout(){
       tabMap.forEach(conf => {
           let el = document.getElementById(conf.id);
           if(!el) return;
-          if(!hasPermission(conf.permission)) el.style.display = "none";
+          if(!hasPermission(conf.permission, u)) el.style.display = "none";
           else if(!firstAllowed) firstAllowed = conf.tab;
       });
       if(firstAllowed) setTimeout(() => switchTab(firstAllowed), 0);
   }
-  requirePageAccess("page_production");
-  applyNavPermissions();
   initializeColorMode();
-  setUserInfo();
-  configureProductionPermissions();
+  initUser().then(u => {
+      if(!u) return;
+      isAdmin = (u.role === "admin");
+      configureProductionPermissions(u);
+  });
   let allProducts   = [];
 let allRecipes    = [];
 let pkgRecipes    = [];
@@ -811,7 +842,7 @@ let pageSize      = 20;
 let totalBatches  = 0;
 let isPackagingRecipe = false;
 let editingBatchId    = null;
-let isAdmin = localStorage.getItem("user_role") === "admin";
+let isAdmin = false;
 const WEIGHT_UNITS = ["gram","g","kg","ltr","ml","liter","litre"];
 
 async function init(){

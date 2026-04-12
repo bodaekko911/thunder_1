@@ -1,15 +1,17 @@
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import HTMLResponse
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select
 from typing import Optional, List
 from pydantic import BaseModel
 
-from app.database import get_db
+from app.database import get_async_session
 from app.core.permissions import get_current_user, require_permission
 from app.models.supplier import Supplier, Purchase, PurchaseItem
 from app.models.user import User
 from app.models.product import Product
 from app.models.inventory import StockMove
+from app.schemas.supplier import SupplierCreate, SupplierUpdate
 
 router = APIRouter(
     prefix="/suppliers",
@@ -19,18 +21,6 @@ router = APIRouter(
 
 
 # ── Schemas ────────────────────────────────────────────
-class SupplierCreate(BaseModel):
-    name:    str
-    phone:   Optional[str] = None
-    email:   Optional[str] = None
-    address: Optional[str] = None
-
-class SupplierUpdate(BaseModel):
-    name:    Optional[str] = None
-    phone:   Optional[str] = None
-    email:   Optional[str] = None
-    address: Optional[str] = None
-
 class PurchaseItemIn(BaseModel):
     product_id: int
     qty:        float
@@ -44,11 +34,12 @@ class PurchaseCreate(BaseModel):
 
 # ── SUPPLIER API ───────────────────────────────────────
 @router.get("/api/list")
-def get_suppliers(q: str = "", db: Session = Depends(get_db)):
-    query = db.query(Supplier)
+async def get_suppliers(q: str = "", db: AsyncSession = Depends(get_async_session)):
+    stmt = select(Supplier)
     if q:
-        query = query.filter(Supplier.name.ilike(f"%{q}%"))
-    items = query.order_by(Supplier.name).all()
+        stmt = stmt.where(Supplier.name.ilike(f"%{q}%"))
+    result = await db.execute(stmt.order_by(Supplier.name))
+    items = result.scalars().all()
     return [
         {
             "id":      s.id,
@@ -62,37 +53,40 @@ def get_suppliers(q: str = "", db: Session = Depends(get_db)):
     ]
 
 @router.post("/api/add")
-def add_supplier(data: SupplierCreate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+async def add_supplier(data: SupplierCreate, db: AsyncSession = Depends(get_async_session), current_user: User = Depends(get_current_user)):
     s = Supplier(**data.model_dump())
-    db.add(s); db.commit(); db.refresh(s)
+    db.add(s); await db.commit(); await db.refresh(s)
     return {"id": s.id, "name": s.name}
 
 @router.put("/api/edit/{supplier_id}")
-def edit_supplier(supplier_id: int, data: SupplierUpdate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    s = db.query(Supplier).filter(Supplier.id == supplier_id).first()
+async def edit_supplier(supplier_id: int, data: SupplierUpdate, db: AsyncSession = Depends(get_async_session), current_user: User = Depends(get_current_user)):
+    result = await db.execute(select(Supplier).where(Supplier.id == supplier_id))
+    s = result.scalar_one_or_none()
     if not s:
         raise HTTPException(status_code=404, detail="Supplier not found")
     for k, v in data.model_dump(exclude_unset=True).items():
         setattr(s, k, v)
-    db.commit()
+    await db.commit()
     return {"ok": True}
 
 @router.delete("/api/delete/{supplier_id}")
-def delete_supplier(supplier_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    s = db.query(Supplier).filter(Supplier.id == supplier_id).first()
+async def delete_supplier(supplier_id: int, db: AsyncSession = Depends(get_async_session), current_user: User = Depends(get_current_user)):
+    result = await db.execute(select(Supplier).where(Supplier.id == supplier_id))
+    s = result.scalar_one_or_none()
     if not s:
         raise HTTPException(status_code=404, detail="Supplier not found")
-    db.delete(s); db.commit()
+    await db.delete(s); await db.commit()
     return {"ok": True}
 
 
 # ── PURCHASE API ───────────────────────────────────────
 @router.get("/api/purchases")
-def get_purchases(supplier_id: int = None, db: Session = Depends(get_db)):
-    query = db.query(Purchase)
+async def get_purchases(supplier_id: int = None, db: AsyncSession = Depends(get_async_session)):
+    stmt = select(Purchase)
     if supplier_id:
-        query = query.filter(Purchase.supplier_id == supplier_id)
-    purchases = query.order_by(Purchase.created_at.desc()).limit(100).all()
+        stmt = stmt.where(Purchase.supplier_id == supplier_id)
+    result = await db.execute(stmt.order_by(Purchase.created_at.desc()).limit(100))
+    purchases = result.scalars().all()
     return [
         {
             "id":              p.id,
@@ -109,8 +103,9 @@ def get_purchases(supplier_id: int = None, db: Session = Depends(get_db)):
     ]
 
 @router.get("/api/purchase/{purchase_id}")
-def get_purchase(purchase_id: int, db: Session = Depends(get_db)):
-    p = db.query(Purchase).filter(Purchase.id == purchase_id).first()
+async def get_purchase(purchase_id: int, db: AsyncSession = Depends(get_async_session)):
+    result = await db.execute(select(Purchase).where(Purchase.id == purchase_id))
+    p = result.scalar_one_or_none()
     if not p:
         raise HTTPException(status_code=404, detail="Purchase not found")
     return {
@@ -136,24 +131,27 @@ def get_purchase(purchase_id: int, db: Session = Depends(get_db)):
     }
 
 @router.post("/api/purchase/create")
-def create_purchase(data: PurchaseCreate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+async def create_purchase(data: PurchaseCreate, db: AsyncSession = Depends(get_async_session), current_user: User = Depends(get_current_user)):
     if not data.items:
         raise HTTPException(status_code=400, detail="Purchase must have at least one item")
 
-    supplier = db.query(Supplier).filter(Supplier.id == data.supplier_id).first()
+    sup_result = await db.execute(select(Supplier).where(Supplier.id == data.supplier_id))
+    supplier = sup_result.scalar_one_or_none()
     if not supplier:
         raise HTTPException(status_code=404, detail="Supplier not found")
 
     # Generate purchase number
     from sqlalchemy import func as sqlfunc
-    max_id = db.query(sqlfunc.max(Purchase.id)).scalar() or 0
+    max_result = await db.execute(select(sqlfunc.max(Purchase.id)))
+    max_id = max_result.scalar() or 0
     purchase_number = f"PO-{str(max_id + 1).zfill(5)}"
 
     subtotal = 0
     line_items = []
 
     for item in data.items:
-        product = db.query(Product).filter(Product.id == item.product_id).first()
+        prod_result = await db.execute(select(Product).where(Product.id == item.product_id))
+        product = prod_result.scalar_one_or_none()
         if not product:
             raise HTTPException(status_code=404, detail=f"Product ID not found: {item.product_id}")
         line_total = item.qty * item.unit_cost
@@ -169,7 +167,7 @@ def create_purchase(data: PurchaseCreate, db: Session = Depends(get_db), current
         total=round(subtotal, 2),
         notes=data.notes,
     )
-    db.add(purchase); db.flush()
+    db.add(purchase); await db.flush()
 
     for product, qty, unit_cost, line_total in line_items:
         db.add(PurchaseItem(
@@ -194,12 +192,13 @@ def create_purchase(data: PurchaseCreate, db: Session = Depends(get_db), current
             note=f"Purchase {purchase_number}",
         ))
 
-    db.commit(); db.refresh(purchase)
+    await db.commit(); await db.refresh(purchase)
     return {"id": purchase.id, "purchase_number": purchase_number, "total": float(purchase.total)}
 
 @router.get("/api/products-list")
-def products_list(db: Session = Depends(get_db)):
-    products = db.query(Product).filter(Product.is_active == True).order_by(Product.name).all()
+async def products_list(db: AsyncSession = Depends(get_async_session)):
+    result = await db.execute(select(Product).where(Product.is_active == True).order_by(Product.name))
+    products = result.scalars().all()
     return [
         {"id": p.id, "sku": p.sku, "name": p.name, "cost": float(p.cost), "stock": float(p.stock)}
         for p in products
@@ -600,19 +599,15 @@ td.mono { font-family: var(--mono); color: var(--green); }
 <div class="toast" id="toast"></div>
 
 <script>
-  const __erpToken = localStorage.getItem("token");
-  const __erpUserRole = localStorage.getItem("user_role") || "";
-  const __erpUserPermissions = new Set(
-      (localStorage.getItem("user_permissions") || "")
-          .split(",")
-          .map(p => p.trim())
-          .filter(Boolean)
-  );
-  function authHeaders(extraHeaders = {}){
-      return __erpToken
-          ? { ...extraHeaders, "Authorization": "Bearer " + __erpToken }
-          : { ...extraHeaders };
+  // Auth guard: redirect to login if the readable session cookie is absent
+  function _hasAuthCookie() {
+      return document.cookie.split(";").some(c => c.trim().startsWith("logged_in="));
   }
+  if (!_hasAuthCookie()) { window.location.href = "/"; }
+
+  // Cookie is sent automatically — authHeaders just passes through any extra headers
+  function authHeaders(extraHeaders = {}){ return { ...extraHeaders }; }
+
   function setModeButton(isLight){
     const btn = document.getElementById("mode-btn");
     if(btn) btn.innerText = isLight ? "☀️" : "🌙";
@@ -627,65 +622,24 @@ function initializeColorMode(){
     document.body.classList.toggle("light", isLight);
     setModeButton(isLight);
 }
-function setUserInfo(){
-    const name = localStorage.getItem("user_name") || "Admin";
-    const avatar = document.getElementById("user-avatar");
-    const userName = document.getElementById("user-name");
-    if(avatar) avatar.innerText = name.charAt(0).toUpperCase();
-    if(userName) userName.innerText = name;
+async function initUser() {
+    try {
+        const r = await fetch("/auth/me");
+        if (!r.ok) { window.location.href = "/"; return; }
+        const u = await r.json();
+        const nameEl = document.getElementById("user-name");
+        const avatarEl = document.getElementById("user-avatar");
+        if (nameEl) nameEl.innerText = u.name;
+        if (avatarEl) avatarEl.innerText = u.name.charAt(0).toUpperCase();
+        return u;
+    } catch(e) { window.location.href = "/"; }
 }
-function logout(){
-    localStorage.removeItem("token");
-    localStorage.removeItem("user_name");
-    localStorage.removeItem("user_role");
-    localStorage.removeItem("user_permissions");
-    document.cookie = "access_token=; Max-Age=0; path=/; SameSite=Lax";
+async function logout(){
+    await fetch("/auth/logout", { method: "POST" });
     window.location.href = "/";
 }
-  function requirePageAccess(permission){
-      if(!__erpToken){
-          window.location.href = "/";
-          throw new Error("Not authenticated");
-      }
-      if(__erpUserRole === "admin" || __erpUserPermissions.has(permission)) return;
-      document.body.innerHTML = `<div style="display:flex;align-items:center;justify-content:center;height:100vh;flex-direction:column;gap:16px;color:#445066;font-family:'Outfit',sans-serif;background:#060810"><div style="font-size:48px">🔒</div><div style="font-size:20px;font-weight:800;color:#f0f4ff">Access Restricted</div><div style="font-size:14px">You do not have permission to open this page.</div><a href="/home" style="color:#00ff9d;text-decoration:none;font-weight:700">Back to Home</a></div>`;
-      throw new Error("Access denied");
-  }
-  function applyNavPermissions(){
-      const navPermissions = {
-          "/home": null,
-          "/dashboard": "page_dashboard",
-          "/pos": "page_pos",
-          "/b2b/": "page_b2b",
-          "/inventory/": "page_inventory",
-          "/products/": "page_products",
-          "/customers-mgmt/": "page_customers",
-          "/suppliers/": "page_suppliers",
-          "/production/": "page_production",
-          "/farm/": "page_farm",
-          "/hr/": "page_hr",
-          "/accounting/": "page_accounting",
-          "/reports/": "page_reports",
-          "/import": "page_import",
-          "/users/": "admin_only"
-      };
-      document.querySelectorAll("a.nav-link[href]").forEach(link => {
-          const href = link.getAttribute("href");
-          const requirement = navPermissions[href];
-          if(requirement === undefined || requirement === null) return;
-          if(requirement === "admin_only"){
-              if(__erpUserRole !== "admin") link.style.display = "none";
-              return;
-          }
-          if(__erpUserRole !== "admin" && !__erpUserPermissions.has(requirement)){
-              link.style.display = "none";
-          }
-      });
-  }
-  requirePageAccess("page_suppliers");
-  applyNavPermissions();
   initializeColorMode();
-  setUserInfo();
+  initUser();
   let suppliers  = [];
 let allProducts = [];
 let currentTab  = "suppliers";

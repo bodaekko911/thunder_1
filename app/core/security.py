@@ -4,9 +4,11 @@ from typing import Optional
 from fastapi import Cookie, Depends, Header, HTTPException, status
 from jose import JWTError, jwt
 from passlib.context import CryptContext
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
-from app.database import get_db
+from app.database import get_async_session
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
@@ -67,10 +69,10 @@ def extract_bearer_token(authorization: Optional[str]) -> str:
     return token
 
 
-def get_current_user(
+async def get_current_user(
     authorization: Optional[str] = Header(None),
     access_token: Optional[str] = Cookie(None),
-    db=Depends(get_db),
+    db: AsyncSession = Depends(get_async_session),
 ):
     from app.models.user import User
 
@@ -84,7 +86,8 @@ def get_current_user(
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-    user = db.query(User).filter(User.id == int(user_id)).first()
+    result = await db.execute(select(User).where(User.id == int(user_id)))
+    user = result.scalar_one_or_none()
     if not user:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -100,7 +103,7 @@ def get_current_user(
 
 
 def require_role(*roles: str):
-    def checker(current_user=Depends(get_current_user)):
+    async def checker(current_user=Depends(get_current_user)):
         if current_user.role not in roles:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,

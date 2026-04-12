@@ -1,18 +1,18 @@
-from pydantic import BaseModel
-from typing import List, Optional
+from pydantic import BaseModel, Field
+from typing import Optional, List
 
 
 class InvoiceItemCreate(BaseModel):
-    sku:   str
-    name:  Optional[str] = None
-    price: Optional[float] = None
-    qty:   float
+    sku:   str = Field(..., min_length=1, max_length=80)
+    name:  Optional[str] = Field(None, max_length=200)
+    price: Optional[float] = Field(None, ge=0)
+    qty:   float = Field(..., gt=0)
 
 
 class InvoiceCreate(BaseModel):
     customer_id:      Optional[int] = None
     items:            List[InvoiceItemCreate]
-    discount_percent: float = 0
-    notes:            Optional[str] = None
-    payment_method:   str = "cash"
+    discount_percent: float = Field(0, ge=0, le=100)
+    notes:            Optional[str] = Field(None, max_length=500)
+    payment_method:   str = Field("cash", min_length=1, max_length=50)
     settle_later:     bool = False

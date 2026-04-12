@@ -1,15 +1,17 @@
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import HTMLResponse
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
+from sqlalchemy import select, or_
 from decimal import Decimal
 from datetime import datetime
 
-from app.database import get_db
+from app.database import get_async_session
 from app.core.permissions import require_permission
 from app.core.security import get_current_user
 from app.models.product import Product
 from app.models.customer import Customer
-from app.models.invoice import Invoice, InvoiceItem
+from app.models.invoice import Invoice
 from app.schemas.invoice import InvoiceCreate
 from app.services.pos_service import create_invoice
 
@@ -20,8 +22,9 @@ router = APIRouter(
 
 
 @router.get("/products-cache")
-def products_cache(db: Session = Depends(get_db)):
-    products = db.query(Product).filter(Product.is_active == True).all()
+async def products_cache(db: AsyncSession = Depends(get_async_session)):
+    _r = await db.execute(select(Product).where(Product.is_active == True))
+    products = _r.scalars().all()
     return [
         {"sku": p.sku, "name": p.name, "price": float(p.price), "stock": float(p.stock)}
         for p in products
@@ -29,15 +32,16 @@ def products_cache(db: Session = Depends(get_db)):
 
 
 @router.get("/search-products")
-def search_products(q: str = "", db: Session = Depends(get_db)):
-    results = (
-        db.query(Product)
-        .filter(
+async def search_products(q: str = "", db: AsyncSession = Depends(get_async_session)):
+    _r = await db.execute(
+        select(Product)
+        .where(
             Product.is_active == True,
-            (Product.name.ilike(f"%{q}%")) | (Product.sku.ilike(f"%{q}%"))
+            or_(Product.name.ilike(f"%{q}%"), Product.sku.ilike(f"%{q}%"))
         )
-        .limit(40).all()
+        .limit(40)
     )
+    results = _r.scalars().all()
     return [
         {"sku": p.sku, "name": p.name, "price": float(p.price), "stock": float(p.stock)}
         for p in results
@@ -45,15 +49,16 @@ def search_products(q: str = "", db: Session = Depends(get_db)):
 
 
 @router.get("/customers")
-def list_customers(db: Session = Depends(get_db)):
-    customers = db.query(Customer).order_by(Customer.name).all()
+async def list_customers(db: AsyncSession = Depends(get_async_session)):
+    _r = await db.execute(select(Customer).order_by(Customer.name))
+    customers = _r.scalars().all()
     return [{"id": c.id, "name": c.name, "phone": c.phone} for c in customers]
 
 
 @router.post("/invoice")
-def checkout(
+async def checkout(
     data: InvoiceCreate,
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_async_session),
     user=Depends(get_current_user),
 ):
     user_id = user.id
@@ -68,21 +73,21 @@ def checkout(
 
 
 @router.get("/unpaid-invoices")
-def get_unpaid_invoices(db: Session = Depends(get_db)):
-    invoices = (
-        db.query(Invoice)
-        .filter(Invoice.status == "unpaid")
+async def get_unpaid_invoices(db: AsyncSession = Depends(get_async_session)):
+    _r = await db.execute(
+        select(Invoice)
+        .where(Invoice.status == "unpaid")
+        .options(selectinload(Invoice.customer), selectinload(Invoice.items))
         .order_by(Invoice.created_at.desc())
-        .limit(50).all()
+        .limit(50)
     )
+    invoices = _r.scalars().all()
     result = []
     for i in invoices:
-        customer = db.query(Customer).filter(Customer.id == i.customer_id).first()
-        items    = db.query(InvoiceItem).filter(InvoiceItem.invoice_id == i.id).all()
         result.append({
             "id":             i.id,
             "invoice_number": i.invoice_number,
-            "customer":       customer.name if customer else "—",
+            "customer":       i.customer.name if i.customer else "—",
             "total":          float(i.total),
             "subtotal":       float(i.subtotal),
             "discount":       float(i.discount),
@@ -94,17 +99,18 @@ def get_unpaid_invoices(db: Session = Depends(get_db)):
                     "unit_price": float(it.unit_price),
                     "total":      float(it.total),
                 }
-                for it in items
+                for it in i.items
             ],
         })
     return result
 
 
 @router.post("/invoice/{invoice_id}/collect")
-def collect_payment(invoice_id: int, data: dict, db: Session = Depends(get_db)):
+async def collect_payment(invoice_id: int, data: dict, db: AsyncSession = Depends(get_async_session)):
     from app.models.accounting import Account, Journal, JournalEntry
 
-    invoice = db.query(Invoice).filter(Invoice.id == invoice_id).first()
+    _r = await db.execute(select(Invoice).where(Invoice.id == invoice_id))
+    invoice = _r.scalar_one_or_none()
     if not invoice:
         raise HTTPException(status_code=404, detail="Invoice not found")
     if invoice.status == "paid":
@@ -117,10 +123,11 @@ def collect_payment(invoice_id: int, data: dict, db: Session = Depends(get_db)):
     total   = float(invoice.total)
     journal = Journal(ref_type="payment",
                       description=f"Payment collected - {invoice.invoice_number}")
-    db.add(journal); db.flush()
+    db.add(journal); await db.flush()
 
     for code, debit, credit in [("1000", total, 0), ("1100", 0, total)]:
-        acc = db.query(Account).filter(Account.code == code).first()
+        _r = await db.execute(select(Account).where(Account.code == code))
+        acc = _r.scalar_one_or_none()
         if acc:
             db.add(JournalEntry(
                 journal_id=journal.id,
@@ -134,17 +141,22 @@ def collect_payment(invoice_id: int, data: dict, db: Session = Depends(get_db)):
     log_record(db, "POS", "collect_payment",
                f"Payment collected — {invoice.invoice_number} — {total:.2f} — {payment_method}",
                ref_type="invoice", ref_id=invoice_id)
-    db.commit()
+    await db.commit()
     return {"ok": True, "invoice_number": invoice.invoice_number}
 
 
 @router.get("/invoice/{invoice_id}", response_class=HTMLResponse)
-def view_invoice(invoice_id: int, db: Session = Depends(get_db)):
-    inv      = db.query(Invoice).filter(Invoice.id == invoice_id).first()
+async def view_invoice(invoice_id: int, db: AsyncSession = Depends(get_async_session)):
+    _r = await db.execute(
+        select(Invoice)
+        .where(Invoice.id == invoice_id)
+        .options(selectinload(Invoice.customer), selectinload(Invoice.items))
+    )
+    inv = _r.scalar_one_or_none()
     if not inv:
         raise HTTPException(status_code=404, detail="Invoice not found")
-    customer = db.query(Customer).filter(Customer.id == inv.customer_id).first()
-    items    = db.query(InvoiceItem).filter(InvoiceItem.invoice_id == invoice_id).all()
+    customer = inv.customer
+    items    = inv.items
 
     rows = ""
     for i in items:
@@ -632,14 +644,12 @@ body.light .toast{background:var(--card);}
 </div>
 
 <script>
-  const __erpToken = localStorage.getItem("token");
-  const __erpUserRole = localStorage.getItem("user_role") || "";
-  const __erpUserPermissions = new Set(
-      (localStorage.getItem("user_permissions") || "")
-          .split(",")
-          .map(p => p.trim())
-          .filter(Boolean)
-  );
+  // Auth guard: redirect to login if the readable session cookie is absent
+  function _hasAuthCookie() {
+      return document.cookie.split(";").some(c => c.trim().startsWith("logged_in="));
+  }
+  if (!_hasAuthCookie()) { window.location.href = "/"; }
+
   function setModeButton(isLight){
       const btn = document.getElementById("mode-btn");
       if(btn) btn.innerText = isLight ? "☀️" : "🌙";
@@ -654,73 +664,39 @@ body.light .toast{background:var(--card);}
       document.body.classList.toggle("light", isLight);
       setModeButton(isLight);
   }
-  function setUserInfo(){
-      const name = localStorage.getItem("user_name") || "Admin";
-      const avatar = document.getElementById("user-avatar");
-      const userName = document.getElementById("user-name");
-      if(avatar) avatar.innerText = name.charAt(0).toUpperCase();
-      if(userName) userName.innerText = name;
+  async function initUser() {
+      try {
+          const r = await fetch("/auth/me");
+          if (!r.ok) { window.location.href = "/"; return; }
+          const u = await r.json();
+          const nameEl = document.getElementById("user-name");
+          const avatarEl = document.getElementById("user-avatar");
+          if (nameEl) nameEl.innerText = u.name;
+          if (avatarEl) avatarEl.innerText = u.name.charAt(0).toUpperCase();
+          return u;
+      } catch(e) { window.location.href = "/"; }
   }
-  function requirePageAccess(permission){
-      if(!__erpToken){
-          window.location.href = "/";
-          throw new Error("Not authenticated");
-      }
-      if(__erpUserRole === "admin" || __erpUserPermissions.has(permission)) return;
-      document.body.innerHTML = `<div style="display:flex;align-items:center;justify-content:center;height:100vh;flex-direction:column;gap:16px;color:#445066;font-family:'Outfit',sans-serif;background:#060810"><div style="font-size:48px">🔒</div><div style="font-size:20px;font-weight:800;color:#f0f4ff">Access Restricted</div><div style="font-size:14px">You do not have permission to open this page.</div><a href="/home" style="color:#00ff9d;text-decoration:none;font-weight:700">Back to Home</a></div>`;
-      throw new Error("Access denied");
+  function hasPermission(permission, u){
+      const role = u ? (u.role || "") : "";
+      const perms = new Set(u ? (u.permissions || []) : []);
+      return role === "admin" || perms.has(permission);
   }
-  function applyNavPermissions(){
-      const navPermissions = {
-          "/home": null,
-          "/dashboard": "page_dashboard",
-          "/pos": "page_pos",
-          "/b2b/": "page_b2b",
-          "/inventory/": "page_inventory",
-          "/products/": "page_products",
-          "/customers-mgmt/": "page_customers",
-          "/suppliers/": "page_suppliers",
-          "/production/": "page_production",
-          "/farm/": "page_farm",
-          "/hr/": "page_hr",
-          "/accounting/": "page_accounting",
-          "/reports/": "page_reports",
-          "/import": "page_import",
-          "/users/": "admin_only"
-      };
-      document.querySelectorAll("a.nav-link[href]").forEach(link => {
-          const href = link.getAttribute("href");
-          const requirement = navPermissions[href];
-          if(requirement === undefined || requirement === null) return;
-          if(requirement === "admin_only"){
-              if(__erpUserRole !== "admin") link.style.display = "none";
-              return;
-          }
-          if(__erpUserRole !== "admin" && !__erpUserPermissions.has(requirement)){
-              link.style.display = "none";
-          }
-      });
-  }
-  function hasPermission(permission){
-      return __erpUserRole === "admin" || __erpUserPermissions.has(permission);
-  }
-  requirePageAccess("page_pos");
-  applyNavPermissions();
   initializeColorMode();
-  setUserInfo();
 let customers=[], products=[], cart=[], lastCart=[];
 let selectedCustomer = null;
 let selectedPayMethod = "cash";
-let token = localStorage.getItem("token");
 let toastTimer = null;
 let currentInvoiceData = null;
-if(!hasPermission("action_pos_discount")){
-    document.getElementById("discount").disabled = true;
-    document.getElementById("discount").value = "0";
-}
-if(!hasPermission("action_pos_settle_later")){
-    document.getElementById("settle_btn").style.display = "none";
-}
+initUser().then(u => {
+    if(!u) return;
+    if(!hasPermission("action_pos_discount", u)){
+        document.getElementById("discount").disabled = true;
+        document.getElementById("discount").value = "0";
+    }
+    if(!hasPermission("action_pos_settle_later", u)){
+        document.getElementById("settle_btn").style.display = "none";
+    }
+});
 
 /* ── OFFLINE / INDEXEDDB ── */
 function openDB(){
@@ -778,7 +754,7 @@ async function syncOfflineQueue(){
         try {
             const res = await fetch("/invoice",{
                 method:"POST",
-                headers:{"Content-Type":"application/json","Authorization":"Bearer "+token},
+                headers:{"Content-Type":"application/json"},
                 body: JSON.stringify({
                     customer_id:      sale.customer_id,
                     items:            sale.items,
@@ -984,7 +960,7 @@ function clearCart(){
     lastCart=[...cart]; cart=[]; drawCart(); showToast("Cart cleared",true,true);
 }
 function undoCart(){ cart=[...lastCart]; drawCart(); hideToast(); }
-function logout(){ localStorage.removeItem("token"); localStorage.removeItem("user_name"); localStorage.removeItem("user_role"); localStorage.removeItem("user_permissions"); document.cookie = "access_token=; Max-Age=0; path=/; SameSite=Lax"; window.location.href="/"; }
+async function logout(){ await fetch("/auth/logout", { method: "POST" }); window.location.href="/"; }
 
 function drawCart(){
     let empty=document.getElementById("cart_empty"), cartEl=document.getElementById("cart"), countEl=document.getElementById("cart_count"), total=0;
@@ -1046,7 +1022,7 @@ async function checkout(settleLater=false){
     try {
         let res=await fetch("/invoice",{
             method:"POST",
-            headers:{"Content-Type":"application/json","Authorization":"Bearer "+token},
+            headers:{"Content-Type":"application/json"},
             body:JSON.stringify(payload),
         });
         let data;
@@ -1127,7 +1103,7 @@ async function loadUnpaidInvoices(){
 async function collectPayment(invoiceId, invoiceNumber, method){
     let res=await fetch(`/invoice/${invoiceId}/collect`,{
         method:"POST",
-        headers:{"Content-Type":"application/json","Authorization":"Bearer "+token},
+        headers:{"Content-Type":"application/json"},
         body:JSON.stringify({payment_method:method}),
     });
     let data=await res.json();

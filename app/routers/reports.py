@@ -1,13 +1,14 @@
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import HTMLResponse, StreamingResponse
-from sqlalchemy.orm import Session
-from sqlalchemy import func
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
+from sqlalchemy import func, select
 from datetime import datetime, date, timedelta
 from typing import Optional
 import io
 
 from app.core.permissions import require_permission
-from app.database import get_db
+from app.database import get_async_session
 from app.models.product import Product
 from app.models.invoice import Invoice, InvoiceItem
 from app.models.b2b import B2BClient, B2BInvoice, B2BInvoiceItem
@@ -78,11 +79,29 @@ def parse_dates(date_from, date_to):
 
 # ── SALES ──────────────────────────────────────────────
 @router.get("/api/sales")
-def sales_report(date_from: Optional[str] = None, date_to: Optional[str] = None, db: Session = Depends(get_db)):
+async def sales_report(date_from: Optional[str] = None, date_to: Optional[str] = None, skip: int = 0, limit: int = Query(default=100, le=500), db: AsyncSession = Depends(get_async_session)):
     d_from, d_to = parse_dates(date_from, date_to)
-    pos_invoices = db.query(Invoice).filter(Invoice.created_at >= d_from, Invoice.created_at <= d_to, Invoice.status == "paid").all()
-    b2b_invoices = db.query(B2BInvoice).filter(B2BInvoice.created_at >= d_from, B2BInvoice.created_at <= d_to).all()
-    refunds      = db.query(RetailRefund).filter(RetailRefund.created_at >= d_from, RetailRefund.created_at <= d_to).all()
+    if (d_to - d_from).days > 366:
+        raise HTTPException(status_code=400, detail="Date range cannot exceed 1 year")
+    result = await db.execute(
+        select(Invoice)
+        .where(Invoice.created_at >= d_from, Invoice.created_at <= d_to, Invoice.status == "paid")
+        .options(selectinload(Invoice.items), selectinload(Invoice.user), selectinload(Invoice.customer))
+    )
+    pos_invoices = result.scalars().all()
+    result = await db.execute(
+        select(B2BInvoice)
+        .where(B2BInvoice.created_at >= d_from, B2BInvoice.created_at <= d_to)
+        .options(selectinload(B2BInvoice.items).selectinload(B2BInvoiceItem.product),
+                 selectinload(B2BInvoice.client), selectinload(B2BInvoice.user))
+    )
+    b2b_invoices = result.scalars().all()
+    result = await db.execute(
+        select(RetailRefund)
+        .where(RetailRefund.created_at >= d_from, RetailRefund.created_at <= d_to)
+        .options(selectinload(RetailRefund.customer), selectinload(RetailRefund.user))
+    )
+    refunds = result.scalars().all()
 
     pos_total    = sum(float(i.total) for i in pos_invoices)
     b2b_total    = sum(float(i.amount_paid) for i in b2b_invoices)
@@ -106,7 +125,7 @@ def sales_report(date_from: Optional[str] = None, date_to: Optional[str] = None,
 
     product_sales = {}
     for inv in pos_invoices:
-        for item in db.query(InvoiceItem).filter(InvoiceItem.invoice_id == inv.id).all():
+        for item in inv.items:
             product_sales.setdefault(item.name, {"qty": 0, "revenue": 0})
             product_sales[item.name]["qty"]     += float(item.qty)
             product_sales[item.name]["revenue"] += float(item.total)
@@ -115,7 +134,7 @@ def sales_report(date_from: Optional[str] = None, date_to: Optional[str] = None,
     # Detailed POS records
     pos_records = []
     for inv in sorted(pos_invoices, key=lambda x: x.created_at, reverse=True):
-        items = db.query(InvoiceItem).filter(InvoiceItem.invoice_id == inv.id).all()
+        items = inv.items
         pos_records.append({
             "invoice_number": inv.invoice_number or f"POS-{inv.id}",
             "datetime": inv.created_at.strftime("%Y-%m-%d %H:%M") if inv.created_at else "—",
@@ -157,6 +176,10 @@ def sales_report(date_from: Optional[str] = None, date_to: Optional[str] = None,
             "total":          float(r.total),
         })
 
+    pos_records = pos_records[skip : skip + limit]
+    b2b_records = b2b_records[skip : skip + limit]
+    refund_records = refund_records[skip : skip + limit]
+
     return {"pos_total": round(pos_total, 2), "b2b_total": round(b2b_total, 2),
             "refund_total": round(refund_total, 2),
             "grand_total": round(pos_total + b2b_total, 2),
@@ -166,8 +189,8 @@ def sales_report(date_from: Optional[str] = None, date_to: Optional[str] = None,
             "date_from": d_from.strftime("%Y-%m-%d"), "date_to": d_to.strftime("%Y-%m-%d")}
 
 @router.get("/export/sales", dependencies=[Depends(require_permission("action_export_excel"))])
-def export_sales(date_from: str = None, date_to: str = None, db: Session = Depends(get_db)):
-    data = sales_report(date_from=date_from, date_to=date_to, db=db)
+async def export_sales(date_from: str = None, date_to: str = None, db: AsyncSession = Depends(get_async_session)):
+    data = await sales_report(date_from=date_from, date_to=date_to, db=db)
     try:
         import openpyxl
         from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
@@ -289,23 +312,35 @@ def export_sales(date_from: str = None, date_to: str = None, db: Session = Depen
 
 # ── B2B STATEMENT ──────────────────────────────────────
 @router.get("/api/b2b-statement")
-def b2b_statement(date_from: Optional[str] = None, date_to: Optional[str] = None, db: Session = Depends(get_db)):
+async def b2b_statement(date_from: Optional[str] = None, date_to: Optional[str] = None, skip: int = 0, limit: int = Query(default=100, le=500), db: AsyncSession = Depends(get_async_session)):
     d_from, d_to = parse_dates(date_from, date_to)
-    clients = db.query(B2BClient).filter(B2BClient.is_active == True).order_by(B2BClient.name).all()
+    if (d_to - d_from).days > 366:
+        raise HTTPException(status_code=400, detail="Date range cannot exceed 1 year")
+    res = await db.execute(select(B2BClient).where(B2BClient.is_active == True).order_by(B2BClient.name))
+    clients = res.scalars().all()
     result = []
     for c in clients:
-        invoices = db.query(B2BInvoice).filter(B2BInvoice.client_id == c.id, B2BInvoice.created_at >= d_from, B2BInvoice.created_at <= d_to).all()
-        if not invoices: continue
-        total_invoiced = sum(float(i.total) for i in invoices)
-        total_paid     = sum(float(i.amount_paid) for i in invoices)
+        agg_res = await db.execute(
+            select(
+                func.count(B2BInvoice.id),
+                func.sum(B2BInvoice.total),
+                func.sum(B2BInvoice.amount_paid),
+            ).where(B2BInvoice.client_id == c.id, B2BInvoice.created_at >= d_from, B2BInvoice.created_at <= d_to)
+        )
+        row = agg_res.one()
+        invoice_count, total_invoiced, total_paid = row
+        if not invoice_count: continue
+        total_invoiced = float(total_invoiced or 0)
+        total_paid     = float(total_paid or 0)
         result.append({"id":c.id,"name":c.name,"phone":c.phone or "—","payment_terms":c.payment_terms,
             "total_invoiced":round(total_invoiced,2),"total_paid":round(total_paid,2),
-            "outstanding":round(total_invoiced-total_paid,2),"invoice_count":len(invoices)})
+            "outstanding":round(total_invoiced-total_paid,2),"invoice_count":invoice_count})
+    result = result[skip : skip + limit]
     return result
 
 @router.get("/export/b2b-statement", dependencies=[Depends(require_permission("action_export_excel"))])
-def export_b2b(date_from: str = None, date_to: str = None, db: Session = Depends(get_db)):
-    data = b2b_statement(date_from=date_from, date_to=date_to, db=db)
+async def export_b2b(date_from: str = None, date_to: str = None, db: AsyncSession = Depends(get_async_session)):
+    data = await b2b_statement(date_from=date_from, date_to=date_to, db=db)
     rows = [[d["name"],d["phone"],d["payment_terms"],d["total_invoiced"],d["total_paid"],d["outstanding"],d["invoice_count"]] for d in data]
     buf = to_xlsx(["Client","Phone","Payment Terms","Total Invoiced","Total Paid","Outstanding","Invoices"], rows, "B2B Statement")
     return StreamingResponse(buf, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -314,19 +349,26 @@ def export_b2b(date_from: str = None, date_to: str = None, db: Session = Depends
 
 # ── INVENTORY ──────────────────────────────────────────
 @router.get("/api/inventory")
-def inventory_report(db: Session = Depends(get_db)):
-    products = db.query(Product).filter(Product.is_active == True).order_by(Product.name).all()
+async def inventory_report(skip: int = 0, limit: int = Query(default=100, le=500), db: AsyncSession = Depends(get_async_session)):
+    prod_res = await db.execute(select(Product).where(Product.is_active == True).order_by(Product.name))
+    products = prod_res.scalars().all()
     rows = []
     for p in products:
-        total_in  = float(db.query(func.sum(StockMove.qty)).filter(StockMove.product_id==p.id, StockMove.type=="in").scalar()  or 0)
-        total_out = abs(float(db.query(func.sum(StockMove.qty)).filter(StockMove.product_id==p.id, StockMove.type=="out").scalar() or 0))
+        in_res  = await db.execute(select(func.sum(StockMove.qty)).where(StockMove.product_id==p.id, StockMove.type=="in"))
+        out_res = await db.execute(select(func.sum(StockMove.qty)).where(StockMove.product_id==p.id, StockMove.type=="out"))
+        total_in  = float(in_res.scalar() or 0)
+        total_out = abs(float(out_res.scalar() or 0))
         rows.append({"sku":p.sku,"name":p.name,"stock":float(p.stock),"unit":p.unit,"price":float(p.price),
             "value":round(float(p.stock)*float(p.price),2),"total_in":round(total_in,2),"total_out":round(total_out,2),"low_stock":float(p.stock)<=5})
-    return {"products":rows,"total_value":round(sum(r["value"] for r in rows),2),"low_count":sum(1 for r in rows if r["low_stock"]),"total_products":len(rows)}
+    total_value   = round(sum(r["value"] for r in rows), 2)
+    low_count     = sum(1 for r in rows if r["low_stock"])
+    total_products = len(rows)
+    rows = rows[skip : skip + limit]
+    return {"products":rows,"total_value":total_value,"low_count":low_count,"total_products":total_products}
 
 @router.get("/export/inventory", dependencies=[Depends(require_permission("action_export_excel"))])
-def export_inventory(db: Session = Depends(get_db)):
-    data = inventory_report(db=db)
+async def export_inventory(db: AsyncSession = Depends(get_async_session)):
+    data = await inventory_report(db=db)
     rows = [[p["sku"],p["name"],p["stock"],p["unit"],p["price"],p["value"],p["total_in"],p["total_out"],"YES" if p["low_stock"] else ""] for p in data["products"]]
     buf = to_xlsx(["SKU","Product","Stock","Unit","Price (EGP)","Stock Value","Total In","Total Out","Low Stock"], rows, "Inventory")
     return StreamingResponse(buf, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -335,20 +377,29 @@ def export_inventory(db: Session = Depends(get_db)):
 
 # ── FARM INTAKE ────────────────────────────────────────
 @router.get("/api/farm-intake")
-def farm_intake_report(date_from: Optional[str] = None, date_to: Optional[str] = None, db: Session = Depends(get_db)):
+async def farm_intake_report(date_from: Optional[str] = None, date_to: Optional[str] = None, skip: int = 0, limit: int = Query(default=100, le=500), db: AsyncSession = Depends(get_async_session)):
     d_from, d_to = parse_dates(date_from, date_to)
-    farms = db.query(Farm).filter(Farm.is_active == 1).all()
+    if (d_to - d_from).days > 366:
+        raise HTTPException(status_code=400, detail="Date range cannot exceed 1 year")
+    farm_res = await db.execute(select(Farm).where(Farm.is_active == 1))
+    farms = farm_res.scalars().all()
     # Auto-fix unnamed farms
     default_names = ["Organic Farm", "Regenerative Farm"]
     for i, farm in enumerate(farms):
         if not farm.name or str(farm.name).strip().lower() in ("none", ""):
             farm.name = default_names[i] if i < len(default_names) else f"Farm {farm.id}"
-    try: db.commit()
-    except Exception: db.rollback()
+    try: await db.commit()
+    except Exception: await db.rollback()
     result = []
     delivery_rows = []
     for farm in farms:
-        deliveries = db.query(FarmDelivery).filter(FarmDelivery.farm_id==farm.id, FarmDelivery.delivery_date>=d_from.date(), FarmDelivery.delivery_date<=d_to.date()).all()
+        del_res = await db.execute(
+            select(FarmDelivery)
+            .where(FarmDelivery.farm_id==farm.id, FarmDelivery.delivery_date>=d_from.date(), FarmDelivery.delivery_date<=d_to.date())
+            .options(selectinload(FarmDelivery.items).selectinload(FarmDeliveryItem.product),
+                     selectinload(FarmDelivery.user))
+        )
+        deliveries = del_res.scalars().all()
         product_totals = {}
         for d in deliveries:
             delivery_rows.append({
@@ -369,11 +420,12 @@ def farm_intake_report(date_from: Optional[str] = None, date_to: Optional[str] =
         products = [{"name":k.split("|")[0],"unit":k.split("|")[1],"total_qty":round(v,2)} for k,v in sorted(product_totals.items(), key=lambda x: x[1], reverse=True)]
         result.append({"name": farm.name or f"Farm {farm.id}", "delivery_count":len(deliveries), "products":products, "total_qty":round(sum(p["total_qty"] for p in products),2)})
     delivery_rows.sort(key=lambda row: (row["delivery_date"], row["delivery_number"]), reverse=True)
+    delivery_rows = delivery_rows[skip : skip + limit]
     return {"farms": result, "deliveries": delivery_rows}
 
 @router.get("/export/farm-intake", dependencies=[Depends(require_permission("action_export_excel"))])
-def export_farm(date_from: str = None, date_to: str = None, db: Session = Depends(get_db)):
-    data = farm_intake_report(date_from=date_from, date_to=date_to, db=db)
+async def export_farm(date_from: str = None, date_to: str = None, db: AsyncSession = Depends(get_async_session)):
+    data = await farm_intake_report(date_from=date_from, date_to=date_to, db=db)
     rows = []
     for farm in data["farms"]:
         for p in farm["products"]:
@@ -389,22 +441,33 @@ def export_farm(date_from: str = None, date_to: str = None, db: Session = Depend
 
 # ── SPOILAGE ───────────────────────────────────────────
 @router.get("/api/spoilage")
-def spoilage_report(date_from: Optional[str] = None, date_to: Optional[str] = None, db: Session = Depends(get_db)):
+async def spoilage_report(date_from: Optional[str] = None, date_to: Optional[str] = None, skip: int = 0, limit: int = Query(default=100, le=500), db: AsyncSession = Depends(get_async_session)):
     d_from, d_to = parse_dates(date_from, date_to)
-    records = db.query(SpoilageRecord).filter(SpoilageRecord.spoilage_date>=d_from.date(), SpoilageRecord.spoilage_date<=d_to.date()).order_by(SpoilageRecord.spoilage_date.desc()).all()
+    if (d_to - d_from).days > 366:
+        raise HTTPException(status_code=400, detail="Date range cannot exceed 1 year")
+    sp_res = await db.execute(
+        select(SpoilageRecord)
+        .where(SpoilageRecord.spoilage_date>=d_from.date(), SpoilageRecord.spoilage_date<=d_to.date())
+        .order_by(SpoilageRecord.spoilage_date.desc())
+        .options(selectinload(SpoilageRecord.product), selectinload(SpoilageRecord.farm), selectinload(SpoilageRecord.user))
+    )
+    records = sp_res.scalars().all()
     by_product, by_reason, rows = {}, {}, []
     for r in records:
         name = r.product.name if r.product else "—"; unit = r.product.unit if r.product else ""; reason = r.reason or "—"
         by_product[name]  = by_product.get(name, 0)  + float(r.qty)
         by_reason[reason] = by_reason.get(reason, 0) + float(r.qty)
         rows.append({"ref":r.ref_number,"product":name,"qty":float(r.qty),"unit":unit,"reason":reason,"farm":r.farm.name if r.farm else "—","date":str(r.spoilage_date),"user_name":r.user.name if r.user else "—","notes":r.notes or ""})
-    return {"records":rows,"total_qty":round(sum(float(r.qty) for r in records),2),"total_count":len(records),
+    total_qty   = round(sum(float(r.qty) for r in records), 2)
+    total_count = len(records)
+    rows = rows[skip : skip + limit]
+    return {"records":rows,"total_qty":total_qty,"total_count":total_count,
             "by_product":[{"name":k,"qty":round(v,2)} for k,v in sorted(by_product.items(),key=lambda x:x[1],reverse=True)[:8]],
             "by_reason": [{"reason":k,"qty":round(v,2)} for k,v in sorted(by_reason.items(), key=lambda x:x[1],reverse=True)]}
 
 @router.get("/export/spoilage", dependencies=[Depends(require_permission("action_export_excel"))])
-def export_spoilage(date_from: str = None, date_to: str = None, db: Session = Depends(get_db)):
-    data = spoilage_report(date_from=date_from, date_to=date_to, db=db)
+async def export_spoilage(date_from: str = None, date_to: str = None, db: AsyncSession = Depends(get_async_session)):
+    data = await spoilage_report(date_from=date_from, date_to=date_to, db=db)
     rows = [[r["ref"],r["product"],r["qty"],r["unit"],r["reason"],r["farm"],r["date"],r["user_name"],r["notes"]] for r in data["records"]]
     buf = to_xlsx(["Ref #","Product","Qty","Unit","Reason","Farm","Date","Performed By","Notes"], rows, "Spoilage")
     return StreamingResponse(buf, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -413,9 +476,19 @@ def export_spoilage(date_from: str = None, date_to: str = None, db: Session = De
 
 # ── PRODUCTION ─────────────────────────────────────────
 @router.get("/api/production")
-def production_report(date_from: Optional[str] = None, date_to: Optional[str] = None, db: Session = Depends(get_db)):
+async def production_report(date_from: Optional[str] = None, date_to: Optional[str] = None, skip: int = 0, limit: int = Query(default=100, le=500), db: AsyncSession = Depends(get_async_session)):
     d_from, d_to = parse_dates(date_from, date_to)
-    batches = db.query(ProductionBatch).filter(ProductionBatch.created_at>=d_from, ProductionBatch.created_at<=d_to).order_by(ProductionBatch.created_at.desc()).all()
+    if (d_to - d_from).days > 366:
+        raise HTTPException(status_code=400, detail="Date range cannot exceed 1 year")
+    batch_res = await db.execute(
+        select(ProductionBatch)
+        .where(ProductionBatch.created_at>=d_from, ProductionBatch.created_at<=d_to)
+        .order_by(ProductionBatch.created_at.desc())
+        .options(selectinload(ProductionBatch.inputs).selectinload(BatchInput.product),
+                 selectinload(ProductionBatch.outputs).selectinload(BatchOutput.product),
+                 selectinload(ProductionBatch.recipe), selectinload(ProductionBatch.user))
+    )
+    batches = batch_res.scalars().all()
     rows, losses, total_proc, total_pkg = [], [], 0, 0
     for b in batches:
         is_pkg = b.batch_number.startswith("PKG")
@@ -427,12 +500,14 @@ def production_report(date_from: Optional[str] = None, date_to: Optional[str] = 
             "inputs_str":inputs_str,"outputs_str":outputs_str,"user_name":b.user.name if b.user else "—"})
         if is_pkg: total_pkg  += 1
         else:      total_proc += 1; losses.append(float(b.waste_pct))
+    total_batches = len(rows)
+    rows = rows[skip : skip + limit]
     return {"batches":rows,"total_processing":total_proc,"total_packaging":total_pkg,
-            "avg_loss_pct":round(sum(losses)/len(losses),2) if losses else 0,"total_batches":len(rows)}
+            "avg_loss_pct":round(sum(losses)/len(losses),2) if losses else 0,"total_batches":total_batches}
 
 @router.get("/export/production", dependencies=[Depends(require_permission("action_export_excel"))])
-def export_production(date_from: str = None, date_to: str = None, db: Session = Depends(get_db)):
-    data = production_report(date_from=date_from, date_to=date_to, db=db)
+async def export_production(date_from: str = None, date_to: str = None, db: AsyncSession = Depends(get_async_session)):
+    data = await production_report(date_from=date_from, date_to=date_to, db=db)
     rows = [[b["batch_number"],b["type"],b["recipe"],b["inputs_str"],b["outputs_str"],b["waste_pct"],b["date"],b["user_name"],b["notes"]] for b in data["batches"]]
     buf = to_xlsx(["Batch #","Type","Recipe","Inputs","Outputs","Loss %","Date","Performed By","Notes"], rows, "Production")
     return StreamingResponse(buf, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -441,23 +516,26 @@ def export_production(date_from: str = None, date_to: str = None, db: Session = 
 
 # ── P&L ────────────────────────────────────────────────
 @router.get("/api/pl")
-def pl_report(date_from: Optional[str] = None, date_to: Optional[str] = None, db: Session = Depends(get_db)):
+async def pl_report(date_from: Optional[str] = None, date_to: Optional[str] = None, db: AsyncSession = Depends(get_async_session)):
     d_from, d_to = parse_dates(date_from, date_to)
-    accounts = db.query(Account).all()
+    if (d_to - d_from).days > 366:
+        raise HTTPException(status_code=400, detail="Date range cannot exceed 1 year")
+    acc_res = await db.execute(
+        select(Account)
+        .options(selectinload(Account.journal_entries).selectinload(JournalEntry.journal))
+    )
+    accounts = acc_res.scalars().all()
 
     def acc_entries(acc):
-        return db.query(JournalEntry).join(Journal).filter(
-            JournalEntry.account_id == acc.id,
-            Journal.created_at >= d_from,
-            Journal.created_at <= d_to
-        ).order_by(Journal.created_at.desc()).all()
+        return [e for e in acc.journal_entries
+                if e.journal and d_from <= e.journal.created_at <= d_to]
 
     def acc_movement(acc):
         entries = acc_entries(acc)
         return sum(float(e.credit) - float(e.debit) for e in entries)
 
     def entry_details(acc):
-        entries = acc_entries(acc)
+        entries = sorted(acc_entries(acc), key=lambda e: e.journal.created_at, reverse=True)
         result = []
         for e in entries:
             j = e.journal
@@ -493,8 +571,8 @@ def pl_report(date_from: Optional[str] = None, date_to: Optional[str] = None, db
             "date_from": d_from.strftime("%Y-%m-%d"), "date_to": d_to.strftime("%Y-%m-%d")}
 
 @router.get("/export/pl", dependencies=[Depends(require_permission("action_export_excel"))])
-def export_pl(date_from: str = None, date_to: str = None, db: Session = Depends(get_db)):
-    data = pl_report(date_from=date_from, date_to=date_to, db=db)
+async def export_pl(date_from: str = None, date_to: str = None, db: AsyncSession = Depends(get_async_session)):
+    data = await pl_report(date_from=date_from, date_to=date_to, db=db)
     try:
         import openpyxl
         from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
@@ -653,25 +731,32 @@ def export_pl(date_from: str = None, date_to: str = None, db: Session = Depends(
 
 # ── TRANSACTIONS ────────────────────────────────────────
 @router.get("/api/transactions")
-def transactions_report(
+async def transactions_report(
     date_from: Optional[str] = None,
     date_to:   Optional[str] = None,
     source:    Optional[str] = None,
-    db: Session = Depends(get_db)
+    db: AsyncSession = Depends(get_async_session)
 ):
     from app.models.customer import Customer
-    d_from = datetime.fromisoformat(date_from) if date_from else datetime(2000,1,1)
-    d_to   = datetime.fromisoformat(date_to).replace(hour=23,minute=59) if date_to else datetime.utcnow()
+    from app.models.refund import RetailRefundItem
+    from app.models.user import User
+    d_from = datetime.fromisoformat(date_from) if date_from else datetime(2000, 1, 1)
+    d_to   = datetime.fromisoformat(date_to).replace(hour=23, minute=59) if date_to else datetime.now()
     rows   = []
 
     # POS
     if not source or source == "pos":
-        for inv in db.query(Invoice).filter(Invoice.created_at >= d_from, Invoice.created_at <= d_to).order_by(Invoice.created_at.desc()).all():
-            customer = db.query(Customer).filter(Customer.id == inv.customer_id).first()
-            cname    = customer.name if customer else "Walk-in"
-            items    = db.query(InvoiceItem).filter(InvoiceItem.invoice_id == inv.id).all()
-            disc_per = round(float(inv.discount)/len(items),2) if items else 0
-            disc_pct = round(float(inv.discount)/float(inv.subtotal)*100,1) if float(inv.subtotal)>0 else 0
+        pos_res = await db.execute(
+            select(Invoice)
+            .where(Invoice.created_at >= d_from, Invoice.created_at <= d_to)
+            .order_by(Invoice.created_at.desc())
+            .options(selectinload(Invoice.items), selectinload(Invoice.user), selectinload(Invoice.customer))
+        )
+        for inv in pos_res.scalars().all():
+            cname    = inv.customer.name if inv.customer else "Walk-in"
+            items    = inv.items
+            disc_per = round(float(inv.discount)/len(items), 2) if items else 0
+            disc_pct = round(float(inv.discount)/float(inv.subtotal)*100, 1) if float(inv.subtotal) > 0 else 0
             for item in items:
                 rows.append({
                     "date":           inv.created_at.strftime("%Y-%m-%d %H:%M") if inv.created_at else "—",
@@ -694,19 +779,25 @@ def transactions_report(
 
     # B2B
     if not source or source == "b2b":
-        for inv in db.query(B2BInvoice).filter(B2BInvoice.created_at >= d_from, B2BInvoice.created_at <= d_to).order_by(B2BInvoice.created_at.desc()).all():
-            client = db.query(B2BClient).filter(B2BClient.id == inv.client_id).first()
-            cname  = client.name if client else "—"
-            items  = db.query(B2BInvoiceItem).filter(B2BInvoiceItem.invoice_id == inv.id).all()
-            disc_per = round(float(inv.discount)/len(items),2) if items else 0
-            disc_pct = round(float(inv.discount)/float(inv.subtotal)*100,1) if float(inv.subtotal)>0 else 0
+        b2b_res = await db.execute(
+            select(B2BInvoice)
+            .where(B2BInvoice.created_at >= d_from, B2BInvoice.created_at <= d_to)
+            .order_by(B2BInvoice.created_at.desc())
+            .options(selectinload(B2BInvoice.items).selectinload(B2BInvoiceItem.product),
+                     selectinload(B2BInvoice.client), selectinload(B2BInvoice.user))
+        )
+        for inv in b2b_res.scalars().all():
+            cname    = inv.client.name if inv.client else "—"
+            items    = inv.items
+            disc_per = round(float(inv.discount)/len(items), 2) if items else 0
+            disc_pct = round(float(inv.discount)/float(inv.subtotal)*100, 1) if float(inv.subtotal) > 0 else 0
             for item in items:
-                product = db.query(Product).filter(Product.id == item.product_id).first()
+                product = item.product
                 rows.append({
                     "date":           inv.created_at.strftime("%Y-%m-%d %H:%M") if inv.created_at else "—",
                     "invoice_number": inv.invoice_number,
                     "user_name":      inv.user.name if inv.user else "—",
-                    "source":         f"B2B ({inv.invoice_type.replace('_',' ').title()})",
+                    "source":         f"B2B ({inv.invoice_type.replace('_', ' ').title()})",
                     "customer":       cname,
                     "sku":            product.sku if product else "—",
                     "product":        product.name if product else "—",
@@ -723,19 +814,21 @@ def transactions_report(
 
     # Refunds
     if not source or source == "refund":
-        from app.models.refund import RetailRefund, RetailRefundItem
-        from app.models.user import User
-        for ref in db.query(RetailRefund).filter(RetailRefund.created_at >= d_from, RetailRefund.created_at <= d_to).order_by(RetailRefund.created_at.desc()).all():
-            customer = db.query(Customer).filter(Customer.id == ref.customer_id).first()
-            cname    = customer.name if customer else "—"
-            user     = db.query(User).filter(User.id == ref.user_id).first() if ref.user_id else None
-            items    = db.query(RetailRefundItem).filter(RetailRefundItem.refund_id == ref.id).all()
-            for item in items:
-                product = db.query(Product).filter(Product.id == item.product_id).first()
+        ref_res = await db.execute(
+            select(RetailRefund)
+            .where(RetailRefund.created_at >= d_from, RetailRefund.created_at <= d_to)
+            .order_by(RetailRefund.created_at.desc())
+            .options(selectinload(RetailRefund.customer), selectinload(RetailRefund.user),
+                     selectinload(RetailRefund.items).selectinload(RetailRefundItem.product))
+        )
+        for ref in ref_res.scalars().all():
+            cname = ref.customer.name if ref.customer else "—"
+            for item in ref.items:
+                product = item.product
                 rows.append({
                     "date":           ref.created_at.strftime("%Y-%m-%d %H:%M") if ref.created_at else "—",
                     "invoice_number": ref.refund_number,
-                    "user_name":      user.name if user else "—",
+                    "user_name":      ref.user.name if ref.user else "—",
                     "source":         "Refund",
                     "customer":       cname,
                     "sku":            product.sku if product else "—",
@@ -765,8 +858,8 @@ def transactions_report(
     }
 
 @router.get("/export/transactions", dependencies=[Depends(require_permission("action_export_excel"))])
-def export_transactions(date_from: str = None, date_to: str = None, source: str = None, db: Session = Depends(get_db)):
-    data = transactions_report(date_from=date_from, date_to=date_to, source=source, db=db)
+async def export_transactions(date_from: str = None, date_to: str = None, source: str = None, db: AsyncSession = Depends(get_async_session)):
+    data = await transactions_report(date_from=date_from, date_to=date_to, source=source, db=db)
     headers = ["Date","Invoice #","Source","Customer","Performed By","SKU","Product","QTY","Unit Price","Line Total","Discount (EGP)","Discount %","Payment Method","Invoice Total","Status"]
     rows    = [[r["date"],r["invoice_number"],r["source"],r["customer"],r["user_name"],r["sku"],r["product"],r["qty"],r["unit_price"],r["line_total"],r["discount"],r["discount_pct"],r["payment_method"],r["invoice_total"],r["status"]] for r in data["rows"]]
     rows.append(["","","","","","","TOTAL",data["total_qty"],"TOTAL REVENUE","","","","","",""])
@@ -1258,14 +1351,14 @@ td.mono{font-family:var(--mono);}
 <div class="toast" id="toast"></div>
 
 <script>
-  const __erpToken = localStorage.getItem("token");
-  const __erpUserRole = localStorage.getItem("user_role") || "";
-  const __erpUserPermissions = new Set(
-      (localStorage.getItem("user_permissions") || "")
-          .split(",")
-          .map(p => p.trim())
-          .filter(Boolean)
-  );
+  // Auth guard: redirect to login if the readable session cookie is absent
+  function _hasAuthCookie() {
+      return document.cookie.split(";").some(c => c.trim().startsWith("logged_in="));
+  }
+  if (!_hasAuthCookie()) { window.location.href = "/"; }
+
+  let __currentUser = null;
+
   function setModeButton(isLight){
     const btn = document.getElementById("mode-btn");
     if(btn) btn.innerText = isLight ? "☀️" : "🌙";
@@ -1280,63 +1373,27 @@ function initializeColorMode(){
     document.body.classList.toggle("light", isLight);
     setModeButton(isLight);
 }
-function setUserInfo(){
-    const name = localStorage.getItem("user_name") || "Admin";
-    const avatar = document.getElementById("user-avatar");
-    const userName = document.getElementById("user-name");
-    if(avatar) avatar.innerText = name.charAt(0).toUpperCase();
-    if(userName) userName.innerText = name;
+async function initUser() {
+    try {
+        const r = await fetch("/auth/me");
+        if (!r.ok) { window.location.href = "/"; return; }
+        const u = await r.json();
+        __currentUser = u;
+        const nameEl = document.getElementById("user-name");
+        const avatarEl = document.getElementById("user-avatar");
+        if (nameEl) nameEl.innerText = u.name;
+        if (avatarEl) avatarEl.innerText = u.name.charAt(0).toUpperCase();
+        return u;
+    } catch(e) { window.location.href = "/"; }
 }
-function logout(){
-    localStorage.removeItem("token");
-    localStorage.removeItem("user_name");
-    localStorage.removeItem("user_role");
-    localStorage.removeItem("user_permissions");
-    document.cookie = "access_token=; Max-Age=0; path=/; SameSite=Lax";
+async function logout(){
+    await fetch("/auth/logout", { method: "POST" });
     window.location.href = "/";
 }
-  function requirePageAccess(permission){
-      if(!__erpToken){
-          window.location.href = "/";
-          throw new Error("Not authenticated");
-      }
-      if(__erpUserRole === "admin" || __erpUserPermissions.has(permission)) return;
-      document.body.innerHTML = `<div style="display:flex;align-items:center;justify-content:center;height:100vh;flex-direction:column;gap:16px;color:#445066;font-family:'Outfit',sans-serif;background:#060810"><div style="font-size:48px">🔒</div><div style="font-size:20px;font-weight:800;color:#f0f4ff">Access Restricted</div><div style="font-size:14px">You do not have permission to open this page.</div><a href="/home" style="color:#00ff9d;text-decoration:none;font-weight:700">Back to Home</a></div>`;
-      throw new Error("Access denied");
-  }
-  function applyNavPermissions(){
-      const navPermissions = {
-          "/home": null,
-          "/dashboard": "page_dashboard",
-          "/pos": "page_pos",
-          "/b2b/": "page_b2b",
-          "/inventory/": "page_inventory",
-          "/products/": "page_products",
-          "/customers-mgmt/": "page_customers",
-          "/suppliers/": "page_suppliers",
-          "/production/": "page_production",
-          "/farm/": "page_farm",
-          "/hr/": "page_hr",
-          "/accounting/": "page_accounting",
-          "/reports/": "page_reports",
-          "/import": "page_import",
-          "/users/": "admin_only"
-      };
-      document.querySelectorAll("a.nav-link[href]").forEach(link => {
-          const href = link.getAttribute("href");
-          const requirement = navPermissions[href];
-          if(requirement === undefined || requirement === null) return;
-          if(requirement === "admin_only"){
-              if(__erpUserRole !== "admin") link.style.display = "none";
-              return;
-          }
-          if(__erpUserRole !== "admin" && !__erpUserPermissions.has(requirement)){
-              link.style.display = "none";
-          }
-      });
-  }
   function hasPermission(permission){
-      return __erpUserRole === "admin" || __erpUserPermissions.has(permission);
+      const role = __currentUser ? (__currentUser.role || "") : "";
+      const perms = new Set(__currentUser ? (__currentUser.permissions || []) : []);
+      return role === "admin" || perms.has(permission);
   }
   function configureReportsPermissions(){
       const tabMap = [
@@ -1362,13 +1419,10 @@ function logout(){
           document.querySelectorAll(".btn-excel").forEach(btn => btn.style.display = "none");
       }
   }
-  requirePageAccess("page_reports");
-  applyNavPermissions();
   initializeColorMode();
-  setUserInfo();
   let currentTab = "sales";
 let toastTimer = null;
-configureReportsPermissions();
+initUser().then(u => { if(u) configureReportsPermissions(); });
 
 function switchTab(tab){
     const required = {

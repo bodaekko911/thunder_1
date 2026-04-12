@@ -1,6 +1,11 @@
-from fastapi import APIRouter, Depends, HTTPException, Response
+import hashlib
+import secrets
+from datetime import datetime, timedelta, timezone
+
+from fastapi import APIRouter, Cookie, Depends, HTTPException, Request, Response
 from fastapi.responses import HTMLResponse
-from sqlalchemy.orm import Session
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.core.permission_catalog import get_permission_catalog
@@ -12,12 +17,14 @@ from app.core.permissions import (
 )
 from app.core.security import (
     create_access_token,
+    decode_token,
     get_current_user,
     hash_password,
     password_needs_rehash,
     verify_password,
 )
-from app.database import get_db
+from app.database import get_async_session
+from app.models.refresh_token import RefreshToken
 from app.models.user import User
 from app.schemas.user import UserCreate, UserOut, UserLogin
 
@@ -191,10 +198,7 @@ def login_page():
                 document.getElementById("error").style.display = "block";
                 return;
             }
-            localStorage.setItem("token", data.access_token || "");
-            localStorage.setItem("user_name", data.name);
-            localStorage.setItem("user_role", data.role);
-            localStorage.setItem("user_permissions", data.permissions || "");
+            // Token is stored in an httpOnly cookie set by the server — no localStorage.
             const permissions = new Set((data.permissions || "").split(",").map(v => v.trim()).filter(Boolean));
             const landingPages = [
                 ["/dashboard", "page_dashboard"],
@@ -231,18 +235,50 @@ def login_page():
 
 
 @router.post("/auth/login")
-def login(
+async def login(
     data: UserLogin,
+    request: Request,
     response: Response,
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_async_session),
 ):
     from app.core.log import record
-    user = db.query(User).filter(User.email == data.email).first()
+
+    # Brute-force protection: track failed attempts per IP in Redis
+    import logging
+    _brute_logger = logging.getLogger("erp")
+    _client_ip = request.headers.get("x-forwarded-for", "").split(",")[0].strip() or "unknown"
+    _fail_key = f"login_fail:{_client_ip}"
+    try:
+        import redis.asyncio as aioredis
+        _redis = aioredis.from_url(settings.REDIS_URL, decode_responses=True)
+        _fails = await _redis.get(_fail_key)
+        if _fails and int(_fails) >= 5:
+            await _redis.aclose()
+            raise HTTPException(
+                status_code=429,
+                detail="Too many failed attempts. Try again in 15 minutes.",
+            )
+        await _redis.aclose()
+    except HTTPException:
+        raise
+    except Exception:
+        _brute_logger.warning("Redis unavailable for brute-force check — allowing login attempt")
+
+    result = await db.execute(select(User).where(User.email == data.email))
+    user = result.scalar_one_or_none()
     if not user or not verify_password(data.password, user.password):
         # Log failed attempt (no user object, store email)
         record(db, "Auth", "login_failed",
                f"Failed login attempt for email: {data.email}")
-        db.commit()
+        await db.commit()
+        try:
+            import redis.asyncio as aioredis
+            _redis = aioredis.from_url(settings.REDIS_URL, decode_responses=True)
+            await _redis.incr(_fail_key)
+            await _redis.expire(_fail_key, 900)  # 15 minutes TTL
+            await _redis.aclose()
+        except Exception:
+            pass
         raise HTTPException(status_code=401, detail="Invalid email or password")
     if not user.is_active:
         raise HTTPException(status_code=403, detail="Account is disabled")
@@ -262,12 +298,44 @@ def login(
         secure=settings.COOKIE_SECURE,
         path="/",
     )
+    response.set_cookie(
+        key="logged_in",
+        value="true",
+        httponly=False,
+        samesite="lax",
+        secure=settings.COOKIE_SECURE,
+        path="/",
+        max_age=settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60,
+    )
+    # Issue refresh token
+    raw_rt = secrets.token_urlsafe(48)
+    rt_hash = hashlib.sha256(raw_rt.encode()).hexdigest()
+    rt_expires = datetime.now(timezone.utc) + timedelta(days=settings.REFRESH_TOKEN_EXPIRE_DAYS)
+    db.add(RefreshToken(user_id=user.id, token_hash=rt_hash, expires_at=rt_expires))
+    response.set_cookie(
+        key="refresh_token",
+        value=raw_rt,
+        httponly=True,
+        samesite="lax",
+        secure=settings.COOKIE_SECURE,
+        path="/",
+        max_age=settings.REFRESH_TOKEN_EXPIRE_DAYS * 86400,
+    )
+
+    # Reset brute-force counter on successful login
+    try:
+        import redis.asyncio as aioredis
+        _redis = aioredis.from_url(settings.REDIS_URL, decode_responses=True)
+        await _redis.delete(_fail_key)
+        await _redis.aclose()
+    except Exception:
+        pass
     record(db, "Auth", "login",
            f"User logged in: {user.name} ({user.role})",
            user=user, ref_type="user", ref_id=user.id)
-    db.commit()
+    await db.commit()
+    # access_token is in the httpOnly cookie — not returned in body to prevent XSS
     return {
-        "access_token": token,
         "role": user.role,
         "name": user.name,
         "permissions": permissions,
@@ -275,7 +343,7 @@ def login(
 
 
 @router.get("/auth/me")
-def me(current_user: User = Depends(get_current_user)):
+async def me(current_user: User = Depends(get_current_user)):
     permissions = serialize_permissions(
         get_effective_permissions(current_user.role, current_user.permissions)
     )
@@ -290,7 +358,7 @@ def me(current_user: User = Depends(get_current_user)):
 
 
 @router.get("/auth/permissions/catalog")
-def permissions_catalog(current_user: User = Depends(get_current_user)):
+async def permissions_catalog(current_user: User = Depends(get_current_user)):
     return {
         "catalog": get_permission_catalog(),
         "role": current_user.role,
@@ -299,12 +367,13 @@ def permissions_catalog(current_user: User = Depends(get_current_user)):
 
 
 @router.post("/auth/register", response_model=UserOut, status_code=201)
-def register(
+async def register(
     data: UserCreate,
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_async_session),
     _: User = Depends(require_admin),
 ):
-    if db.query(User).filter(User.email == data.email).first():
+    result = await db.execute(select(User).where(User.email == data.email))
+    if result.scalar_one_or_none():
         raise HTTPException(status_code=400, detail="Email already registered")
     user = User(
         name=data.name,
@@ -313,6 +382,73 @@ def register(
         role=data.role,
     )
     db.add(user)
-    db.commit()
-    db.refresh(user)
+    await db.commit()
+    await db.refresh(user)
     return user
+
+
+@router.post("/auth/logout")
+async def logout(
+    response: Response,
+    db: AsyncSession = Depends(get_async_session),
+    refresh_token: str | None = Cookie(None, alias="refresh_token"),
+):
+    """Clear the auth cookie and invalidate the refresh token."""
+    response.delete_cookie("access_token", path="/")
+    response.delete_cookie("refresh_token", path="/")
+    response.delete_cookie("logged_in", path="/")
+    if refresh_token:
+        token_hash = hashlib.sha256(refresh_token.encode()).hexdigest()
+        _r = await db.execute(select(RefreshToken).where(RefreshToken.token_hash == token_hash))
+        rt = _r.scalar_one_or_none()
+        if rt:
+            await db.delete(rt)
+            await db.commit()
+    return {"ok": True}
+
+
+@router.post("/auth/refresh")
+async def refresh(
+    response: Response,
+    db: AsyncSession = Depends(get_async_session),
+    refresh_token: str | None = Cookie(None, alias="refresh_token"),
+):
+    """Issue a new access token if a valid refresh token cookie is present."""
+    if not refresh_token:
+        raise HTTPException(status_code=401, detail="No refresh token")
+
+    token_hash = hashlib.sha256(refresh_token.encode()).hexdigest()
+    _r = await db.execute(select(RefreshToken).where(RefreshToken.token_hash == token_hash))
+    rt = _r.scalar_one_or_none()
+
+    now = datetime.now(timezone.utc)
+    if not rt or rt.expires_at.replace(tzinfo=timezone.utc) < now:
+        raise HTTPException(status_code=401, detail="Refresh token expired or invalid")
+
+    _u = await db.execute(select(User).where(User.id == rt.user_id))
+    user = _u.scalar_one_or_none()
+    if not user or not user.is_active:
+        raise HTTPException(status_code=401, detail="User not found or inactive")
+
+    permissions = serialize_permissions(get_effective_permissions(user.role, user.permissions))
+    new_token = create_access_token({"sub": user.id, "role": user.role, "permissions": permissions})
+    response.set_cookie(
+        key="access_token",
+        value=new_token,
+        httponly=True,
+        samesite="lax",
+        secure=settings.COOKIE_SECURE,
+        path="/",
+        max_age=settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60,
+    )
+    response.set_cookie(
+        key="logged_in",
+        value="true",
+        httponly=False,
+        samesite="lax",
+        secure=settings.COOKIE_SECURE,
+        path="/",
+        max_age=settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60,
+    )
+    return {"ok": True}
+

@@ -1,20 +1,27 @@
-from collections import defaultdict, deque
 from contextlib import asynccontextmanager
 from pathlib import Path
-from time import time
 
-from fastapi import FastAPI, Request
+from fastapi import Depends, FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncSession
+from starlette_csrf import CSRFMiddleware
+
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
 
 from app.api.routes import ROUTERS
 from app.bootstrap.database import initialize_database
 from app.core.config import settings
 from app.core.log import configure_logging, logger
+from app.database import get_async_session
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
-_rate_limit_store: dict[str, deque[float]] = defaultdict(deque)
+
+limiter = Limiter(key_func=get_remote_address, default_limits=[f"{settings.RATE_LIMIT_REQUESTS}/{settings.RATE_LIMIT_WINDOW_SECONDS}seconds"])
 
 
 @asynccontextmanager
@@ -24,19 +31,15 @@ async def lifespan(_: FastAPI):
     yield
 
 
-def _client_ip(request: Request) -> str:
-    forwarded_for = request.headers.get("x-forwarded-for")
-    if forwarded_for:
-        return forwarded_for.split(",")[0].strip()
-    return request.client.host if request.client else "unknown"
-
-
 def create_app() -> FastAPI:
     app = FastAPI(
         title=settings.APP_NAME,
         debug=False,
         lifespan=lifespan,
     )
+
+    app.state.limiter = limiter
+    app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
     STATIC_DIR.mkdir(parents=True, exist_ok=True)
     (STATIC_DIR / "uploads").mkdir(parents=True, exist_ok=True)
@@ -49,25 +52,22 @@ def create_app() -> FastAPI:
         allow_methods=settings.CORS_ALLOW_METHODS,
         allow_headers=settings.CORS_ALLOW_HEADERS,
     )
-
-    @app.middleware("http")
-    async def rate_limit_middleware(request: Request, call_next):
-        if request.url.path in {"/health"}:
-            return await call_next(request)
-
-        now = time()
-        key = _client_ip(request)
-        bucket = _rate_limit_store[key]
-        window = settings.RATE_LIMIT_WINDOW_SECONDS
-        while bucket and now - bucket[0] > window:
-            bucket.popleft()
-        if len(bucket) >= settings.RATE_LIMIT_REQUESTS:
-            return JSONResponse(
-                status_code=429,
-                content={"detail": "Rate limit exceeded. Please try again later."},
-            )
-        bucket.append(now)
-        return await call_next(request)
+    # CSRF protection: only triggers on requests that carry the access_token cookie.
+    # Auth endpoints (/auth/*) are exempt — they use credentials as proof, not a session.
+    # Pure JSON API calls (/*/api/*) are also exempt — protected by CORS same-origin policy.
+    import re
+    app.add_middleware(
+        CSRFMiddleware,
+        secret=settings.SECRET_KEY,
+        sensitive_cookies={"access_token"},
+        exempt_urls=[
+            re.compile(r"^/auth/.*"),
+            re.compile(r".*/api/.*"),
+            re.compile(r"^/import/.*"),
+            re.compile(r"^/invoice.*"),
+            re.compile(r"^/health.*"),
+        ],
+    )
 
     @app.exception_handler(Exception)
     async def unhandled_exception_handler(_: Request, exc: Exception):
@@ -80,6 +80,22 @@ def create_app() -> FastAPI:
     for router in ROUTERS:
         app.include_router(router)
 
+    @app.get("/health/live")
+    async def liveness():
+        return {"status": "ok"}
+
+    @app.get("/health/ready")
+    async def readiness(db: AsyncSession = Depends(get_async_session)):
+        try:
+            await db.execute(text("SELECT 1"))
+            return {"status": "ok", "db": "ok"}
+        except Exception:
+            return JSONResponse(
+                status_code=503,
+                content={"status": "error", "db": "unreachable"},
+            )
+
+    # Backward-compat alias
     @app.get("/health")
     async def health():
         return {"status": "ok", "app": settings.APP_NAME, "environment": settings.APP_ENV}

@@ -1,15 +1,16 @@
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import HTMLResponse
-from sqlalchemy.orm import Session
-from sqlalchemy import func
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import func, select
 from typing import Optional, List
 from pydantic import BaseModel
 
-from app.database import get_db
+from app.database import get_async_session
 from app.core.permissions import get_current_user, require_permission
 from app.models.product import Product
 from app.models.user import User
 from app.core.log import record
+from app.schemas.product import ProductCreate, ProductUpdate
 
 router = APIRouter(
     prefix="/products",
@@ -18,34 +19,12 @@ router = APIRouter(
 )
 
 
-# ── Schemas ────────────────────────────────────────────
-class ProductCreate(BaseModel):
-    sku:       str
-    name:      str
-    price:     float
-    cost:      float = 0
-    stock:     float = 0
-    min_stock: float = 5
-    unit:      str   = "pcs"
-    category:  Optional[str] = None
-    item_type: str   = "finished"
-
-class ProductUpdate(BaseModel):
-    name:      Optional[str]   = None
-    price:     Optional[float] = None
-    cost:      Optional[float] = None
-    min_stock: Optional[float] = None
-    unit:      Optional[str]   = None
-    category:  Optional[str]   = None
-    item_type: Optional[str]   = None
-    is_active: Optional[bool]  = None
-
-
 # ── API ────────────────────────────────────────────────
 @router.get("/api/next-sku")
-def next_sku(db: Session = Depends(get_db)):
+async def next_sku(db: AsyncSession = Depends(get_async_session)):
     """Return the next available numeric SKU based on existing ones."""
-    products = db.query(Product).all()
+    result = await db.execute(select(Product))
+    products = result.scalars().all()
     numeric_skus = []
     for p in products:
         try:
@@ -57,39 +36,53 @@ def next_sku(db: Session = Depends(get_db)):
 
 
 @router.get("/api/categories")
-def get_categories(db: Session = Depends(get_db)):
+async def get_categories(db: AsyncSession = Depends(get_async_session)):
     """Return all distinct categories from products."""
-    rows = db.query(Product.category).filter(
-        Product.category != None,
-        Product.category != "",
-        Product.is_active == True,
-    ).distinct().order_by(Product.category).all()
+    result = await db.execute(
+        select(Product.category)
+        .where(
+            Product.category != None,
+            Product.category != "",
+            Product.is_active == True,
+        )
+        .distinct()
+        .order_by(Product.category)
+    )
+    rows = result.all()
     return [r[0] for r in rows if r[0]]
 
 
 @router.get("/api/list")
-def get_products(
+async def get_products(
     q:         str  = "",
     low_stock: bool = False,
     category:  str  = "",
     item_type: str  = "",
     skip:      int  = 0,
     limit:     int  = 50,
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_async_session),
 ):
-    query = db.query(Product).filter(Product.is_active == True)
+    conditions = [Product.is_active == True]
     if q:
-        query = query.filter(
+        conditions.append(
             Product.name.ilike(f"%{q}%") | Product.sku.ilike(f"%{q}%")
         )
     if low_stock:
-        query = query.filter(Product.stock <= Product.min_stock)
+        conditions.append(Product.stock <= Product.min_stock)
     if category:
-        query = query.filter(Product.category == category)
+        conditions.append(Product.category == category)
     if item_type:
-        query = query.filter(Product.item_type == item_type)
-    total = query.count()
-    items = query.order_by(Product.name).offset(skip).limit(limit).all()
+        conditions.append(Product.item_type == item_type)
+
+    cnt_result = await db.execute(
+        select(func.count()).select_from(Product).where(*conditions)
+    )
+    total = cnt_result.scalar()
+
+    result = await db.execute(
+        select(Product).where(*conditions).order_by(Product.name).offset(skip).limit(limit)
+    )
+    items = result.scalars().all()
     return {
         "total": total,
         "items": [
@@ -113,8 +106,9 @@ def get_products(
 
 
 @router.post("/api/add")
-def add_product(data: ProductCreate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    if db.query(Product).filter(Product.sku == data.sku).first():
+async def add_product(data: ProductCreate, db: AsyncSession = Depends(get_async_session), current_user: User = Depends(get_current_user)):
+    sku_result = await db.execute(select(Product).where(Product.sku == data.sku))
+    if sku_result.scalar_one_or_none():
         raise HTTPException(status_code=400, detail="SKU already exists")
     p = Product(
         sku=data.sku, name=data.name, price=data.price,
@@ -123,17 +117,20 @@ def add_product(data: ProductCreate, db: Session = Depends(get_db), current_user
     )
     if hasattr(p, 'category'):  p.category  = data.category
     if hasattr(p, 'item_type'): p.item_type = data.item_type
-    db.add(p); db.flush()
+    db.add(p)
+    await db.flush()
     record(db, "Products", "add_product",
            f"Added product: [{p.sku}] {p.name} — price: {float(p.price):.2f}",
            ref_type="product", ref_id=p.id)
-    db.commit(); db.refresh(p)
+    await db.commit()
+    await db.refresh(p)
     return {"id": p.id, "sku": p.sku, "name": p.name}
 
 
 @router.put("/api/edit/{product_id}", dependencies=[Depends(require_permission("action_products_edit"))])
-def edit_product(product_id: int, data: ProductUpdate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    p = db.query(Product).filter(Product.id == product_id).first()
+async def edit_product(product_id: int, data: ProductUpdate, db: AsyncSession = Depends(get_async_session), current_user: User = Depends(get_current_user)):
+    result = await db.execute(select(Product).where(Product.id == product_id))
+    p = result.scalar_one_or_none()
     if not p:
         raise HTTPException(status_code=404, detail="Product not found")
     for k, v in data.model_dump(exclude_unset=True).items():
@@ -142,20 +139,22 @@ def edit_product(product_id: int, data: ProductUpdate, db: Session = Depends(get
     record(db, "Products", "edit_product",
            f"Edited product: [{p.sku}] {p.name}",
            ref_type="product", ref_id=product_id)
-    db.commit(); db.refresh(p)
+    await db.commit()
+    await db.refresh(p)
     return {"ok": True}
 
 
 @router.delete("/api/delete/{product_id}", dependencies=[Depends(require_permission("action_products_delete"))])
-def delete_product(product_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    p = db.query(Product).filter(Product.id == product_id).first()
+async def delete_product(product_id: int, db: AsyncSession = Depends(get_async_session), current_user: User = Depends(get_current_user)):
+    result = await db.execute(select(Product).where(Product.id == product_id))
+    p = result.scalar_one_or_none()
     if not p:
         raise HTTPException(status_code=404, detail="Product not found")
     p.is_active = False
     record(db, "Products", "deactivate_product",
            f"Deactivated product: [{p.sku}] {p.name}",
            ref_type="product", ref_id=product_id)
-    db.commit()
+    await db.commit()
     return {"ok": True}
 
 
@@ -457,14 +456,12 @@ tr:hover td{background:rgba(255,255,255,.02);}
 <div class="toast" id="toast"></div>
 
 <script>
-  const __erpToken = localStorage.getItem("token");
-  const __erpUserRole = localStorage.getItem("user_role") || "";
-  const __erpUserPermissions = new Set(
-      (localStorage.getItem("user_permissions") || "")
-          .split(",")
-          .map(p => p.trim())
-          .filter(Boolean)
-  );
+  // Auth guard: redirect to login if the readable session cookie is absent
+  function _hasAuthCookie() {
+      return document.cookie.split(";").some(c => c.trim().startsWith("logged_in="));
+  }
+  if (!_hasAuthCookie()) { window.location.href = "/"; }
+
   function setModeButton(isLight){
     const btn = document.getElementById("mode-btn");
     if(btn) btn.innerText = isLight ? "☀️" : "🌙";
@@ -479,78 +476,39 @@ function initializeColorMode(){
     document.body.classList.toggle("light", isLight);
     setModeButton(isLight);
 }
-function setUserInfo(){
-    const name = localStorage.getItem("user_name") || "Admin";
-    const avatar = document.getElementById("user-avatar");
-    const userName = document.getElementById("user-name");
-    if(avatar) avatar.innerText = name.charAt(0).toUpperCase();
-    if(userName) userName.innerText = name;
+async function initUser() {
+    try {
+        const r = await fetch("/auth/me");
+        if (!r.ok) { window.location.href = "/"; return; }
+        const u = await r.json();
+        const nameEl = document.getElementById("user-name");
+        const avatarEl = document.getElementById("user-avatar");
+        if (nameEl) nameEl.innerText = u.name;
+        if (avatarEl) avatarEl.innerText = u.name.charAt(0).toUpperCase();
+        return u;
+    } catch(e) { window.location.href = "/"; }
 }
-function logout(){
-    localStorage.removeItem("token");
-    localStorage.removeItem("user_name");
-    localStorage.removeItem("user_role");
-    localStorage.removeItem("user_permissions");
-    document.cookie = "access_token=; Max-Age=0; path=/; SameSite=Lax";
+async function logout(){
+    await fetch("/auth/logout", { method: "POST" });
     window.location.href = "/";
 }
-  function requirePageAccess(permission){
-      if(!__erpToken){
-          window.location.href = "/";
-          throw new Error("Not authenticated");
-      }
-      if(__erpUserRole === "admin" || __erpUserPermissions.has(permission)) return;
-      document.body.innerHTML = `<div style="display:flex;align-items:center;justify-content:center;height:100vh;flex-direction:column;gap:16px;color:#445066;font-family:'Outfit',sans-serif;background:#060810"><div style="font-size:48px">🔒</div><div style="font-size:20px;font-weight:800;color:#f0f4ff">Access Restricted</div><div style="font-size:14px">You do not have permission to open this page.</div><a href="/home" style="color:#00ff9d;text-decoration:none;font-weight:700">Back to Home</a></div>`;
-      throw new Error("Access denied");
+  function hasPermission(permission, u){
+      const role = u ? (u.role || "") : "";
+      const perms = new Set(u ? (u.permissions || []) : []);
+      return role === "admin" || perms.has(permission);
   }
-  function applyNavPermissions(){
-      const navPermissions = {
-          "/home": null,
-          "/dashboard": "page_dashboard",
-          "/pos": "page_pos",
-          "/b2b/": "page_b2b",
-          "/inventory/": "page_inventory",
-          "/products/": "page_products",
-          "/customers-mgmt/": "page_customers",
-          "/suppliers/": "page_suppliers",
-          "/production/": "page_production",
-          "/farm/": "page_farm",
-          "/hr/": "page_hr",
-          "/accounting/": "page_accounting",
-          "/reports/": "page_reports",
-          "/import": "page_import",
-          "/users/": "admin_only"
-      };
-      document.querySelectorAll("a.nav-link[href]").forEach(link => {
-          const href = link.getAttribute("href");
-          const requirement = navPermissions[href];
-          if(requirement === undefined || requirement === null) return;
-          if(requirement === "admin_only"){
-              if(__erpUserRole !== "admin") link.style.display = "none";
-              return;
-          }
-          if(__erpUserRole !== "admin" && !__erpUserPermissions.has(requirement)){
-              link.style.display = "none";
-          }
-      });
-  }
-  function hasPermission(permission){
-      return __erpUserRole === "admin" || __erpUserPermissions.has(permission);
-  }
-  function applyProductActionPermissions(){
-      if(hasPermission("action_products_edit") && hasPermission("action_products_delete")) return;
+  function applyProductActionPermissions(u){
+      if(hasPermission("action_products_edit", u) && hasPermission("action_products_delete", u)) return;
       document.querySelectorAll("#table-body tr td:last-child").forEach(cell => {
           cell.querySelectorAll("button").forEach(btn => {
               const label = btn.innerText.trim().toLowerCase();
-              if(label === "edit" && !hasPermission("action_products_edit")) btn.remove();
-              if(label === "delete" && !hasPermission("action_products_delete")) btn.remove();
+              if(label === "edit" && !hasPermission("action_products_edit", u)) btn.remove();
+              if(label === "delete" && !hasPermission("action_products_delete", u)) btn.remove();
           });
       });
   }
-  requirePageAccess("page_products");
-  applyNavPermissions();
   initializeColorMode();
-  setUserInfo();
+  initUser().then(u => { if(u) applyProductActionPermissions(u); });
   let products    = [];
 let categories  = [];
 let editingId   = null;

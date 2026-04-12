@@ -2,18 +2,20 @@ from collections import defaultdict
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import HTMLResponse
-from sqlalchemy.orm import Session
-from sqlalchemy import func
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
+from sqlalchemy import func, select
 from typing import Optional
 from pydantic import BaseModel
 
-from app.database import get_db
+from app.database import get_async_session
 from app.core.permissions import get_current_user, require_permission
 from app.models.customer import Customer
 from app.models.user import User
 from app.models.invoice import Invoice, InvoiceItem
 from app.models.refund import RetailRefund
 from app.core.log import record
+from app.schemas.customer import CustomerCreate, CustomerUpdate
 
 router = APIRouter(
     prefix="/customers-mgmt",
@@ -22,47 +24,51 @@ router = APIRouter(
 )
 
 
-# ── Schemas ────────────────────────────────────────────
-class CustomerCreate(BaseModel):
-    name:    str
-    phone:   Optional[str] = None
-    email:   Optional[str] = None
-    address: Optional[str] = None
-
-class CustomerUpdate(BaseModel):
-    name:    Optional[str] = None
-    phone:   Optional[str] = None
-    email:   Optional[str] = None
-    address: Optional[str] = None
-
-
 # ── API ────────────────────────────────────────────────
 @router.get("/api/list")
-def get_customers(
+async def get_customers(
     q:     str = "",
     skip:  int = 0,
     limit: int = 50,
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_async_session),
 ):
-    query = db.query(Customer)
+    conditions = []
     if q:
-        query = query.filter(
+        conditions.append(
             Customer.name.ilike(f"%{q}%") |
             Customer.phone.ilike(f"%{q}%") |
             Customer.email.ilike(f"%{q}%")
         )
-    total = query.count()
-    items = query.order_by(Customer.name).offset(skip).limit(limit).all()
+
+    cnt_result = await db.execute(
+        select(func.count()).select_from(Customer).where(*conditions)
+    )
+    total = cnt_result.scalar()
+
+    cust_result = await db.execute(
+        select(Customer).where(*conditions).order_by(Customer.name).offset(skip).limit(limit)
+    )
+    items = cust_result.scalars().all()
 
     result = []
     for c in items:
-        inv_count = db.query(func.count(Invoice.id)).filter(Invoice.customer_id == c.id).scalar() or 0
-        inv_total = db.query(func.sum(Invoice.total)).filter(
-            Invoice.customer_id == c.id, Invoice.status == "paid"
-        ).scalar() or 0
-        ref_total = db.query(func.sum(RetailRefund.total)).filter(
-            RetailRefund.customer_id == c.id
-        ).scalar() or 0
+        inv_cnt_res = await db.execute(
+            select(func.count(Invoice.id)).where(Invoice.customer_id == c.id)
+        )
+        inv_count = inv_cnt_res.scalar() or 0
+
+        inv_sum_res = await db.execute(
+            select(func.sum(Invoice.total)).where(
+                Invoice.customer_id == c.id, Invoice.status == "paid"
+            )
+        )
+        inv_total = inv_sum_res.scalar() or 0
+
+        ref_sum_res = await db.execute(
+            select(func.sum(RetailRefund.total)).where(RetailRefund.customer_id == c.id)
+        )
+        ref_total = ref_sum_res.scalar() or 0
+
         result.append({
             "id":          c.id,
             "name":        c.name,
@@ -78,21 +84,22 @@ def get_customers(
 
 
 @router.get("/api/invoices/{customer_id}")
-def get_customer_invoices(customer_id: int, db: Session = Depends(get_db)):
-    invoices = (
-        db.query(Invoice)
-        .filter(Invoice.customer_id == customer_id)
+async def get_customer_invoices(customer_id: int, db: AsyncSession = Depends(get_async_session)):
+    inv_result = await db.execute(
+        select(Invoice)
+        .where(Invoice.customer_id == customer_id)
         .order_by(Invoice.created_at.desc())
         .limit(30)
-        .all()
     )
-    refunds = (
-        db.query(RetailRefund)
-        .filter(RetailRefund.customer_id == customer_id)
+    invoices = inv_result.scalars().all()
+
+    ref_result = await db.execute(
+        select(RetailRefund)
+        .where(RetailRefund.customer_id == customer_id)
         .order_by(RetailRefund.created_at.desc())
         .limit(20)
-        .all()
     )
+    refunds = ref_result.scalars().all()
     rows = []
     for i in invoices:
         rows.append({
@@ -122,23 +129,26 @@ def get_customer_invoices(customer_id: int, db: Session = Depends(get_db)):
 
 
 @router.get("/api/profile/{customer_id}")
-def customer_profile(customer_id: int, db: Session = Depends(get_db)):
-    c = db.query(Customer).filter(Customer.id == customer_id).first()
+async def customer_profile(customer_id: int, db: AsyncSession = Depends(get_async_session)):
+    c_result = await db.execute(select(Customer).where(Customer.id == customer_id))
+    c = c_result.scalar_one_or_none()
     if not c:
         raise HTTPException(status_code=404, detail="Customer not found")
 
-    invoices = (
-        db.query(Invoice)
-        .filter(Invoice.customer_id == customer_id)
+    inv_result = await db.execute(
+        select(Invoice)
+        .where(Invoice.customer_id == customer_id)
         .order_by(Invoice.created_at.desc())
-        .all()
+        .options(selectinload(Invoice.items))
     )
-    refunds = (
-        db.query(RetailRefund)
-        .filter(RetailRefund.customer_id == customer_id)
+    invoices = inv_result.scalars().all()
+
+    ref_result = await db.execute(
+        select(RetailRefund)
+        .where(RetailRefund.customer_id == customer_id)
         .order_by(RetailRefund.created_at.desc())
-        .all()
     )
+    refunds = ref_result.scalars().all()
 
     paid = [i for i in invoices if i.status == "paid"]
     total_orders   = len(paid)
@@ -217,21 +227,26 @@ def customer_profile(customer_id: int, db: Session = Depends(get_db)):
 
 
 @router.post("/api/add")
-def add_customer(data: CustomerCreate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    if data.phone and db.query(Customer).filter(Customer.phone == data.phone).first():
-        raise HTTPException(status_code=400, detail="Phone number already exists")
+async def add_customer(data: CustomerCreate, db: AsyncSession = Depends(get_async_session), current_user: User = Depends(get_current_user)):
+    if data.phone:
+        phone_result = await db.execute(select(Customer).where(Customer.phone == data.phone))
+        if phone_result.scalar_one_or_none():
+            raise HTTPException(status_code=400, detail="Phone number already exists")
     c = Customer(**data.model_dump())
-    db.add(c); db.flush()
+    db.add(c)
+    await db.flush()
     record(db, "Customers", "add_customer",
            f"Added customer: {c.name}" + (f" — {c.phone}" if c.phone else ""),
            ref_type="customer", ref_id=c.id)
-    db.commit(); db.refresh(c)
+    await db.commit()
+    await db.refresh(c)
     return {"id": c.id, "name": c.name}
 
 
 @router.put("/api/edit/{customer_id}")
-def edit_customer(customer_id: int, data: CustomerUpdate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    c = db.query(Customer).filter(Customer.id == customer_id).first()
+async def edit_customer(customer_id: int, data: CustomerUpdate, db: AsyncSession = Depends(get_async_session), current_user: User = Depends(get_current_user)):
+    result = await db.execute(select(Customer).where(Customer.id == customer_id))
+    c = result.scalar_one_or_none()
     if not c:
         raise HTTPException(status_code=404, detail="Customer not found")
     for k, v in data.model_dump(exclude_unset=True).items():
@@ -239,19 +254,21 @@ def edit_customer(customer_id: int, data: CustomerUpdate, db: Session = Depends(
     record(db, "Customers", "edit_customer",
            f"Edited customer: {c.name}",
            ref_type="customer", ref_id=customer_id)
-    db.commit()
+    await db.commit()
     return {"ok": True}
 
 
 @router.delete("/api/delete/{customer_id}")
-def delete_customer(customer_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    c = db.query(Customer).filter(Customer.id == customer_id).first()
+async def delete_customer(customer_id: int, db: AsyncSession = Depends(get_async_session), current_user: User = Depends(get_current_user)):
+    result = await db.execute(select(Customer).where(Customer.id == customer_id))
+    c = result.scalar_one_or_none()
     if not c:
         raise HTTPException(status_code=404, detail="Customer not found")
     record(db, "Customers", "delete_customer",
            f"Deleted customer: {c.name}",
            ref_type="customer", ref_id=customer_id)
-    db.delete(c); db.commit()
+    await db.delete(c)
+    await db.commit()
     return {"ok": True}
 
 
@@ -389,8 +406,11 @@ tr.items-row td{{padding:0}}
 
 <script>
 const CUSTOMER_ID = {customer_id};
-const TOKEN = localStorage.getItem("token");
-if (!TOKEN) {{ window.location.href = "/"; }}
+// Auth guard: redirect to login if the readable session cookie is absent
+function _hasAuthCookie() {{
+    return document.cookie.split(";").some(c => c.trim().startsWith("logged_in="));
+}}
+if (!_hasAuthCookie()) {{ window.location.href = "/"; }}
 
 if (localStorage.getItem("colorMode") === "light") {{
     document.body.classList.add("light");
@@ -406,9 +426,7 @@ function fmt(n){{ return Number(n).toLocaleString("en-US",{{minimumFractionDigit
 function esc(s){{ return String(s||"").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;"); }}
 
 async function load(){{
-    const r = await fetch(`/customers-mgmt/api/profile/${{CUSTOMER_ID}}`, {{
-        headers: {{ Authorization: "Bearer " + TOKEN }}
-    }});
+    const r = await fetch(`/customers-mgmt/api/profile/${{CUSTOMER_ID}}`);
     if (!r.ok) {{
         document.getElementById("loading").textContent = "Customer not found.";
         return;
@@ -954,14 +972,12 @@ td.phone { font-family: var(--mono); font-size: 12px; }
 <div class="toast" id="toast"></div>
 
 <script>
-  const __erpToken = localStorage.getItem("token");
-  const __erpUserRole = localStorage.getItem("user_role") || "";
-  const __erpUserPermissions = new Set(
-      (localStorage.getItem("user_permissions") || "")
-          .split(",")
-          .map(p => p.trim())
-          .filter(Boolean)
-  );
+  // Auth guard: redirect to login if the readable session cookie is absent
+  function _hasAuthCookie() {
+      return document.cookie.split(";").some(c => c.trim().startsWith("logged_in="));
+  }
+  if (!_hasAuthCookie()) { window.location.href = "/"; }
+
   function setModeButton(isLight){
     const btn = document.getElementById("mode-btn");
     if(btn) btn.innerText = isLight ? "☀️" : "🌙";
@@ -976,65 +992,24 @@ function initializeColorMode(){
     document.body.classList.toggle("light", isLight);
     setModeButton(isLight);
 }
-function setUserInfo(){
-    const name = localStorage.getItem("user_name") || "Admin";
-    const avatar = document.getElementById("user-avatar");
-    const userName = document.getElementById("user-name");
-    if(avatar) avatar.innerText = name.charAt(0).toUpperCase();
-    if(userName) userName.innerText = name;
+async function initUser() {
+    try {
+        const r = await fetch("/auth/me");
+        if (!r.ok) { window.location.href = "/"; return; }
+        const u = await r.json();
+        const nameEl = document.getElementById("user-name");
+        const avatarEl = document.getElementById("user-avatar");
+        if (nameEl) nameEl.innerText = u.name;
+        if (avatarEl) avatarEl.innerText = u.name.charAt(0).toUpperCase();
+        return u;
+    } catch(e) { window.location.href = "/"; }
 }
-function logout(){
-    localStorage.removeItem("token");
-    localStorage.removeItem("user_name");
-    localStorage.removeItem("user_role");
-    localStorage.removeItem("user_permissions");
-    document.cookie = "access_token=; Max-Age=0; path=/; SameSite=Lax";
+async function logout(){
+    await fetch("/auth/logout", { method: "POST" });
     window.location.href = "/";
 }
-  function requirePageAccess(permission){
-      if(!__erpToken){
-          window.location.href = "/";
-          throw new Error("Not authenticated");
-      }
-      if(__erpUserRole === "admin" || __erpUserPermissions.has(permission)) return;
-      document.body.innerHTML = `<div style="display:flex;align-items:center;justify-content:center;height:100vh;flex-direction:column;gap:16px;color:#445066;font-family:'Outfit',sans-serif;background:#060810"><div style="font-size:48px">🔒</div><div style="font-size:20px;font-weight:800;color:#f0f4ff">Access Restricted</div><div style="font-size:14px">You do not have permission to open this page.</div><a href="/home" style="color:#00ff9d;text-decoration:none;font-weight:700">Back to Home</a></div>`;
-      throw new Error("Access denied");
-  }
-  function applyNavPermissions(){
-      const navPermissions = {
-          "/home": null,
-          "/dashboard": "page_dashboard",
-          "/pos": "page_pos",
-          "/b2b/": "page_b2b",
-          "/inventory/": "page_inventory",
-          "/products/": "page_products",
-          "/customers-mgmt/": "page_customers",
-          "/suppliers/": "page_suppliers",
-          "/production/": "page_production",
-          "/farm/": "page_farm",
-          "/hr/": "page_hr",
-          "/accounting/": "page_accounting",
-          "/reports/": "page_reports",
-          "/import": "page_import",
-          "/users/": "admin_only"
-      };
-      document.querySelectorAll("a.nav-link[href]").forEach(link => {
-          const href = link.getAttribute("href");
-          const requirement = navPermissions[href];
-          if(requirement === undefined || requirement === null) return;
-          if(requirement === "admin_only"){
-              if(__erpUserRole !== "admin") link.style.display = "none";
-              return;
-          }
-          if(__erpUserRole !== "admin" && !__erpUserPermissions.has(requirement)){
-              link.style.display = "none";
-          }
-      });
-  }
-  requirePageAccess("page_customers");
-  applyNavPermissions();
   initializeColorMode();
-  setUserInfo();
+  initUser();
   let currentPage = 0;
 let pageSize    = 50;
 let totalItems  = 0;

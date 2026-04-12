@@ -1,4 +1,5 @@
 import hashlib
+import logging
 from functools import lru_cache
 from pathlib import Path
 
@@ -20,7 +21,8 @@ class Settings(BaseSettings):
     ADMIN_PASSWORD: str = Field(...)
 
     ALGORITHM: str = "HS256"
-    ACCESS_TOKEN_EXPIRE_MINUTES: int = 480
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = 30  # was 480 — reduced for security
+    REFRESH_TOKEN_EXPIRE_DAYS: int = 7
 
     DEFAULT_ADMIN_NAME: str = "Administrator"
     DEFAULT_ADMIN_EMAIL: str = "admin@example.com"
@@ -40,6 +42,13 @@ class Settings(BaseSettings):
     RATE_LIMIT_WINDOW_SECONDS: int = 60
 
     COOKIE_SECURE: bool = False
+
+    # DB connection pool
+    POOL_SIZE: int = 10
+    POOL_MAX_OVERFLOW: int = 20
+
+    # Redis (optional — used for rate limiting and brute-force protection)
+    REDIS_URL: str = "redis://localhost:6379/0"
 
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -119,7 +128,13 @@ class Settings(BaseSettings):
 @lru_cache
 def get_settings() -> Settings:
     LOG_DIR.mkdir(parents=True, exist_ok=True)
-    return Settings()
+    cfg = Settings()
+    if cfg.APP_ENV == "production" and not cfg.COOKIE_SECURE:
+        logging.getLogger("erp").warning(
+            "SECURITY WARNING: COOKIE_SECURE is False in production. "
+            "Set COOKIE_SECURE=true to protect the auth cookie."
+        )
+    return cfg
 
 
 settings = get_settings()

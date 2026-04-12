@@ -1,11 +1,12 @@
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import HTMLResponse
-from sqlalchemy.orm import Session
-from sqlalchemy import func
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import func, select
+from sqlalchemy.orm import selectinload
 from typing import Optional, List
 from pydantic import BaseModel
 
-from app.database import get_db
+from app.database import get_async_session
 from app.core.permissions import get_current_user, require_permission
 from app.core.log import record
 from app.models.accounting import Account, Journal, JournalEntry
@@ -47,8 +48,9 @@ class B2BRefundIn(BaseModel):
 
 # ── ACCOUNTS API ───────────────────────────────────────
 @router.get("/api/accounts")
-def get_accounts(db: Session = Depends(get_db)):
-    accounts = db.query(Account).order_by(Account.code).all()
+async def get_accounts(db: AsyncSession = Depends(get_async_session)):
+    result = await db.execute(select(Account).order_by(Account.code))
+    accounts = result.scalars().all()
     return [
         {
             "id":      a.id,
@@ -61,27 +63,30 @@ def get_accounts(db: Session = Depends(get_db)):
     ]
 
 @router.post("/api/accounts")
-def create_account(data: AccountCreate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    if db.query(Account).filter(Account.code == data.code).first():
+async def create_account(data: AccountCreate, db: AsyncSession = Depends(get_async_session), current_user: User = Depends(get_current_user)):
+    result = await db.execute(select(Account).where(Account.code == data.code))
+    if result.scalar_one_or_none():
         raise HTTPException(status_code=400, detail="Account code already exists")
     a = Account(**data.model_dump())
-    db.add(a); db.commit(); db.refresh(a)
+    db.add(a); await db.commit(); await db.refresh(a)
     return {"id": a.id, "code": a.code, "name": a.name}
 
 @router.delete("/api/accounts/{account_id}")
-def delete_account(account_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    a = db.query(Account).filter(Account.id == account_id).first()
+async def delete_account(account_id: int, db: AsyncSession = Depends(get_async_session), current_user: User = Depends(get_current_user)):
+    result = await db.execute(select(Account).options(selectinload(Account.entries)).where(Account.id == account_id))
+    a = result.scalar_one_or_none()
     if not a:
         raise HTTPException(status_code=404, detail="Account not found")
     if a.entries:
         raise HTTPException(status_code=400, detail="Cannot delete account with journal entries")
-    db.delete(a); db.commit()
+    await db.delete(a); await db.commit()
     return {"ok": True}
 
 @router.post("/api/accounts/seed")
-def seed_accounts(db: Session = Depends(get_db)):
+async def seed_accounts(db: AsyncSession = Depends(get_async_session)):
     """Create a standard chart of accounts if none exist."""
-    if db.query(Account).count() > 0:
+    cnt_result = await db.execute(select(func.count()).select_from(Account))
+    if cnt_result.scalar() > 0:
         return {"message": "Accounts already exist"}
 
     defaults = [
@@ -111,15 +116,23 @@ def seed_accounts(db: Session = Depends(get_db)):
 
     for code, name, atype in defaults:
         db.add(Account(code=code, name=name, type=atype, balance=0))
-    db.commit()
+    await db.commit()
     return {"message": f"Created {len(defaults)} accounts"}
 
 
 # ── JOURNALS API ───────────────────────────────────────
 @router.get("/api/journals")
-def get_journals(skip: int = 0, limit: int = 50, db: Session = Depends(get_db)):
-    total    = db.query(Journal).count()
-    journals = db.query(Journal).order_by(Journal.created_at.desc()).offset(skip).limit(limit).all()
+async def get_journals(skip: int = 0, limit: int = 50, db: AsyncSession = Depends(get_async_session)):
+    cnt_result = await db.execute(select(func.count()).select_from(Journal))
+    total = cnt_result.scalar()
+    result = await db.execute(
+        select(Journal)
+        .options(selectinload(Journal.entries).selectinload(JournalEntry.account))
+        .order_by(Journal.created_at.desc())
+        .offset(skip)
+        .limit(limit)
+    )
+    journals = result.scalars().all()
     return {
         "total": total,
         "journals": [
@@ -136,8 +149,13 @@ def get_journals(skip: int = 0, limit: int = 50, db: Session = Depends(get_db)):
     }
 
 @router.get("/api/journals/{journal_id}")
-def get_journal(journal_id: int, db: Session = Depends(get_db)):
-    j = db.query(Journal).filter(Journal.id == journal_id).first()
+async def get_journal(journal_id: int, db: AsyncSession = Depends(get_async_session)):
+    result = await db.execute(
+        select(Journal)
+        .options(selectinload(Journal.entries).selectinload(JournalEntry.account))
+        .where(Journal.id == journal_id)
+    )
+    j = result.scalar_one_or_none()
     if not j:
         raise HTTPException(status_code=404, detail="Journal not found")
     return {
@@ -158,7 +176,7 @@ def get_journal(journal_id: int, db: Session = Depends(get_db)):
     }
 
 @router.post("/api/journals", dependencies=[Depends(require_permission("action_accounting_post_journal"))])
-def create_journal(data: JournalCreate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+async def create_journal(data: JournalCreate, db: AsyncSession = Depends(get_async_session), current_user: User = Depends(get_current_user)):
     total_debit  = sum(e.debit  for e in data.entries)
     total_credit = sum(e.credit for e in data.entries)
     if round(total_debit, 2) != round(total_credit, 2):
@@ -172,10 +190,11 @@ def create_journal(data: JournalCreate, db: Session = Depends(get_db), current_u
         description=data.description,
         user_id=current_user.id,
     )
-    db.add(journal); db.flush()
+    db.add(journal); await db.flush()
 
     for entry in data.entries:
-        acc = db.query(Account).filter(Account.id == entry.account_id).first()
+        acc_result = await db.execute(select(Account).where(Account.id == entry.account_id))
+        acc = acc_result.scalar_one_or_none()
         if not acc:
             raise HTTPException(status_code=404, detail=f"Account ID not found: {entry.account_id}")
 
@@ -194,14 +213,15 @@ def create_journal(data: JournalCreate, db: Session = Depends(get_db), current_u
     record(db, "Accounting", "create_journal",
            f"Manual journal: {data.description or '—'} — debit total: {total_debit:.2f}",
            user=current_user, ref_type="journal", ref_id=journal.id)
-    db.commit(); db.refresh(journal)
+    await db.commit(); await db.refresh(journal)
     return {"id": journal.id, "ok": True}
 
 
 # ── REPORTS API ────────────────────────────────────────
 @router.get("/api/trial-balance")
-def trial_balance(db: Session = Depends(get_db)):
-    accounts = db.query(Account).order_by(Account.code).all()
+async def trial_balance(db: AsyncSession = Depends(get_async_session)):
+    result = await db.execute(select(Account).order_by(Account.code))
+    accounts = result.scalars().all()
     rows = []
     total_debit  = 0
     total_credit = 0
@@ -227,11 +247,12 @@ def trial_balance(db: Session = Depends(get_db)):
     }
 
 @router.get("/api/profit-loss")
-def profit_loss(db: Session = Depends(get_db)):
+async def profit_loss(db: AsyncSession = Depends(get_async_session)):
     from app.models.refund import RetailRefund
-    from sqlalchemy import func as sqlfunc
-    revenue_accounts = db.query(Account).filter(Account.type == "revenue").order_by(Account.code).all()
-    expense_accounts = db.query(Account).filter(Account.type == "expense").order_by(Account.code).all()
+    rev_result = await db.execute(select(Account).where(Account.type == "revenue").order_by(Account.code))
+    revenue_accounts = rev_result.scalars().all()
+    exp_result = await db.execute(select(Account).where(Account.type == "expense").order_by(Account.code))
+    expense_accounts = exp_result.scalars().all()
 
     revenues = [{"code": a.code, "name": a.name, "amount": abs(float(a.balance))} for a in revenue_accounts]
     expenses = [{"code": a.code, "name": a.name, "amount": abs(float(a.balance))} for a in expense_accounts]
@@ -241,8 +262,10 @@ def profit_loss(db: Session = Depends(get_db)):
     net_profit    = total_revenue - total_expense
 
     # Retail refund total for display as a deduction note
-    total_refunds = float(db.query(sqlfunc.sum(RetailRefund.total)).scalar() or 0)
-    refund_count  = db.query(sqlfunc.count(RetailRefund.id)).scalar() or 0
+    sum_result = await db.execute(select(func.sum(RetailRefund.total)))
+    total_refunds = float(sum_result.scalar() or 0)
+    cnt_result = await db.execute(select(func.count(RetailRefund.id)))
+    refund_count = cnt_result.scalar() or 0
 
     return {
         "revenues":      revenues,
@@ -258,11 +281,21 @@ def profit_loss(db: Session = Depends(get_db)):
 
 # ── B2B INVOICES (for Accounting tab) ─────────────────
 @router.get("/api/b2b-invoices")
-def get_b2b_invoices(invoice_type: str = None, status: str = None, db: Session = Depends(get_db)):
-    query = db.query(B2BInvoice)
-    if invoice_type: query = query.filter(B2BInvoice.invoice_type == invoice_type)
-    if status:       query = query.filter(B2BInvoice.status == status)
-    invoices = query.order_by(B2BInvoice.created_at.desc()).all()
+async def get_b2b_invoices(invoice_type: str = None, status: str = None, db: AsyncSession = Depends(get_async_session)):
+    stmt = (
+        select(B2BInvoice)
+        .options(
+            selectinload(B2BInvoice.client),
+            selectinload(B2BInvoice.items).selectinload(B2BInvoiceItem.product),
+        )
+        .order_by(B2BInvoice.created_at.desc())
+    )
+    if invoice_type:
+        stmt = stmt.where(B2BInvoice.invoice_type == invoice_type)
+    if status:
+        stmt = stmt.where(B2BInvoice.status == status)
+    result = await db.execute(stmt)
+    invoices = result.scalars().all()
     return [
         {
             "id":             i.id,
@@ -292,8 +325,13 @@ def get_b2b_invoices(invoice_type: str = None, status: str = None, db: Session =
     ]
 
 @router.post("/api/b2b-invoices/{invoice_id}/collect")
-def collect_b2b_payment(invoice_id: int, data: dict, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    invoice = db.query(B2BInvoice).filter(B2BInvoice.id == invoice_id).first()
+async def collect_b2b_payment(invoice_id: int, data: dict, db: AsyncSession = Depends(get_async_session), current_user: User = Depends(get_current_user)):
+    inv_result = await db.execute(
+        select(B2BInvoice)
+        .options(selectinload(B2BInvoice.client))
+        .where(B2BInvoice.id == invoice_id)
+    )
+    invoice = inv_result.scalar_one_or_none()
     if not invoice:
         raise HTTPException(status_code=404, detail="Invoice not found")
     if invoice.invoice_type not in ("cash", "full_payment"):
@@ -311,28 +349,34 @@ def collect_b2b_payment(invoice_id: int, data: dict, db: Session = Depends(get_d
         client.outstanding = Decimal(str(max(0, float(client.outstanding) - amount)))
     # Journal: Cash in, AR out, Deferred → Revenue
     journal = Journal(ref_type="b2b_collection", description=f"B2B payment collected - {invoice.invoice_number}")
-    db.add(journal); db.flush()
+    db.add(journal); await db.flush()
     for code, debit, credit in [
         ("1000", amount, 0),
         ("1100", 0, amount),
         ("2200", amount, 0),
         ("4000", 0, amount),
     ]:
-        acc = db.query(Account).filter(Account.code == code).first()
+        acc_result = await db.execute(select(Account).where(Account.code == code))
+        acc = acc_result.scalar_one_or_none()
         if acc:
             db.add(JournalEntry(journal_id=journal.id, account_id=acc.id, debit=debit, credit=credit))
             acc.balance += Decimal(str(debit)) - Decimal(str(credit))
     record(db, "Accounting", "collect_b2b_payment",
            f"B2B payment collected — {invoice.invoice_number} — amount: {amount:.2f} — status: {invoice.status}",
            ref_type="b2b_invoice", ref_id=invoice_id)
-    db.commit()
+    await db.commit()
     return {"ok": True, "status": invoice.status, "invoice_number": invoice.invoice_number}
 
 
 @router.post("/api/b2b-invoices/{invoice_id}/consignment-payment")
-def accounting_consignment_payment(invoice_id: int, data: dict, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+async def accounting_consignment_payment(invoice_id: int, data: dict, db: AsyncSession = Depends(get_async_session), current_user: User = Depends(get_current_user)):
     """Record a monthly/partial cash payment against a consignment invoice."""
-    invoice = db.query(B2BInvoice).filter(B2BInvoice.id == invoice_id).first()
+    inv_result = await db.execute(
+        select(B2BInvoice)
+        .options(selectinload(B2BInvoice.client))
+        .where(B2BInvoice.id == invoice_id)
+    )
+    invoice = inv_result.scalar_one_or_none()
     if not invoice:
         raise HTTPException(status_code=404, detail="Invoice not found")
     if invoice.invoice_type != "consignment":
@@ -353,24 +397,26 @@ def accounting_consignment_payment(invoice_id: int, data: dict, db: Session = De
     note = f"Consignment payment - {invoice.invoice_number}"
     if month_label: note += f" ({month_label})"
     journal = Journal(ref_type="consignment_payment", description=note)
-    db.add(journal); db.flush()
+    db.add(journal); await db.flush()
     for code, debit, credit in [
         ("1000", amount, 0),
         ("1100", 0, amount),
         ("2200", amount, 0),
         ("4000", 0, amount),
     ]:
-        acc = db.query(Account).filter(Account.code == code).first()
+        acc_result = await db.execute(select(Account).where(Account.code == code))
+        acc = acc_result.scalar_one_or_none()
         if acc:
             db.add(JournalEntry(journal_id=journal.id, account_id=acc.id, debit=debit, credit=credit))
             acc.balance += Decimal(str(debit)) - Decimal(str(credit))
-    db.commit()
+    await db.commit()
     return {"ok": True, "status": invoice.status, "invoice_number": invoice.invoice_number}
 
 
 @router.post("/api/b2b-clients/{client_id}/refund")
-def refund_b2b_client_account(client_id: int, data: B2BRefundIn, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    client = db.query(B2BClient).filter(B2BClient.id == client_id).first()
+async def refund_b2b_client_account(client_id: int, data: B2BRefundIn, db: AsyncSession = Depends(get_async_session), current_user: User = Depends(get_current_user)):
+    client_result = await db.execute(select(B2BClient).where(B2BClient.id == client_id))
+    client = client_result.scalar_one_or_none()
     if not client:
         raise HTTPException(status_code=404, detail="Client not found")
 
@@ -392,17 +438,18 @@ def refund_b2b_client_account(client_id: int, data: B2BRefundIn, db: Session = D
         description=f"B2B client account refund - {client.name}{note_suffix}",
         user_id=current_user.id,
     )
-    db.add(journal); db.flush()
+    db.add(journal); await db.flush()
     for code, debit, credit in [
         ("2200", amount, 0),
         ("1100", 0, amount),
     ]:
-        acc = db.query(Account).filter(Account.code == code).first()
+        acc_result = await db.execute(select(Account).where(Account.code == code))
+        acc = acc_result.scalar_one_or_none()
         if acc:
             db.add(JournalEntry(journal_id=journal.id, account_id=acc.id, debit=debit, credit=credit))
             acc.balance += Decimal(str(debit)) - Decimal(str(credit))
 
-    db.commit()
+    await db.commit()
     return {
         "ok": True,
         "client": client.name,
@@ -850,24 +897,12 @@ td.cr { font-family:var(--mono); color:var(--blue); }
 <div class="toast" id="toast"></div>
 
 <script>
-  const __erpToken = localStorage.getItem("token");
-  const __erpUserRole = localStorage.getItem("user_role") || "";
-  const __erpUserPermissions = new Set(
-      (localStorage.getItem("user_permissions") || "")
-          .split(",")
-          .map(p => p.trim())
-          .filter(Boolean)
-  );
-  const __erpFetch = window.fetch.bind(window);
-  window.fetch = (input, init = {}) => {
-      const url = typeof input === "string" ? input : (input && input.url) || "";
-      const isRelativeUrl = typeof url === "string" && !(url.startsWith("http://") || url.startsWith("https://"));
-      const headers = new Headers(init.headers || (input instanceof Request ? input.headers : undefined));
-      if(__erpToken && isRelativeUrl && !headers.has("Authorization")){
-          headers.set("Authorization", "Bearer " + __erpToken);
-      }
-      return __erpFetch(input, {...init, headers});
-  };
+  // Auth guard: redirect to login if the readable session cookie is absent
+  function _hasAuthCookie() {
+      return document.cookie.split(";").some(c => c.trim().startsWith("logged_in="));
+  }
+  if (!_hasAuthCookie()) { window.location.href = "/"; }
+
   function setModeButton(isLight){
     const btn = document.getElementById("mode-btn");
     if(btn) btn.innerText = isLight ? "☀️" : "🌙";
@@ -882,65 +917,28 @@ function initializeColorMode(){
     document.body.classList.toggle("light", isLight);
     setModeButton(isLight);
 }
-function setUserInfo(){
-    const name = localStorage.getItem("user_name") || "Admin";
-    const avatar = document.getElementById("user-avatar");
-    const userName = document.getElementById("user-name");
-    if(avatar) avatar.innerText = name.charAt(0).toUpperCase();
-    if(userName) userName.innerText = name;
+async function initUser() {
+    try {
+        const r = await fetch("/auth/me");
+        if (!r.ok) { window.location.href = "/"; return; }
+        const u = await r.json();
+        const nameEl = document.getElementById("user-name");
+        const avatarEl = document.getElementById("user-avatar");
+        if (nameEl) nameEl.innerText = u.name;
+        if (avatarEl) avatarEl.innerText = u.name.charAt(0).toUpperCase();
+        return u;
+    } catch(e) { window.location.href = "/"; }
 }
-function logout(){
-    localStorage.removeItem("token");
-    localStorage.removeItem("user_name");
-    localStorage.removeItem("user_role");
-    localStorage.removeItem("user_permissions");
-    document.cookie = "access_token=; Max-Age=0; path=/; SameSite=Lax";
+async function logout(){
+    await fetch("/auth/logout", { method: "POST" });
     window.location.href = "/";
 }
-  function requirePageAccess(permission){
-      if(!__erpToken){
-          window.location.href = "/";
-          throw new Error("Not authenticated");
-      }
-      if(__erpUserRole === "admin" || __erpUserPermissions.has(permission)) return;
-      document.body.innerHTML = `<div style="display:flex;align-items:center;justify-content:center;height:100vh;flex-direction:column;gap:16px;color:#445066;font-family:'Outfit',sans-serif;background:#060810"><div style="font-size:48px">🔒</div><div style="font-size:20px;font-weight:800;color:#f0f4ff">Access Restricted</div><div style="font-size:14px">You do not have permission to open this page.</div><a href="/home" style="color:#00ff9d;text-decoration:none;font-weight:700">Back to Home</a></div>`;
-      throw new Error("Access denied");
+  function hasPermission(permission, u){
+      const role = u ? (u.role || "") : "";
+      const perms = new Set(u ? (u.permissions || []) : []);
+      return role === "admin" || perms.has(permission);
   }
-  function applyNavPermissions(){
-      const navPermissions = {
-          "/home": null,
-          "/dashboard": "page_dashboard",
-          "/pos": "page_pos",
-          "/b2b/": "page_b2b",
-          "/inventory/": "page_inventory",
-          "/products/": "page_products",
-          "/customers-mgmt/": "page_customers",
-          "/suppliers/": "page_suppliers",
-          "/production/": "page_production",
-          "/farm/": "page_farm",
-          "/hr/": "page_hr",
-          "/accounting/": "page_accounting",
-          "/reports/": "page_reports",
-          "/import": "page_import",
-          "/users/": "admin_only"
-      };
-      document.querySelectorAll("a.nav-link[href]").forEach(link => {
-          const href = link.getAttribute("href");
-          const requirement = navPermissions[href];
-          if(requirement === undefined || requirement === null) return;
-          if(requirement === "admin_only"){
-              if(__erpUserRole !== "admin") link.style.display = "none";
-              return;
-          }
-          if(__erpUserRole !== "admin" && !__erpUserPermissions.has(requirement)){
-              link.style.display = "none";
-          }
-      });
-  }
-  function hasPermission(permission){
-      return __erpUserRole === "admin" || __erpUserPermissions.has(permission);
-  }
-  function configureAccountingPermissions(){
+  function configureAccountingPermissions(u){
       const tabMap = [
           {id:"tab-journals", permission:"tab_accounting_journal"},
           {id:"tab-pl", permission:"tab_accounting_pl"},
@@ -948,18 +946,15 @@ function logout(){
       ];
       tabMap.forEach(conf => {
           let el = document.getElementById(conf.id);
-          if(el && !hasPermission(conf.permission)) el.style.display = "none";
+          if(el && !hasPermission(conf.permission, u)) el.style.display = "none";
       });
-      if(!hasPermission("action_accounting_post_journal")){
+      if(!hasPermission("action_accounting_post_journal", u)){
           let btn = document.getElementById("btn-add-je");
           if(btn) btn.style.display = "none";
       }
   }
-  requirePageAccess("page_accounting");
-  applyNavPermissions();
   initializeColorMode();
-  setUserInfo();
-  configureAccountingPermissions();
+  initUser().then(u => { if(u) configureAccountingPermissions(u); });
   let accounts    = [];
 let currentTab  = "accounts";
 

@@ -5,12 +5,12 @@ from datetime import date as date_type
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
-from sqlalchemy import func
-from sqlalchemy.orm import Session
+from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.log import record
 from app.core.permissions import get_current_user, require_permission
-from app.database import get_db
+from app.database import get_async_session
 from app.models.accounting import Account, Journal, JournalEntry
 from app.models.expense import Expense, ExpenseCategory
 from app.models.farm import Farm, FarmDelivery, FarmDeliveryItem
@@ -52,13 +52,14 @@ class ExpenseUpdate(BaseModel):
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
-def _next_ref(db: Session) -> str:
-    max_id = db.query(func.max(Expense.id)).scalar() or 0
+async def _next_ref(db: AsyncSession) -> str:
+    _r = await db.execute(select(func.max(Expense.id)))
+    max_id = _r.scalar() or 0
     return f"EXP-{str(max_id + 1).zfill(5)}"
 
 
-def _post_expense_journal(
-    db: Session,
+async def _post_expense_journal(
+    db: AsyncSession,
     description: str,
     amount: float,
     expense_account_code: str,
@@ -74,19 +75,20 @@ def _post_expense_journal(
         user_id=user_id,
     )
     db.add(journal)
-    db.flush()
+    await db.flush()
 
     for code, debit, credit in [
         (expense_account_code, amount, 0),   # Debit expense account
         (credit_code,          0, amount),   # Credit cash / bank
     ]:
-        acc = db.query(Account).filter(Account.code == code).first()
+        _r = await db.execute(select(Account).where(Account.code == code))
+        acc = _r.scalar_one_or_none()
         if not acc:
             # Auto-create the account if it doesn't exist yet
             type_name = "expense" if code.startswith("5") else "asset"
             acc = Account(code=code, name=f"Account {code}", type=type_name, balance=0)
             db.add(acc)
-            db.flush()
+            await db.flush()
         db.add(JournalEntry(
             journal_id=journal.id,
             account_id=acc.id,
@@ -98,7 +100,7 @@ def _post_expense_journal(
     return journal
 
 
-def _reverse_expense_journal(db: Session, expense: Expense) -> None:
+async def _reverse_expense_journal(db: AsyncSession, expense: Expense) -> None:
     """Post a reversal journal entry for a deleted expense."""
     cat = expense.category
     if not cat:
@@ -110,12 +112,13 @@ def _reverse_expense_journal(db: Session, expense: Expense) -> None:
         user_id=expense.user_id,
     )
     db.add(journal)
-    db.flush()
+    await db.flush()
     for code, debit, credit in [
         (credit_code,          float(expense.amount), 0),   # Debit cash back
         (cat.account_code,     0, float(expense.amount)),   # Credit expense account
     ]:
-        acc = db.query(Account).filter(Account.code == code).first()
+        _r = await db.execute(select(Account).where(Account.code == code))
+        acc = _r.scalar_one_or_none()
         if acc:
             db.add(JournalEntry(
                 journal_id=journal.id,
@@ -129,13 +132,13 @@ def _reverse_expense_journal(db: Session, expense: Expense) -> None:
 # ── Category API ─────────────────────────────────────────────────────────────
 
 @router.get("/api/categories")
-def list_categories(db: Session = Depends(get_db)):
-    cats = (
-        db.query(ExpenseCategory)
-        .filter(ExpenseCategory.is_active == "1")
+async def list_categories(db: AsyncSession = Depends(get_async_session)):
+    _r = await db.execute(
+        select(ExpenseCategory)
+        .where(ExpenseCategory.is_active == "1")
         .order_by(ExpenseCategory.account_code)
-        .all()
     )
+    cats = _r.scalars().all()
     return [
         {
             "id":           c.id,
@@ -150,27 +153,30 @@ def list_categories(db: Session = Depends(get_db)):
 
 
 @router.post("/api/categories")
-def create_category(
+async def create_category(
     data: CategoryCreate,
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_async_session),
     current_user: User = Depends(get_current_user),
 ):
-    if db.query(ExpenseCategory).filter(ExpenseCategory.name == data.name.strip()).first():
+    _r = await db.execute(select(ExpenseCategory).where(ExpenseCategory.name == data.name.strip()))
+    if _r.scalar_one_or_none():
         raise HTTPException(status_code=400, detail="Category name already exists")
 
     # Auto-generate account code: find highest 5xxx code in use and increment
     if data.account_code and data.account_code.strip():
         account_code = data.account_code.strip()
     else:
+        _r2 = await db.execute(select(ExpenseCategory))
         existing_codes = [
             int(c.account_code)
-            for c in db.query(ExpenseCategory).all()
+            for c in _r2.scalars().all()
             if c.account_code and c.account_code.isdigit() and 5000 <= int(c.account_code) <= 5999
         ]
         account_code = str(max(existing_codes) + 1) if existing_codes else "5001"
 
     # Ensure ledger account exists
-    if not db.query(Account).filter(Account.code == account_code).first():
+    _r3 = await db.execute(select(Account).where(Account.code == account_code))
+    if not _r3.scalar_one_or_none():
         db.add(Account(code=account_code, name=data.name.strip(), type="expense", balance=0))
 
     cat = ExpenseCategory(
@@ -179,48 +185,51 @@ def create_category(
         description=(data.description or "").strip() or None,
     )
     db.add(cat)
-    db.commit()
-    db.refresh(cat)
+    await db.commit()
+    await db.refresh(cat)
     return {"id": cat.id, "name": cat.name, "account_code": cat.account_code}
 
 
 @router.delete("/api/categories/{cat_id}")
-def delete_category(
+async def delete_category(
     cat_id: int,
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_async_session),
     current_user: User = Depends(get_current_user),
 ):
-    cat = db.query(ExpenseCategory).filter(ExpenseCategory.id == cat_id).first()
+    _r = await db.execute(select(ExpenseCategory).where(ExpenseCategory.id == cat_id))
+    cat = _r.scalar_one_or_none()
     if not cat:
         raise HTTPException(status_code=404, detail="Category not found")
     if cat.expenses:
         raise HTTPException(status_code=400, detail="Cannot delete a category that has expenses. Archive it instead.")
     cat.is_active = "0"
-    db.commit()
+    await db.commit()
     return {"ok": True}
 
 
 # ── Expense API ───────────────────────────────────────────────────────────────
 
 @router.get("/api/list")
-def list_expenses(
+async def list_expenses(
     category_id: Optional[int] = None,
     month: Optional[str] = None,   # "YYYY-MM"
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_async_session),
 ):
-    query = db.query(Expense)
+    stmt = select(Expense)
     if category_id:
-        query = query.filter(Expense.category_id == category_id)
+        stmt = stmt.where(Expense.category_id == category_id)
     if month:
         try:
             y, m = int(month[:4]), int(month[5:7])
-            query = query.filter(
+            stmt = stmt.where(
                 func.extract("year",  Expense.expense_date) == y,
                 func.extract("month", Expense.expense_date) == m,
             )
         except (ValueError, IndexError):
             pass
-    expenses = query.order_by(Expense.expense_date.desc(), Expense.id.desc()).all()
+    stmt = stmt.order_by(Expense.expense_date.desc(), Expense.id.desc())
+    _r = await db.execute(stmt)
+    expenses = _r.scalars().all()
     return [
         {
             "id":             e.id,
@@ -242,37 +251,44 @@ def list_expenses(
 
 
 @router.get("/api/summary")
-def expense_summary(db: Session = Depends(get_db)):
+async def expense_summary(db: AsyncSession = Depends(get_async_session)):
     """Monthly totals + category breakdown for the current month."""
     from datetime import datetime
     now = datetime.utcnow()
-    this_month = db.query(func.coalesce(func.sum(Expense.amount), 0)).filter(
-        func.extract("year",  Expense.expense_date) == now.year,
-        func.extract("month", Expense.expense_date) == now.month,
-    ).scalar() or 0
+    _r = await db.execute(
+        select(func.coalesce(func.sum(Expense.amount), 0)).where(
+            func.extract("year",  Expense.expense_date) == now.year,
+            func.extract("month", Expense.expense_date) == now.month,
+        )
+    )
+    this_month = _r.scalar() or 0
 
     last_month_year  = now.year if now.month > 1 else now.year - 1
     last_month_month = now.month - 1 if now.month > 1 else 12
-    last_month = db.query(func.coalesce(func.sum(Expense.amount), 0)).filter(
-        func.extract("year",  Expense.expense_date) == last_month_year,
-        func.extract("month", Expense.expense_date) == last_month_month,
-    ).scalar() or 0
+    _r2 = await db.execute(
+        select(func.coalesce(func.sum(Expense.amount), 0)).where(
+            func.extract("year",  Expense.expense_date) == last_month_year,
+            func.extract("month", Expense.expense_date) == last_month_month,
+        )
+    )
+    last_month = _r2.scalar() or 0
 
-    total_all = db.query(func.coalesce(func.sum(Expense.amount), 0)).scalar() or 0
+    _r3 = await db.execute(select(func.coalesce(func.sum(Expense.amount), 0)))
+    total_all = _r3.scalar() or 0
 
     # Category breakdown this month
-    cats = (
-        db.query(ExpenseCategory)
-        .filter(ExpenseCategory.is_active == "1")
-        .all()
-    )
+    _r4 = await db.execute(select(ExpenseCategory).where(ExpenseCategory.is_active == "1"))
+    cats = _r4.scalars().all()
     breakdown = []
     for c in cats:
-        cat_total = db.query(func.coalesce(func.sum(Expense.amount), 0)).filter(
-            Expense.category_id == c.id,
-            func.extract("year",  Expense.expense_date) == now.year,
-            func.extract("month", Expense.expense_date) == now.month,
-        ).scalar() or 0
+        _rc = await db.execute(
+            select(func.coalesce(func.sum(Expense.amount), 0)).where(
+                Expense.category_id == c.id,
+                func.extract("year",  Expense.expense_date) == now.year,
+                func.extract("month", Expense.expense_date) == now.month,
+            )
+        )
+        cat_total = _rc.scalar() or 0
         if float(cat_total) > 0:
             breakdown.append({"name": c.name, "total": float(cat_total)})
     breakdown.sort(key=lambda x: x["total"], reverse=True)
@@ -286,15 +302,18 @@ def expense_summary(db: Session = Depends(get_db)):
 
 
 @router.post("/api/add")
-def add_expense(
+async def add_expense(
     data: ExpenseCreate,
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_async_session),
     current_user: User = Depends(get_current_user),
 ):
-    cat = db.query(ExpenseCategory).filter(
-        ExpenseCategory.id == data.category_id,
-        ExpenseCategory.is_active == "1",
-    ).first()
+    _r = await db.execute(
+        select(ExpenseCategory).where(
+            ExpenseCategory.id == data.category_id,
+            ExpenseCategory.is_active == "1",
+        )
+    )
+    cat = _r.scalar_one_or_none()
     if not cat:
         raise HTTPException(status_code=404, detail="Category not found")
     if data.amount <= 0:
@@ -305,11 +324,11 @@ def add_expense(
     except ValueError:
         raise HTTPException(status_code=400, detail="Invalid date format — use YYYY-MM-DD")
 
-    ref = _next_ref(db)
+    ref = await _next_ref(db)
     vendor = (data.vendor or "").strip() or None
     desc   = (data.description or "").strip() or None
 
-    journal = _post_expense_journal(
+    journal = await _post_expense_journal(
         db=db,
         description=f"{cat.name} expense — {ref}" + (f" — {vendor}" if vendor else ""),
         amount=round(float(data.amount), 2),
@@ -336,9 +355,8 @@ def add_expense(
         f"{cat.name} — {ref} — {float(data.amount):.2f} — {data.payment_method}",
         user=current_user, ref_type="expense", ref_id=0,
     )
-    db.commit()
-    db.refresh(expense)
-    record_q = db.query(Expense).filter(Expense.id == expense.id).first()
+    await db.commit()
+    await db.refresh(expense)
     # update ref_id in activity log — simpler to just re-record
     return {
         "id":         expense.id,
@@ -349,25 +367,29 @@ def add_expense(
 
 
 @router.put("/api/edit/{expense_id}")
-def edit_expense(
+async def edit_expense(
     expense_id: int,
     data: ExpenseUpdate,
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_async_session),
     current_user: User = Depends(get_current_user),
 ):
-    expense = db.query(Expense).filter(Expense.id == expense_id).first()
+    _r = await db.execute(select(Expense).where(Expense.id == expense_id))
+    expense = _r.scalar_one_or_none()
     if not expense:
         raise HTTPException(status_code=404, detail="Expense not found")
 
     # Reverse original journal
-    _reverse_expense_journal(db, expense)
+    await _reverse_expense_journal(db, expense)
 
     # Apply updates
     if data.category_id is not None:
-        cat = db.query(ExpenseCategory).filter(
-            ExpenseCategory.id == data.category_id,
-            ExpenseCategory.is_active == "1",
-        ).first()
+        _rc = await db.execute(
+            select(ExpenseCategory).where(
+                ExpenseCategory.id == data.category_id,
+                ExpenseCategory.is_active == "1",
+            )
+        )
+        cat = _rc.scalar_one_or_none()
         if not cat:
             raise HTTPException(status_code=404, detail="Category not found")
         expense.category_id = data.category_id
@@ -390,8 +412,9 @@ def edit_expense(
         expense.farm_id = data.farm_id or None
 
     # Post new journal
-    cat = db.query(ExpenseCategory).filter(ExpenseCategory.id == expense.category_id).first()
-    journal = _post_expense_journal(
+    _rcat = await db.execute(select(ExpenseCategory).where(ExpenseCategory.id == expense.category_id))
+    cat = _rcat.scalar_one_or_none()
+    journal = await _post_expense_journal(
         db=db,
         description=f"{cat.name} expense (edited) — {expense.ref_number}",
         amount=float(expense.amount),
@@ -404,38 +427,39 @@ def edit_expense(
     record(db, "Expenses", "edit_expense",
            f"Edited {expense.ref_number} — {float(expense.amount):.2f}",
            user=current_user, ref_type="expense", ref_id=expense.id)
-    db.commit()
+    await db.commit()
     return {"ok": True}
 
 
 @router.delete("/api/delete/{expense_id}")
-def delete_expense(
+async def delete_expense(
     expense_id: int,
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_async_session),
     current_user: User = Depends(get_current_user),
 ):
-    expense = db.query(Expense).filter(Expense.id == expense_id).first()
+    _r = await db.execute(select(Expense).where(Expense.id == expense_id))
+    expense = _r.scalar_one_or_none()
     if not expense:
         raise HTTPException(status_code=404, detail="Expense not found")
 
     ref = expense.ref_number
-    _reverse_expense_journal(db, expense)
-    db.delete(expense)
+    await _reverse_expense_journal(db, expense)
+    await db.delete(expense)
     record(db, "Expenses", "delete_expense",
            f"Deleted {ref} — journal reversed",
            user=current_user, ref_type="expense", ref_id=expense_id)
-    db.commit()
+    await db.commit()
     return {"ok": True}
 
 
 # ── Cost Allocation API ──────────────────────────────────────────────────────
 
 @router.get("/api/cost-allocation")
-def cost_allocation(
+async def cost_allocation(
     farm_id:   int,
     date_from: str,          # YYYY-MM-DD
     date_to:   str,
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_async_session),
 ):
     """
     For a given farm + date range (a "season"):
@@ -451,20 +475,20 @@ def cost_allocation(
     except ValueError:
         raise HTTPException(status_code=400, detail="Invalid date format — use YYYY-MM-DD")
 
-    farm = db.query(Farm).filter(Farm.id == farm_id).first()
+    _rf = await db.execute(select(Farm).where(Farm.id == farm_id))
+    farm = _rf.scalar_one_or_none()
     if not farm:
         raise HTTPException(status_code=404, detail="Farm not found")
 
     # 1 ── Farm expenses in the period
-    expenses = (
-        db.query(Expense)
-        .filter(
+    _re = await db.execute(
+        select(Expense).where(
             Expense.farm_id == farm_id,
             Expense.expense_date >= d_from,
             Expense.expense_date <= d_to,
         )
-        .all()
     )
+    expenses = _re.scalars().all()
     total_cost = sum(float(e.amount) for e in expenses)
     cost_by_category = {}
     for e in expenses:
@@ -472,15 +496,14 @@ def cost_allocation(
         cost_by_category[cat_name] = cost_by_category.get(cat_name, 0) + float(e.amount)
 
     # 2 ── Deliveries from this farm in the period
-    deliveries = (
-        db.query(FarmDelivery)
-        .filter(
+    _rd = await db.execute(
+        select(FarmDelivery).where(
             FarmDelivery.farm_id == farm_id,
             FarmDelivery.delivery_date >= d_from,
             FarmDelivery.delivery_date <= d_to,
         )
-        .all()
     )
+    deliveries = _rd.scalars().all()
     qty_by_product: dict[int, dict] = {}
     for d in deliveries:
         for item in d.items:
@@ -991,28 +1014,37 @@ nav {
 
 <script>
 // ── State ─────────────────────────────────────────────
-const token = localStorage.getItem("token") || "";
+// Auth guard: redirect to login if the readable session cookie is absent
+function _hasAuthCookie() {
+    return document.cookie.split(";").some(c => c.trim().startsWith("logged_in="));
+}
+if (!_hasAuthCookie()) { window.location.href = "/"; }
+
 let categories    = [];
 let activeCatId   = null;
 let editingId     = null;
 let toastTimer    = null;
 
-if (!token) window.location.href = "/";
-
 // ── Init ──────────────────────────────────────────────
-function initUser() {
-    const name = localStorage.getItem("user_name") || "Admin";
-    document.getElementById("user-avatar").innerText = name.charAt(0).toUpperCase();
-    document.getElementById("user-name").innerText   = name;
+async function initUser() {
+    try {
+        const r = await fetch("/auth/me");
+        if (!r.ok) { window.location.href = "/"; return; }
+        const u = await r.json();
+        const nameEl = document.getElementById("user-name");
+        const avatarEl = document.getElementById("user-avatar");
+        if (nameEl) nameEl.innerText = u.name;
+        if (avatarEl) avatarEl.innerText = u.name.charAt(0).toUpperCase();
+        return u;
+    } catch(e) { window.location.href = "/"; }
 }
 function toggleMode() {
     const light = document.body.classList.toggle("light");
     localStorage.setItem("expenses-theme", light ? "light" : "dark");
     document.getElementById("mode-btn").innerText = light ? "☀️" : "🌙";
 }
-function logout() {
-    ["token","user_name","user_role","user_permissions"].forEach(k => localStorage.removeItem(k));
-    document.cookie = "access_token=; Max-Age=0; path=/; SameSite=Lax";
+async function logout() {
+    await fetch("/auth/logout", { method: "POST" });
     window.location.href = "/";
 }
 if (localStorage.getItem("expenses-theme") === "light") {
@@ -1085,7 +1117,7 @@ async function saveCategory() {
     try {
         const res  = await fetch("/expenses/api/categories", {
             method: "POST",
-            headers: { "Content-Type": "application/json", "Authorization": "Bearer " + token },
+            headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ name, description: desc }),
         });
         const data = await res.json();
@@ -1231,7 +1263,7 @@ async function saveExpense() {
         const method2 = editingId ? "PUT" : "POST";
         const res    = await fetch(url, {
             method: method2,
-            headers: { "Content-Type": "application/json", "Authorization": "Bearer " + token },
+            headers: { "Content-Type": "application/json" },
             body: JSON.stringify(body),
         });
         const data = await res.json();
@@ -1251,7 +1283,6 @@ async function deleteExpense(id, ref) {
     try {
         const res  = await fetch(`/expenses/api/delete/${id}`, {
             method: "DELETE",
-            headers: { "Authorization": "Bearer " + token },
         });
         const data = await res.json();
         if (data.detail) { showToast(data.detail, "err"); return; }
@@ -1265,9 +1296,7 @@ async function deleteExpense(id, ref) {
 // ── Farm dropdown for cost allocation ─────────────────
 async function loadFarmsDropdown() {
     try {
-        const farms = await (await fetch("/farm/api/farms", {
-            headers: { "Authorization": "Bearer " + token }
-        })).json();
+        const farms = await (await fetch("/farm/api/farms")).json();
         const sel = document.getElementById("m-farm");
         sel.innerHTML = `<option value="">— General expense —</option>` +
             farms.map(f => `<option value="${f.id}">${f.name}</option>`).join("");

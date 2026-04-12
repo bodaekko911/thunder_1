@@ -52,7 +52,7 @@ def has_permission(user: User, permission: str) -> bool:
 
 
 def require_permission(permission: str):
-    def checker(user: User = Depends(get_current_user)):
+    async def checker(user: User = Depends(get_current_user)):
         if not has_permission(user, permission):
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
@@ -63,7 +63,7 @@ def require_permission(permission: str):
     return checker
 
 
-def require_admin(user: User = Depends(get_current_user)):
+async def require_admin(user: User = Depends(get_current_user)):
     if user.role != "admin":
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,

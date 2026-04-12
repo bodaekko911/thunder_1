@@ -1,11 +1,11 @@
 from fastapi import APIRouter, Depends
 from fastapi.responses import HTMLResponse
-from sqlalchemy.orm import Session
-from sqlalchemy import func
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import func, select
 from datetime import date, datetime, timedelta
 
 from app.core.permissions import require_permission
-from app.database import get_db
+from app.database import get_async_session
 from app.models.invoice import Invoice, InvoiceItem
 from app.models.product import Product
 from app.models.customer import Customer
@@ -22,52 +22,55 @@ router = APIRouter(
 
 
 @router.get("/dashboard/data")
-def dashboard_data(db: Session = Depends(get_db)):
+async def dashboard_data(db: AsyncSession = Depends(get_async_session)):
     today    = date.today()
     now      = datetime.utcnow()
     month_s  = today.replace(day=1)
     year_s   = today.replace(month=1, day=1)
-    week_ago = today - timedelta(days=7)
 
     # ── POS SALES ──────────────────────────────────────
-    pos_today = float(db.query(func.sum(Invoice.total)).filter(
-        func.date(Invoice.created_at) == today, Invoice.status == "paid").scalar() or 0)
-    pos_month = float(db.query(func.sum(Invoice.total)).filter(
-        func.date(Invoice.created_at) >= month_s, Invoice.status == "paid").scalar() or 0)
-    pos_year  = float(db.query(func.sum(Invoice.total)).filter(
-        func.date(Invoice.created_at) >= year_s, Invoice.status == "paid").scalar() or 0)
+    r = await db.execute(select(func.sum(Invoice.total)).where(func.date(Invoice.created_at) == today, Invoice.status == "paid"))
+    pos_today = float(r.scalar() or 0)
+    r = await db.execute(select(func.sum(Invoice.total)).where(func.date(Invoice.created_at) >= month_s, Invoice.status == "paid"))
+    pos_month = float(r.scalar() or 0)
+    r = await db.execute(select(func.sum(Invoice.total)).where(func.date(Invoice.created_at) >= year_s, Invoice.status == "paid"))
+    pos_year  = float(r.scalar() or 0)
 
     # Subtract retail refunds from POS revenue
-    ref_today = float(db.query(func.sum(RetailRefund.total)).filter(
-        func.date(RetailRefund.created_at) == today).scalar() or 0)
-    ref_month = float(db.query(func.sum(RetailRefund.total)).filter(
-        func.date(RetailRefund.created_at) >= month_s).scalar() or 0)
-    ref_year  = float(db.query(func.sum(RetailRefund.total)).filter(
-        func.date(RetailRefund.created_at) >= year_s).scalar() or 0)
+    r = await db.execute(select(func.sum(RetailRefund.total)).where(func.date(RetailRefund.created_at) == today))
+    ref_today = float(r.scalar() or 0)
+    r = await db.execute(select(func.sum(RetailRefund.total)).where(func.date(RetailRefund.created_at) >= month_s))
+    ref_month = float(r.scalar() or 0)
+    r = await db.execute(select(func.sum(RetailRefund.total)).where(func.date(RetailRefund.created_at) >= year_s))
+    ref_year  = float(r.scalar() or 0)
     pos_today = max(0, pos_today - ref_today)
     pos_month = max(0, pos_month - ref_month)
     pos_year  = max(0, pos_year  - ref_year)
 
-    invoices_today = db.query(func.count(Invoice.id)).filter(
-        func.date(Invoice.created_at) == today).scalar() or 0
-    invoices_month = db.query(func.count(Invoice.id)).filter(
-        func.date(Invoice.created_at) >= month_s, Invoice.status == "paid").scalar() or 0
+    r = await db.execute(select(func.count(Invoice.id)).where(func.date(Invoice.created_at) == today))
+    invoices_today = r.scalar() or 0
+    r = await db.execute(select(func.count(Invoice.id)).where(func.date(Invoice.created_at) >= month_s, Invoice.status == "paid"))
+    invoices_month = r.scalar() or 0
 
     # ── B2B SALES ──────────────────────────────────────
-    # Cash invoices: revenue on invoice creation date
-    # Full payment & consignment: revenue from journal entries dated correctly
     from app.models.accounting import Account, Journal, JournalEntry
-    rev_acc = db.query(Account).filter(Account.code == "4000").first()
+    rev_result = await db.execute(select(Account).where(Account.code == "4000"))
+    rev_acc = rev_result.scalar_one_or_none()
 
-    def journal_revenue(d_from, d_to):
+    async def journal_revenue(d_from, d_to):
         if not rev_acc: return 0.0
-        entries = db.query(func.sum(JournalEntry.credit)).join(Journal).filter(
-            JournalEntry.account_id == rev_acc.id,
-            Journal.created_at >= d_from,
-            Journal.created_at <= d_to,
-            Journal.ref_type.in_(["b2b", "b2b_invoice", "consignment_payment", "consignment"])
-        ).scalar()
-        return float(entries or 0)
+        stmt = (
+            select(func.sum(JournalEntry.credit))
+            .join(Journal, JournalEntry.journal_id == Journal.id)
+            .where(
+                JournalEntry.account_id == rev_acc.id,
+                Journal.created_at >= d_from,
+                Journal.created_at <= d_to,
+                Journal.ref_type.in_(["b2b", "b2b_invoice", "consignment_payment", "consignment"])
+            )
+        )
+        entries = await db.execute(stmt)
+        return float(entries.scalar() or 0)
 
     from datetime import datetime as dt
     today_start = dt.combine(today, dt.min.time())
@@ -76,14 +79,17 @@ def dashboard_data(db: Session = Depends(get_db)):
     year_start_dt  = dt.combine(year_s,  dt.min.time())
     now_dt = dt.now()
 
-    b2b_today = journal_revenue(today_start, today_end)
-    b2b_month = journal_revenue(month_start_dt, now_dt)
-    b2b_year  = journal_revenue(year_start_dt,  now_dt)
+    b2b_today = await journal_revenue(today_start, today_end)
+    b2b_month = await journal_revenue(month_start_dt, now_dt)
+    b2b_year  = await journal_revenue(year_start_dt,  now_dt)
 
-    b2b_outstanding = float(db.query(func.sum(B2BInvoice.total - B2BInvoice.amount_paid)).filter(
-        B2BInvoice.status.in_(["unpaid","partial"]),
-        B2BInvoice.invoice_type.in_(["cash", "full_payment"])).scalar() or 0)
-    b2b_clients = db.query(func.count(B2BClient.id)).filter(B2BClient.is_active == True).scalar() or 0
+    r = await db.execute(
+        select(func.sum(B2BInvoice.total - B2BInvoice.amount_paid))
+        .where(B2BInvoice.status.in_(["unpaid","partial"]), B2BInvoice.invoice_type.in_(["cash", "full_payment"]))
+    )
+    b2b_outstanding = float(r.scalar() or 0)
+    r = await db.execute(select(func.count(B2BClient.id)).where(B2BClient.is_active == True))
+    b2b_clients = r.scalar() or 0
 
     # ── COMBINED REVENUE ───────────────────────────────
     total_today = pos_today + b2b_today
@@ -91,74 +97,85 @@ def dashboard_data(db: Session = Depends(get_db)):
     total_year  = pos_year  + b2b_year
 
     # ── CUSTOMERS ──────────────────────────────────────
-    total_customers   = db.query(func.count(Customer.id)).scalar() or 0
-    new_customers_month = db.query(func.count(Customer.id)).filter(
-        func.date(Customer.created_at) >= month_s).scalar() or 0 \
-        if hasattr(Customer, 'created_at') else 0
+    r = await db.execute(select(func.count(Customer.id)))
+    total_customers = r.scalar() or 0
+    if hasattr(Customer, 'created_at'):
+        r = await db.execute(select(func.count(Customer.id)).where(func.date(Customer.created_at) >= month_s))
+        new_customers_month = r.scalar() or 0
+    else:
+        new_customers_month = 0
 
     # ── INVENTORY ──────────────────────────────────────
-    all_products   = db.query(Product).filter(Product.is_active == True).all()
+    r = await db.execute(select(Product).where(Product.is_active == True))
+    all_products   = r.scalars().all()
     out_of_stock   = [p for p in all_products if float(p.stock) <= 0]
     low_stock      = [p for p in all_products if 0 < float(p.stock) <= 5]
     total_products = len(all_products)
     stock_value    = sum(float(p.stock) * float(p.price) for p in all_products)
 
     # ── FARM ───────────────────────────────────────────
-    farm_month = db.query(func.count(FarmDelivery.id)).filter(
-        FarmDelivery.delivery_date >= month_s).scalar() or 0
+    r = await db.execute(select(func.count(FarmDelivery.id)).where(FarmDelivery.delivery_date >= month_s))
+    farm_month = r.scalar() or 0
 
     # ── SPOILAGE ───────────────────────────────────────
-    spoilage_month = float(db.query(func.sum(SpoilageRecord.qty)).filter(
-        SpoilageRecord.spoilage_date >= month_s).scalar() or 0)
+    r = await db.execute(select(func.sum(SpoilageRecord.qty)).where(SpoilageRecord.spoilage_date >= month_s))
+    spoilage_month = float(r.scalar() or 0)
 
     # ── PRODUCTION ─────────────────────────────────────
-    batches_month = db.query(func.count(ProductionBatch.id)).filter(
-        func.date(ProductionBatch.created_at) >= month_s).scalar() or 0
+    r = await db.execute(select(func.count(ProductionBatch.id)).where(func.date(ProductionBatch.created_at) >= month_s))
+    batches_month = r.scalar() or 0
 
     # ── LAST 7 DAYS (POS + B2B) ────────────────────────
     last7 = []
     for i in range(6, -1, -1):
         d = today - timedelta(days=i)
-        pos = float(db.query(func.sum(Invoice.total)).filter(
-            func.date(Invoice.created_at) == d, Invoice.status == "paid").scalar() or 0)
-        ref = float(db.query(func.sum(RetailRefund.total)).filter(
-            func.date(RetailRefund.created_at) == d).scalar() or 0)
+        r = await db.execute(select(func.sum(Invoice.total)).where(func.date(Invoice.created_at) == d, Invoice.status == "paid"))
+        pos = float(r.scalar() or 0)
+        r = await db.execute(select(func.sum(RetailRefund.total)).where(func.date(RetailRefund.created_at) == d))
+        ref = float(r.scalar() or 0)
         pos = max(0, pos - ref)
         d_start = dt.combine(d, dt.min.time())
         d_end   = dt.combine(d, dt.max.time())
-        b2b = journal_revenue(d_start, d_end)
+        b2b = await journal_revenue(d_start, d_end)
         last7.append({"date": str(d), "pos": round(pos,2), "b2b": round(b2b,2), "refunds": round(ref,2), "total": round(pos+b2b,2)})
 
     # ── TOP 10 PRODUCTS THIS MONTH ────────────────────
-    top_products = (
-        db.query(InvoiceItem.name,
-                 func.sum(InvoiceItem.qty).label("qty_sold"),
-                 func.sum(InvoiceItem.total).label("revenue"))
-        .join(Invoice)
-        .filter(func.date(Invoice.created_at) >= month_s, Invoice.status == "paid")
+    top_result = await db.execute(
+        select(InvoiceItem.name,
+               func.sum(InvoiceItem.qty).label("qty_sold"),
+               func.sum(InvoiceItem.total).label("revenue"))
+        .join(Invoice, InvoiceItem.invoice_id == Invoice.id)
+        .where(func.date(Invoice.created_at) >= month_s, Invoice.status == "paid")
         .group_by(InvoiceItem.name)
         .order_by(func.sum(InvoiceItem.total).desc())
-        .limit(10).all()
+        .limit(10)
     )
+    top_products = top_result.all()
 
     # ── PAYMENT METHODS THIS MONTH ────────────────────
-    pay_methods = (
-        db.query(Invoice.payment_method,
-                 func.count(Invoice.id).label("count"),
-                 func.sum(Invoice.total).label("total"))
-        .filter(func.date(Invoice.created_at) >= month_s, Invoice.status == "paid")
-        .group_by(Invoice.payment_method).all()
+    pay_result = await db.execute(
+        select(Invoice.payment_method,
+               func.count(Invoice.id).label("count"),
+               func.sum(Invoice.total).label("total"))
+        .where(func.date(Invoice.created_at) >= month_s, Invoice.status == "paid")
+        .group_by(Invoice.payment_method)
     )
+    pay_methods = pay_result.all()
 
     # ── RECENT TRANSACTIONS (sales + refunds mixed, sorted by time) ──────────
-    recent_invoices = db.query(Invoice).filter(Invoice.status == "paid").order_by(
-        Invoice.created_at.desc()).limit(12).all()
-    recent_refunds = db.query(RetailRefund).order_by(
-        RetailRefund.created_at.desc()).limit(6).all()
+    inv_result = await db.execute(
+        select(Invoice).where(Invoice.status == "paid").order_by(Invoice.created_at.desc()).limit(12)
+    )
+    recent_invoices = inv_result.scalars().all()
+    ref_result = await db.execute(
+        select(RetailRefund).order_by(RetailRefund.created_at.desc()).limit(6)
+    )
+    recent_refunds = ref_result.scalars().all()
 
     recent_sales = []
     for i in recent_invoices:
-        cust = db.query(Customer).filter(Customer.id == i.customer_id).first()
+        cust_result = await db.execute(select(Customer).where(Customer.id == i.customer_id))
+        cust = cust_result.scalar_one_or_none()
         recent_sales.append({
             "type":           "sale",
             "invoice_number": i.invoice_number,
@@ -168,20 +185,26 @@ def dashboard_data(db: Session = Depends(get_db)):
             "time":           i.created_at.strftime("%H:%M") if i.created_at else "—",
             "date":           i.created_at.strftime("%Y-%m-%d") if i.created_at else "",
         })
-    for r in recent_refunds:
-        cust = db.query(Customer).filter(Customer.id == r.customer_id).first()
+    for ref in recent_refunds:
+        cust_result = await db.execute(select(Customer).where(Customer.id == ref.customer_id))
+        cust = cust_result.scalar_one_or_none()
         recent_sales.append({
             "type":           "refund",
-            "invoice_number": r.refund_number,
+            "invoice_number": ref.refund_number,
             "customer":       cust.name if cust else "—",
-            "total":          -float(r.total),
-            "method":         r.refund_method,
-            "time":           r.created_at.strftime("%H:%M") if r.created_at else "—",
-            "date":           r.created_at.strftime("%Y-%m-%d") if r.created_at else "",
+            "total":          -float(ref.total),
+            "method":         ref.refund_method,
+            "time":           ref.created_at.strftime("%H:%M") if ref.created_at else "—",
+            "date":           ref.created_at.strftime("%Y-%m-%d") if ref.created_at else "",
         })
     # Sort combined list by date+time descending, take top 10
     recent_sales.sort(key=lambda x: x["date"] + x["time"], reverse=True)
     recent_sales = recent_sales[:10]
+
+    r = await db.execute(select(func.count(RetailRefund.id)).where(func.date(RetailRefund.created_at) == today))
+    ref_count_today = r.scalar() or 0
+    r = await db.execute(select(func.count(RetailRefund.id)).where(func.date(RetailRefund.created_at) >= month_s))
+    ref_count_month = r.scalar() or 0
 
     return {
         # Revenue
@@ -198,10 +221,8 @@ def dashboard_data(db: Session = Depends(get_db)):
         # Refunds
         "ref_today":   round(ref_today, 2),
         "ref_month":   round(ref_month, 2),
-        "ref_count_today": db.query(func.count(RetailRefund.id)).filter(
-            func.date(RetailRefund.created_at) == today).scalar() or 0,
-        "ref_count_month": db.query(func.count(RetailRefund.id)).filter(
-            func.date(RetailRefund.created_at) >= month_s).scalar() or 0,
+        "ref_count_today": ref_count_today,
+        "ref_count_month": ref_count_month,
         # Counts
         "invoices_today":   invoices_today,
         "invoices_month":   invoices_month,
@@ -542,14 +563,12 @@ tr:hover td{background:rgba(255,255,255,.02);}
 </div>
 
 <script>
-  const __erpToken = localStorage.getItem("token");
-  const __erpUserRole = localStorage.getItem("user_role") || "";
-  const __erpUserPermissions = new Set(
-      (localStorage.getItem("user_permissions") || "")
-          .split(",")
-          .map(p => p.trim())
-          .filter(Boolean)
-  );
+  // Auth guard: redirect to login if the readable session cookie is absent
+  function _hasAuthCookie() {
+      return document.cookie.split(";").some(c => c.trim().startsWith("logged_in="));
+  }
+  if (!_hasAuthCookie()) { window.location.href = "/"; }
+
   function setModeButton(isLight){
     const btn = document.getElementById("mode-btn");
     if(btn) btn.innerText = isLight ? "☀️" : "🌙";
@@ -564,65 +583,24 @@ function initializeColorMode(){
     document.body.classList.toggle("light", isLight);
     setModeButton(isLight);
 }
-function setUserInfo(){
-    const name = localStorage.getItem("user_name") || "Admin";
-    const avatar = document.getElementById("user-avatar");
-    const userName = document.getElementById("user-name");
-    if(avatar) avatar.innerText = name.charAt(0).toUpperCase();
-    if(userName) userName.innerText = name;
+async function initUser() {
+    try {
+        const r = await fetch("/auth/me");
+        if (!r.ok) { window.location.href = "/"; return; }
+        const u = await r.json();
+        const nameEl = document.getElementById("user-name");
+        const avatarEl = document.getElementById("user-avatar");
+        if (nameEl) nameEl.innerText = u.name;
+        if (avatarEl) avatarEl.innerText = u.name.charAt(0).toUpperCase();
+        return u;
+    } catch(e) { window.location.href = "/"; }
 }
-function logout(){
-    localStorage.removeItem("token");
-    localStorage.removeItem("user_name");
-    localStorage.removeItem("user_role");
-    localStorage.removeItem("user_permissions");
-    document.cookie = "access_token=; Max-Age=0; path=/; SameSite=Lax";
+async function logout(){
+    await fetch("/auth/logout", { method: "POST" });
     window.location.href = "/";
 }
-  function requirePageAccess(permission){
-      if(!__erpToken){
-          window.location.href = "/";
-          throw new Error("Not authenticated");
-      }
-      if(__erpUserRole === "admin" || __erpUserPermissions.has(permission)) return;
-      document.body.innerHTML = `<div style="display:flex;align-items:center;justify-content:center;height:100vh;flex-direction:column;gap:16px;color:#445066;font-family:'Outfit',sans-serif;background:#060810"><div style="font-size:48px">🔒</div><div style="font-size:20px;font-weight:800;color:#f0f4ff">Access Restricted</div><div style="font-size:14px">You do not have permission to open this page.</div><a href="/home" style="color:#00ff9d;text-decoration:none;font-weight:700">Back to Home</a></div>`;
-      throw new Error("Access denied");
-  }
-  function applyNavPermissions(){
-      const navPermissions = {
-          "/home": null,
-          "/dashboard": "page_dashboard",
-          "/pos": "page_pos",
-          "/b2b/": "page_b2b",
-          "/inventory/": "page_inventory",
-          "/products/": "page_products",
-          "/customers-mgmt/": "page_customers",
-          "/suppliers/": "page_suppliers",
-          "/production/": "page_production",
-          "/farm/": "page_farm",
-          "/hr/": "page_hr",
-          "/accounting/": "page_accounting",
-          "/reports/": "page_reports",
-          "/import": "page_import",
-          "/users/": "admin_only"
-      };
-      document.querySelectorAll("a.nav-link[href]").forEach(link => {
-          const href = link.getAttribute("href");
-          const requirement = navPermissions[href];
-          if(requirement === undefined || requirement === null) return;
-          if(requirement === "admin_only"){
-              if(__erpUserRole !== "admin") link.style.display = "none";
-              return;
-          }
-          if(__erpUserRole !== "admin" && !__erpUserPermissions.has(requirement)){
-              link.style.display = "none";
-          }
-      });
-  }
-  requirePageAccess("page_dashboard");
-  applyNavPermissions();
   initializeColorMode();
-  setUserInfo();
+  initUser();
   let now = new Date();
 document.getElementById("nav-date").innerText =
     now.toLocaleDateString("en-GB",{weekday:"long",year:"numeric",month:"long",day:"numeric"});

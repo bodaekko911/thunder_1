@@ -1,12 +1,13 @@
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import HTMLResponse
-from sqlalchemy.orm import Session
-from sqlalchemy import func
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
+from sqlalchemy import func, select
 from typing import Optional, List
 from pydantic import BaseModel
 from datetime import date
 
-from app.database import get_db
+from app.database import get_async_session
 from app.core.permissions import get_current_user, require_permission
 from app.core.log import record
 from app.models.hr import Employee, Attendance, Payroll
@@ -54,15 +55,17 @@ class PayrollUpdate(BaseModel):
 
 # ── EMPLOYEE API ───────────────────────────────────────
 @router.get("/api/employees")
-def get_employees(q: str = "", db: Session = Depends(get_db)):
-    query = db.query(Employee).filter(Employee.is_active == True)
+async def get_employees(q: str = "", db: AsyncSession = Depends(get_async_session)):
+    stmt = select(Employee).where(Employee.is_active == True)
     if q:
-        query = query.filter(
+        stmt = stmt.where(
             Employee.name.ilike(f"%{q}%") |
             Employee.position.ilike(f"%{q}%") |
             Employee.department.ilike(f"%{q}%")
         )
-    emps = query.order_by(Employee.name).all()
+    stmt = stmt.order_by(Employee.name)
+    _r = await db.execute(stmt)
+    emps = _r.scalars().all()
     return [
         {
             "id":          e.id,
@@ -78,23 +81,24 @@ def get_employees(q: str = "", db: Session = Depends(get_db)):
     ]
 
 @router.post("/api/employees")
-def add_employee(data: EmployeeCreate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+async def add_employee(data: EmployeeCreate, db: AsyncSession = Depends(get_async_session), current_user: User = Depends(get_current_user)):
     hire = date.fromisoformat(data.hire_date) if data.hire_date else None
     e = Employee(
         name=data.name, phone=data.phone,
         position=data.position, department=data.department,
         hire_date=hire, base_salary=data.base_salary,
     )
-    db.add(e); db.flush()
+    db.add(e); await db.flush()
     record(db, "HR", "add_employee",
            f"Added employee: {e.name} — {e.position or ''} / {e.department or ''} — salary: {float(e.base_salary):.2f}",
            ref_type="employee", ref_id=e.id)
-    db.commit(); db.refresh(e)
+    await db.commit(); await db.refresh(e)
     return {"id": e.id, "name": e.name}
 
 @router.put("/api/employees/{emp_id}")
-def edit_employee(emp_id: int, data: EmployeeUpdate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    e = db.query(Employee).filter(Employee.id == emp_id).first()
+async def edit_employee(emp_id: int, data: EmployeeUpdate, db: AsyncSession = Depends(get_async_session), current_user: User = Depends(get_current_user)):
+    _r = await db.execute(select(Employee).where(Employee.id == emp_id))
+    e = _r.scalar_one_or_none()
     if not e:
         raise HTTPException(status_code=404, detail="Employee not found")
     for k, v in data.model_dump(exclude_unset=True).items():
@@ -102,36 +106,39 @@ def edit_employee(emp_id: int, data: EmployeeUpdate, db: Session = Depends(get_d
     record(db, "HR", "edit_employee",
            f"Edited employee: {e.name}",
            ref_type="employee", ref_id=emp_id)
-    db.commit()
+    await db.commit()
     return {"ok": True}
 
 @router.delete("/api/employees/{emp_id}")
-def deactivate_employee(emp_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    e = db.query(Employee).filter(Employee.id == emp_id).first()
+async def deactivate_employee(emp_id: int, db: AsyncSession = Depends(get_async_session), current_user: User = Depends(get_current_user)):
+    _r = await db.execute(select(Employee).where(Employee.id == emp_id))
+    e = _r.scalar_one_or_none()
     if not e:
         raise HTTPException(status_code=404, detail="Employee not found")
     e.is_active = False
     record(db, "HR", "deactivate_employee",
            f"Deactivated employee: {e.name}",
            ref_type="employee", ref_id=emp_id)
-    db.commit()
+    await db.commit()
     return {"ok": True}
 
 
 # ── ATTENDANCE API ─────────────────────────────────────
 @router.get("/api/attendance")
-def get_attendance(emp_id: int = None, period: str = None, db: Session = Depends(get_db)):
-    query = db.query(Attendance)
+async def get_attendance(emp_id: int = None, period: str = None, db: AsyncSession = Depends(get_async_session)):
+    stmt = select(Attendance).options(selectinload(Attendance.employee))
     if emp_id:
-        query = query.filter(Attendance.employee_id == emp_id)
+        stmt = stmt.where(Attendance.employee_id == emp_id)
     if period:
         # period like "2025-01"
         year, month = period.split("-")
-        query = query.filter(
+        stmt = stmt.where(
             func.extract("year",  Attendance.date) == int(year),
             func.extract("month", Attendance.date) == int(month),
         )
-    records = query.order_by(Attendance.date.desc()).limit(200).all()
+    stmt = stmt.order_by(Attendance.date.desc()).limit(200)
+    _r = await db.execute(stmt)
+    records = _r.scalars().all()
     return [
         {
             "id":          r.id,
@@ -145,16 +152,17 @@ def get_attendance(emp_id: int = None, period: str = None, db: Session = Depends
     ]
 
 @router.post("/api/attendance")
-def log_attendance(data: AttendanceCreate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+async def log_attendance(data: AttendanceCreate, db: AsyncSession = Depends(get_async_session), current_user: User = Depends(get_current_user)):
     # Check if already logged for that day
-    existing = db.query(Attendance).filter(
+    _r = await db.execute(select(Attendance).where(
         Attendance.employee_id == data.employee_id,
         Attendance.date == date.fromisoformat(data.date),
-    ).first()
+    ))
+    existing = _r.scalar_one_or_none()
     if existing:
         existing.status = data.status
         existing.note   = data.note
-        db.commit()
+        await db.commit()
         return {"id": existing.id, "updated": True}
 
     a = Attendance(
@@ -163,55 +171,60 @@ def log_attendance(data: AttendanceCreate, db: Session = Depends(get_db), curren
         status=data.status,
         note=data.note,
     )
-    db.add(a); db.commit(); db.refresh(a)
+    db.add(a); await db.commit(); await db.refresh(a)
     return {"id": a.id, "updated": False}
 
 
 @router.post("/api/attendance/auto-today")
-def auto_mark_today(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+async def auto_mark_today(db: AsyncSession = Depends(get_async_session), current_user: User = Depends(get_current_user)):
     """Auto-mark all active employees as present today if not already logged."""
     today = date.today()
-    employees = db.query(Employee).filter(Employee.is_active == True).all()
+    _r = await db.execute(select(Employee).where(Employee.is_active == True))
+    employees = _r.scalars().all()
     created = 0
     for emp in employees:
-        exists = db.query(Attendance).filter(
+        _ex = await db.execute(select(Attendance).where(
             Attendance.employee_id == emp.id,
             Attendance.date == today,
-        ).first()
+        ))
+        exists = _ex.scalar_one_or_none()
         if not exists:
             db.add(Attendance(employee_id=emp.id, date=today, status="present"))
             created += 1
-    db.commit()
+    await db.commit()
     return {"ok": True, "created": created, "date": str(today)}
 
 @router.post("/api/attendance/mark-absent")
-def mark_absent_today(data: AttendanceCreate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+async def mark_absent_today(data: AttendanceCreate, db: AsyncSession = Depends(get_async_session), current_user: User = Depends(get_current_user)):
     """Mark a specific employee as absent today (overrides auto-present)."""
     today = date.today()
-    existing = db.query(Attendance).filter(
+    _r = await db.execute(select(Attendance).where(
         Attendance.employee_id == data.employee_id,
         Attendance.date == today,
-    ).first()
+    ))
+    existing = _r.scalar_one_or_none()
     if existing:
         existing.status = "absent"
         existing.note   = data.note
-        db.commit()
+        await db.commit()
         return {"id": existing.id, "updated": True}
     db.add(Attendance(
         employee_id=data.employee_id,
         date=today, status="absent", note=data.note,
     ))
-    db.commit()
+    await db.commit()
     return {"ok": True}
 
 
 # ── PAYROLL API ────────────────────────────────────────
 @router.get("/api/payroll")
-def get_payroll(period: str = None, db: Session = Depends(get_db)):
-    query = db.query(Payroll)
+async def get_payroll(period: str = None, db: AsyncSession = Depends(get_async_session)):
+    stmt = select(Payroll).options(selectinload(Payroll.employee))
     if period:
-        query = query.filter(Payroll.period == period)
-    records = query.order_by(Payroll.period.desc(), Payroll.id).all()
+        stmt = stmt.where(Payroll.period == period)
+    stmt = stmt.order_by(Payroll.period.desc(), Payroll.id)
+    _r = await db.execute(stmt)
+    records = _r.scalars().all()
     return [
         {
             "id":          r.id,
@@ -231,7 +244,7 @@ def get_payroll(period: str = None, db: Session = Depends(get_db)):
     ]
 
 @router.get("/api/payroll/preview")
-def preview_payroll(period: str, db: Session = Depends(get_db)):
+async def preview_payroll(period: str, db: AsyncSession = Depends(get_async_session)):
     """
     Preview payroll for a period without saving.
     Calculates each employee's salary based on days worked.
@@ -251,17 +264,25 @@ def preview_payroll(period: str, db: Session = Depends(get_db)):
     else:
         days_elapsed = working_days
 
-    employees = db.query(Employee).filter(Employee.is_active == True).all()
+    _r = await db.execute(select(Employee).where(Employee.is_active == True))
+    employees = _r.scalars().all()
     result = []
     total_to_pay = 0
     for emp in employees:
         # Count present days in this period
-        days_present = db.query(func.count(Attendance.id)).filter(
+        _dp = await db.execute(select(func.count(Attendance.id)).where(
             Attendance.employee_id == emp.id,
             Attendance.status == "present",
             func.extract("year",  Attendance.date) == year,
             func.extract("month", Attendance.date) == month,
-        ).scalar() or 0
+        ))
+        days_present = _dp.scalar() or 0
+
+        _ar = await db.execute(select(Payroll).where(
+            Payroll.employee_id == emp.id,
+            Payroll.period == period,
+        ))
+        already_run = _ar.scalar_one_or_none() is not None
 
         daily_rate  = float(emp.base_salary) / working_days if working_days > 0 else 0
         earned      = round(daily_rate * days_present, 2)
@@ -277,10 +298,7 @@ def preview_payroll(period: str, db: Session = Depends(get_db)):
             "days_absent":  days_elapsed - days_present,
             "daily_rate":   round(daily_rate, 2),
             "earned":       earned,
-            "already_run":  db.query(Payroll).filter(
-                Payroll.employee_id == emp.id,
-                Payroll.period == period,
-            ).first() is not None,
+            "already_run":  already_run,
         })
     return {
         "period":       period,
@@ -291,7 +309,7 @@ def preview_payroll(period: str, db: Session = Depends(get_db)):
     }
 
 @router.post("/api/payroll/run", dependencies=[Depends(require_permission("action_hr_run_payroll"))])
-def run_payroll(data: PayrollRun, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+async def run_payroll(data: PayrollRun, db: AsyncSession = Depends(get_async_session), current_user: User = Depends(get_current_user)):
     from calendar import monthrange
     year, month = int(data.period.split("-")[0]), int(data.period.split("-")[1])
     total_days   = monthrange(year, month)[1]
@@ -304,25 +322,28 @@ def run_payroll(data: PayrollRun, db: Session = Depends(get_db), current_user: U
     else:
         days_elapsed = working_days
 
-    query = db.query(Employee).filter(Employee.is_active == True)
+    emp_stmt = select(Employee).where(Employee.is_active == True)
     if data.emp_ids:
-        query = query.filter(Employee.id.in_(data.emp_ids))
-    employees = query.all()
+        emp_stmt = emp_stmt.where(Employee.id.in_(data.emp_ids))
+    _re = await db.execute(emp_stmt)
+    employees = _re.scalars().all()
 
     created = 0; skipped = 0
     for emp in employees:
-        exists = db.query(Payroll).filter(
+        _ex = await db.execute(select(Payroll).where(
             Payroll.employee_id == emp.id,
             Payroll.period == data.period,
-        ).first()
+        ))
+        exists = _ex.scalar_one_or_none()
         if exists:
             # Update existing with latest attendance
-            days_present = db.query(func.count(Attendance.id)).filter(
+            _dp = await db.execute(select(func.count(Attendance.id)).where(
                 Attendance.employee_id == emp.id,
                 Attendance.status == "present",
                 func.extract("year",  Attendance.date) == year,
                 func.extract("month", Attendance.date) == month,
-            ).scalar() or 0
+            ))
+            days_present = _dp.scalar() or 0
             daily_rate      = float(emp.base_salary) / working_days if working_days > 0 else 0
             earned          = round(daily_rate * days_present, 2)
             exists.base_salary  = emp.base_salary
@@ -332,12 +353,13 @@ def run_payroll(data: PayrollRun, db: Session = Depends(get_db), current_user: U
             skipped += 1
             continue
 
-        days_present = db.query(func.count(Attendance.id)).filter(
+        _dp = await db.execute(select(func.count(Attendance.id)).where(
             Attendance.employee_id == emp.id,
             Attendance.status == "present",
             func.extract("year",  Attendance.date) == year,
             func.extract("month", Attendance.date) == month,
-        ).scalar() or 0
+        ))
+        days_present = _dp.scalar() or 0
 
         daily_rate = float(emp.base_salary) / working_days if working_days > 0 else 0
         earned     = round(daily_rate * days_present, 2)
@@ -358,13 +380,14 @@ def run_payroll(data: PayrollRun, db: Session = Depends(get_db), current_user: U
     record(db, "HR", "run_payroll",
            f"Payroll run for {data.period} — {created} created, {skipped} updated",
            ref_type="payroll", ref_id=data.period)
-    db.commit()
+    await db.commit()
     return {"created": created, "skipped": skipped, "period": data.period}
 
 
 @router.put("/api/payroll/{payroll_id}", dependencies=[Depends(require_permission("action_hr_run_payroll"))])
-def update_payroll(payroll_id: int, data: PayrollUpdate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    p = db.query(Payroll).filter(Payroll.id == payroll_id).first()
+async def update_payroll(payroll_id: int, data: PayrollUpdate, db: AsyncSession = Depends(get_async_session), current_user: User = Depends(get_current_user)):
+    _r = await db.execute(select(Payroll).where(Payroll.id == payroll_id))
+    p = _r.scalar_one_or_none()
     if not p:
         raise HTTPException(status_code=404, detail="Payroll record not found")
     # Back-calculate the attendance-earned amount from the previously stored values
@@ -381,13 +404,14 @@ def update_payroll(payroll_id: int, data: PayrollUpdate, db: Session = Depends(g
     record(db, "HR", "update_payroll",
            f"Updated payroll #{payroll_id} — bonuses: {data.bonuses}, deductions: {data.deductions}, net: {p.net_salary:.2f}",
            ref_type="payroll", ref_id=payroll_id)
-    db.commit()
+    await db.commit()
     return {"ok": True, "net_salary": float(p.net_salary)}
 
 @router.patch("/api/payroll/{payroll_id}/pay", dependencies=[Depends(require_permission("action_hr_mark_paid"))])
-def mark_paid(payroll_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+async def mark_paid(payroll_id: int, db: AsyncSession = Depends(get_async_session), current_user: User = Depends(get_current_user)):
     from datetime import datetime
-    p = db.query(Payroll).filter(Payroll.id == payroll_id).first()
+    _r = await db.execute(select(Payroll).where(Payroll.id == payroll_id))
+    p = _r.scalar_one_or_none()
     if not p:
         raise HTTPException(status_code=404, detail="Payroll record not found")
     p.paid    = True
@@ -395,22 +419,26 @@ def mark_paid(payroll_id: int, db: Session = Depends(get_db), current_user: User
     record(db, "HR", "mark_payroll_paid",
            f"Marked payroll #{payroll_id} as paid — net: {float(p.net_salary):.2f}",
            ref_type="payroll", ref_id=payroll_id)
-    db.commit()
+    await db.commit()
     return {"ok": True}
 
 @router.get("/api/summary")
-def hr_summary(db: Session = Depends(get_db)):
-    total_employees = db.query(func.count(Employee.id)).filter(Employee.is_active == True).scalar() or 0
+async def hr_summary(db: AsyncSession = Depends(get_async_session)):
+    _te = await db.execute(select(func.count(Employee.id)).where(Employee.is_active == True))
+    total_employees = _te.scalar() or 0
     today = date.today()
-    present_today = db.query(func.count(Attendance.id)).filter(
+    _pt = await db.execute(select(func.count(Attendance.id)).where(
         Attendance.date == today,
         Attendance.status == "present",
-    ).scalar() or 0
-    absent_today = db.query(func.count(Attendance.id)).filter(
+    ))
+    present_today = _pt.scalar() or 0
+    _at = await db.execute(select(func.count(Attendance.id)).where(
         Attendance.date == today,
         Attendance.status == "absent",
-    ).scalar() or 0
-    total_salary = db.query(func.sum(Employee.base_salary)).filter(Employee.is_active == True).scalar() or 0
+    ))
+    absent_today = _at.scalar() or 0
+    _ts = await db.execute(select(func.sum(Employee.base_salary)).where(Employee.is_active == True))
+    total_salary = _ts.scalar() or 0
     return {
         "total_employees": total_employees,
         "present_today":   present_today,
@@ -780,14 +808,12 @@ td.mono { font-family: var(--mono); color: var(--green); }
 <div class="toast" id="toast"></div>
 
 <script>
-  const __erpToken = localStorage.getItem("token");
-  const __erpUserRole = localStorage.getItem("user_role") || "";
-  const __erpUserPermissions = new Set(
-      (localStorage.getItem("user_permissions") || "")
-          .split(",")
-          .map(p => p.trim())
-          .filter(Boolean)
-  );
+  // Auth guard: redirect to login if the readable session cookie is absent
+  function _hasAuthCookie() {
+      return document.cookie.split(";").some(c => c.trim().startsWith("logged_in="));
+  }
+  if (!_hasAuthCookie()) { window.location.href = "/"; }
+
   function setModeButton(isLight){
     const btn = document.getElementById("mode-btn");
     if(btn) btn.innerText = isLight ? "☀️" : "🌙";
@@ -802,65 +828,28 @@ function initializeColorMode(){
     document.body.classList.toggle("light", isLight);
     setModeButton(isLight);
 }
-function setUserInfo(){
-    const name = localStorage.getItem("user_name") || "Admin";
-    const avatar = document.getElementById("user-avatar");
-    const userName = document.getElementById("user-name");
-    if(avatar) avatar.innerText = name.charAt(0).toUpperCase();
-    if(userName) userName.innerText = name;
+async function initUser() {
+    try {
+        const r = await fetch("/auth/me");
+        if (!r.ok) { window.location.href = "/"; return; }
+        const u = await r.json();
+        const nameEl = document.getElementById("user-name");
+        const avatarEl = document.getElementById("user-avatar");
+        if (nameEl) nameEl.innerText = u.name;
+        if (avatarEl) avatarEl.innerText = u.name.charAt(0).toUpperCase();
+        return u;
+    } catch(e) { window.location.href = "/"; }
 }
-function logout(){
-    localStorage.removeItem("token");
-    localStorage.removeItem("user_name");
-    localStorage.removeItem("user_role");
-    localStorage.removeItem("user_permissions");
-    document.cookie = "access_token=; Max-Age=0; path=/; SameSite=Lax";
+async function logout(){
+    await fetch("/auth/logout", { method: "POST" });
     window.location.href = "/";
 }
-  function requirePageAccess(permission){
-      if(!__erpToken){
-          window.location.href = "/";
-          throw new Error("Not authenticated");
-      }
-      if(__erpUserRole === "admin" || __erpUserPermissions.has(permission)) return;
-      document.body.innerHTML = `<div style="display:flex;align-items:center;justify-content:center;height:100vh;flex-direction:column;gap:16px;color:#445066;font-family:'Outfit',sans-serif;background:#060810"><div style="font-size:48px">🔒</div><div style="font-size:20px;font-weight:800;color:#f0f4ff">Access Restricted</div><div style="font-size:14px">You do not have permission to open this page.</div><a href="/home" style="color:#00ff9d;text-decoration:none;font-weight:700">Back to Home</a></div>`;
-      throw new Error("Access denied");
+  function hasPermission(permission, u){
+      const role = u ? (u.role || "") : "";
+      const perms = new Set(u ? (u.permissions || []) : []);
+      return role === "admin" || perms.has(permission);
   }
-  function applyNavPermissions(){
-      const navPermissions = {
-          "/home": null,
-          "/dashboard": "page_dashboard",
-          "/pos": "page_pos",
-          "/b2b/": "page_b2b",
-          "/inventory/": "page_inventory",
-          "/products/": "page_products",
-          "/customers-mgmt/": "page_customers",
-          "/suppliers/": "page_suppliers",
-          "/production/": "page_production",
-          "/farm/": "page_farm",
-          "/hr/": "page_hr",
-          "/accounting/": "page_accounting",
-          "/reports/": "page_reports",
-          "/import": "page_import",
-          "/users/": "admin_only"
-      };
-      document.querySelectorAll("a.nav-link[href]").forEach(link => {
-          const href = link.getAttribute("href");
-          const requirement = navPermissions[href];
-          if(requirement === undefined || requirement === null) return;
-          if(requirement === "admin_only"){
-              if(__erpUserRole !== "admin") link.style.display = "none";
-              return;
-          }
-          if(__erpUserRole !== "admin" && !__erpUserPermissions.has(requirement)){
-              link.style.display = "none";
-          }
-      });
-  }
-  function hasPermission(permission){
-      return __erpUserRole === "admin" || __erpUserPermissions.has(permission);
-  }
-  function configureHRPermissions(){
+  function configureHRPermissions(u){
       const tabMap = [
           {id:"tab-emp", permission:"tab_hr_employees", tab:"employees"},
           {id:"tab-att", permission:"tab_hr_attendance", tab:"attendance"},
@@ -870,7 +859,7 @@ function logout(){
       tabMap.forEach(conf => {
           let el = document.getElementById(conf.id);
           if(!el) return;
-          if(!hasPermission(conf.permission)){
+          if(!hasPermission(conf.permission, u)){
               el.style.display = "none";
           } else if(!firstAllowed) {
               firstAllowed = conf.tab;
@@ -878,11 +867,8 @@ function logout(){
       });
       if(firstAllowed) setTimeout(() => switchTab(firstAllowed), 0);
   }
-  requirePageAccess("page_hr");
-  applyNavPermissions();
   initializeColorMode();
-  setUserInfo();
-  configureHRPermissions();
+  initUser().then(u => { if(u) configureHRPermissions(u); });
   let employees    = [];
 let editingEmpId = null;
 let editingPayId = null;

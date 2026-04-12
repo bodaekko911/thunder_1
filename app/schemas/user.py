@@ -1,13 +1,12 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, EmailStr, Field
 from typing import Optional
-from datetime import datetime
 
 
 class UserCreate(BaseModel):
-    name:     str
-    email:    str
-    password: str
-    role:     str = "cashier"
+    name:     str = Field(..., min_length=1, max_length=150)
+    email:    EmailStr
+    password: str = Field(..., min_length=8, max_length=200)
+    role:     str = Field("cashier", min_length=1, max_length=50)
 
 
 class UserOut(BaseModel):
@@ -16,10 +15,9 @@ class UserOut(BaseModel):
     email:     str
     role:      str
     is_active: bool
-
     model_config = {"from_attributes": True}
 
 
 class UserLogin(BaseModel):
-    email:    str
-    password: str
+    email:    EmailStr
+    password: str = Field(..., min_length=1, max_length=200)

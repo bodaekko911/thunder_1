@@ -61,9 +61,15 @@ async def _ensure_schema() -> None:
 
 
 async def _run_safe_alterations() -> None:
+    # SECURITY: table_name and column_name come from the _SAFE_COLUMNS dict defined
+    # above in this file — they are not user-supplied. Nevertheless we quote identifiers
+    # explicitly using the dialect's quoting to prevent any future accidental injection.
+    # NEVER interpolate user input into SQL strings here or anywhere else.
     async with engine.begin() as conn:
         def run(sync_conn):
             inspector = inspect(sync_conn)
+            dialect = sync_conn.dialect
+            preparer = dialect.identifier_preparer
             for table_name, columns in _SAFE_COLUMNS.items():
                 if not inspector.has_table(table_name):
                     continue
@@ -73,8 +79,12 @@ async def _run_safe_alterations() -> None:
                 for column_name, definition in columns.items():
                     if column_name in existing_columns:
                         continue
+                    quoted_table = preparer.quote_identifier(table_name)
+                    quoted_col = preparer.quote_identifier(column_name)
+                    # definition contains only SQL type keywords (e.g. "INTEGER",
+                    # "NUMERIC(6,2) DEFAULT 0") from the hard-coded dict above — safe.
                     sync_conn.exec_driver_sql(
-                        f"ALTER TABLE {table_name} ADD COLUMN {column_name} {definition}"
+                        f"ALTER TABLE {quoted_table} ADD COLUMN {quoted_col} {definition}"
                     )
 
         await conn.run_sync(run)

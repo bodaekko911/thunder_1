@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, Header
 from fastapi.responses import HTMLResponse
-from sqlalchemy.orm import Session
-from sqlalchemy import Column, Integer, String, Boolean, DateTime, Text, ForeignKey
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import Column, Integer, String, Boolean, DateTime, Text, ForeignKey, select
 from sqlalchemy.sql import func
 from pydantic import BaseModel
 from typing import Optional
@@ -13,7 +13,7 @@ from app.core.permissions import (
     get_effective_permissions,
     serialize_permissions,
 )
-from app.database import get_db, Base
+from app.database import get_async_session, Base
 from app.models.user import User
 from app.core.security import hash_password, verify_password, decode_token
 from app.core.log import ActivityLog, record as log_record
@@ -53,7 +53,7 @@ class LogCreate(BaseModel):
 
 
 # ── Auth helpers ─────────────────────────────────────────
-def _extract_user(authorization: str, db: Session):
+async def _extract_user(authorization: str, db: AsyncSession):
     """Parse Bearer token and return User or None."""
     if not authorization:
         return None
@@ -68,15 +68,16 @@ def _extract_user(authorization: str, db: Session):
         user_id = int(payload.get("sub", 0))
         if not user_id:
             return None
-        return db.query(User).filter(User.id == user_id).first()
+        result = await db.execute(select(User).where(User.id == user_id))
+        return result.scalar_one_or_none()
     except Exception:
         return None
 
-def get_user_from_token(authorization: str = Header(None), db: Session = Depends(get_db)):
-    return _extract_user(authorization, db)
+async def get_user_from_token(authorization: str = Header(None), db: AsyncSession = Depends(get_async_session)):
+    return await _extract_user(authorization, db)
 
-def require_admin_header(authorization: str = Header(None), db: Session = Depends(get_db)):
-    user = _extract_user(authorization, db)
+async def require_admin_header(authorization: str = Header(None), db: AsyncSession = Depends(get_async_session)):
+    user = await _extract_user(authorization, db)
     if not user:
         raise HTTPException(status_code=401, detail="Not authenticated")
     if user.role != "admin":
@@ -86,8 +87,8 @@ def require_admin_header(authorization: str = Header(None), db: Session = Depend
 
 # ── Activity Log API ─────────────────────────────────────
 @router.post("/api/log")
-def log_action(data: LogCreate, authorization: str = Header(None), db: Session = Depends(get_db)):
-    user = _extract_user(authorization, db)
+async def log_action(data: LogCreate, authorization: str = Header(None), db: AsyncSession = Depends(get_async_session)):
+    user = await _extract_user(authorization, db)
     entry = ActivityLog(
         user_id     = user.id   if user else None,
         user_name   = user.name if user else "Unknown",
@@ -98,21 +99,23 @@ def log_action(data: LogCreate, authorization: str = Header(None), db: Session =
         ref_type    = data.ref_type,
         ref_id      = data.ref_id,
     )
-    db.add(entry); db.commit()
+    db.add(entry); await db.commit()
     return {"ok": True}
 
 @router.get("/api/logs")
-def get_logs(
+async def get_logs(
     module:  Optional[str] = None,
     user_id: Optional[int] = None,
     limit:   int = 300,
-    db:      Session = Depends(get_db),
+    db:      AsyncSession = Depends(get_async_session),
     _=Depends(core_require_admin),
 ):
-    q = db.query(ActivityLog).order_by(ActivityLog.created_at.desc())
-    if module:  q = q.filter(ActivityLog.module == module)
-    if user_id: q = q.filter(ActivityLog.user_id == user_id)
-    logs = q.limit(limit).all()
+    stmt = select(ActivityLog).order_by(ActivityLog.created_at.desc())
+    if module:  stmt = stmt.where(ActivityLog.module == module)
+    if user_id: stmt = stmt.where(ActivityLog.user_id == user_id)
+    stmt = stmt.limit(limit)
+    result = await db.execute(stmt)
+    logs = result.scalars().all()
     return [
         {
             "id":          l.id,
@@ -131,8 +134,9 @@ def get_logs(
 
 # ── User CRUD API ────────────────────────────────────────
 @router.get("/api/users")
-def get_users(db: Session = Depends(get_db), _=Depends(core_require_admin)):
-    users = db.query(User).order_by(User.id).all()
+async def get_users(db: AsyncSession = Depends(get_async_session), _=Depends(core_require_admin)):
+    result = await db.execute(select(User).order_by(User.id))
+    users = result.scalars().all()
     return [
         {
             "id":          u.id,
@@ -152,8 +156,9 @@ def permissions_catalog(_=Depends(core_require_admin)):
     return get_permission_catalog()
 
 @router.post("/api/users")
-def create_user(data: UserCreate, db: Session = Depends(get_db), admin=Depends(core_require_admin)):
-    if db.query(User).filter(User.email == data.email).first():
+async def create_user(data: UserCreate, db: AsyncSession = Depends(get_async_session), admin=Depends(core_require_admin)):
+    existing = await db.execute(select(User).where(User.email == data.email))
+    if existing.scalar_one_or_none():
         raise HTTPException(status_code=400, detail="Email already exists")
     if len(data.password) < 6:
         raise HTTPException(status_code=400, detail="Password must be at least 6 characters")
@@ -166,75 +171,79 @@ def create_user(data: UserCreate, db: Session = Depends(get_db), admin=Depends(c
         u.permissions = serialize_permissions(
             get_custom_permissions(data.role, (data.permissions or "").split(","))
         )
-    db.add(u); db.commit(); db.refresh(u)
+    db.add(u); await db.commit(); await db.refresh(u)
     # log
     log = ActivityLog(user_id=admin.id, user_name=admin.name, user_role=admin.role,
         action="CREATE_USER", module="USERS",
         description=f"Created user {u.name} ({u.email}) with role {u.role}",
         ref_type="user", ref_id=str(u.id))
-    db.add(log); db.commit()
+    db.add(log); await db.commit()
     return {"id": u.id, "name": u.name, "email": u.email, "role": u.role}
 
 @router.put("/api/users/{user_id}")
-def update_user(user_id: int, data: UserUpdate, db: Session = Depends(get_db), admin=Depends(core_require_admin)):
-    u = db.query(User).filter(User.id == user_id).first()
+async def update_user(user_id: int, data: UserUpdate, db: AsyncSession = Depends(get_async_session), admin=Depends(core_require_admin)):
+    result = await db.execute(select(User).where(User.id == user_id))
+    u = result.scalar_one_or_none()
     if not u:
         raise HTTPException(status_code=404, detail="User not found")
     if data.name      is not None: u.name      = data.name
     if data.role      is not None: u.role      = data.role
     if data.is_active is not None: u.is_active = data.is_active
     if data.email     is not None:
-        if db.query(User).filter(User.email == data.email, User.id != user_id).first():
+        dup = await db.execute(select(User).where(User.email == data.email, User.id != user_id))
+        if dup.scalar_one_or_none():
             raise HTTPException(status_code=400, detail="Email already in use")
         u.email = data.email
     if data.permissions is not None and hasattr(u, "permissions"):
         u.permissions = serialize_permissions(
             get_custom_permissions(data.role or u.role, data.permissions.split(","))
         )
-    db.commit()
+    await db.commit()
     log = ActivityLog(user_id=admin.id, user_name=admin.name, user_role=admin.role,
         action="UPDATE_USER", module="USERS",
         description=f"Updated user {u.name} — role: {u.role}, active: {u.is_active}",
         ref_type="user", ref_id=str(u.id))
-    db.add(log); db.commit()
+    db.add(log); await db.commit()
     return {"ok": True, "id": u.id, "name": u.name, "role": u.role}
 
 @router.delete("/api/users/{user_id}")
-def delete_user(user_id: int, db: Session = Depends(get_db), admin=Depends(core_require_admin)):
+async def delete_user(user_id: int, db: AsyncSession = Depends(get_async_session), admin=Depends(core_require_admin)):
     if user_id == admin.id:
         raise HTTPException(status_code=400, detail="Cannot delete your own account")
-    u = db.query(User).filter(User.id == user_id).first()
+    result = await db.execute(select(User).where(User.id == user_id))
+    u = result.scalar_one_or_none()
     if not u:
         raise HTTPException(status_code=404, detail="User not found")
     name = u.name
-    db.delete(u); db.commit()
+    await db.delete(u); await db.commit()
     log = ActivityLog(user_id=admin.id, user_name=admin.name, user_role=admin.role,
         action="DELETE_USER", module="USERS",
         description=f"Deleted user {name}", ref_type="user", ref_id=str(user_id))
-    db.add(log); db.commit()
+    db.add(log); await db.commit()
     return {"ok": True}
 
 @router.post("/api/users/{user_id}/reset-password")
-def admin_reset_password(user_id: int, data: AdminResetPassword,
-    db: Session = Depends(get_db), admin=Depends(core_require_admin)):
-    u = db.query(User).filter(User.id == user_id).first()
+async def admin_reset_password(user_id: int, data: AdminResetPassword,
+    db: AsyncSession = Depends(get_async_session), admin=Depends(core_require_admin)):
+    result = await db.execute(select(User).where(User.id == user_id))
+    u = result.scalar_one_or_none()
     if not u:
         raise HTTPException(status_code=404, detail="User not found")
     if len(data.new_password) < 6:
         raise HTTPException(status_code=400, detail="Password must be at least 6 characters")
     u.password = hash_password(data.new_password)
-    db.commit()
+    await db.commit()
     log = ActivityLog(user_id=admin.id, user_name=admin.name, user_role=admin.role,
         action="RESET_PASSWORD", module="USERS",
         description=f"Admin reset password for {u.name}",
         ref_type="user", ref_id=str(user_id))
-    db.add(log); db.commit()
+    db.add(log); await db.commit()
     return {"ok": True}
 
 @router.post("/api/change-password")
-def change_password(data: ChangePasswordData,
-    authorization: str = Header(None), db: Session = Depends(get_db)):
-    user = _extract_user(authorization, db)
+async def change_password(data: ChangePasswordData,
+    authorization: str = Header(None), db: AsyncSession = Depends(get_async_session)):
+    user = await _extract_user(authorization, db)
     if not user:
         raise HTTPException(status_code=401, detail="Not authenticated")
     if not verify_password(data.old_password, user.password):
@@ -244,12 +253,12 @@ def change_password(data: ChangePasswordData,
     if data.old_password == data.new_password:
         raise HTTPException(status_code=400, detail="New password must be different")
     user.password = hash_password(data.new_password)
-    db.commit()
+    await db.commit()
     log = ActivityLog(user_id=user.id, user_name=user.name, user_role=user.role,
         action="CHANGE_PASSWORD", module="USERS",
         description=f"{user.name} changed their own password",
         ref_type="user", ref_id=str(user.id))
-    db.add(log); db.commit()
+    db.add(log); await db.commit()
     return {"ok": True}
 
 
@@ -588,39 +597,33 @@ function initializeColorMode(){
     document.body.classList.toggle("light", isLight);
     setModeButton(isLight);
 }
-function setUserInfo(){
-    const name = localStorage.getItem("user_name") || "Admin";
-    const avatar = document.getElementById("user-avatar");
-    const userName = document.getElementById("user-name");
-    if(avatar) avatar.innerText = name.charAt(0).toUpperCase();
-    if(userName) userName.innerText = name;
+// Auth guard: redirect to login if the readable session cookie is absent
+function _hasAuthCookie() {
+    return document.cookie.split(";").some(c => c.trim().startsWith("logged_in="));
 }
-function logout(){
-    localStorage.removeItem("token");
-    localStorage.removeItem("user_name");
-    localStorage.removeItem("user_role");
-    localStorage.removeItem("user_permissions");
-    document.cookie = "access_token=; Max-Age=0; path=/; SameSite=Lax";
+if (!_hasAuthCookie()) { window.location.href = "/"; }
+
+async function initUser() {
+    try {
+        const r = await fetch("/auth/me");
+        if (!r.ok) { window.location.href = "/"; return; }
+        const u = await r.json();
+        const nameEl = document.getElementById("user-name");
+        const avatarEl = document.getElementById("user-avatar");
+        if (nameEl) nameEl.innerText = u.name;
+        if (avatarEl) avatarEl.innerText = u.name.charAt(0).toUpperCase();
+        return u;
+    } catch(e) { window.location.href = "/"; }
+}
+async function logout(){
+    await fetch("/auth/logout", { method: "POST" });
     window.location.href = "/";
 }
-const token  = localStorage.getItem("token");
-const myRole = localStorage.getItem("user_role");
 
-// Guard — admin only
-if(!token || myRole !== "admin"){
-    document.body.innerHTML = `<div style="display:flex;align-items:center;justify-content:center;height:100vh;flex-direction:column;gap:16px;color:var(--muted);font-family:var(--sans)">
-        <div style="font-size:48px">🔒</div>
-        <div style="font-size:18px;font-weight:700;color:var(--text)">Admin Access Only</div>
-        <div style="font-size:14px">You need administrator privileges to view this page.</div>
-        <a href="/home" style="color:var(--purple);text-decoration:none;font-weight:700;margin-top:8px">← Back to Home</a>
-    </div>`;
-    throw new Error("Access denied");
-}
-
-const H = {"Content-Type":"application/json","Authorization":"Bearer "+token};
+const H = {"Content-Type":"application/json"};
 
 initializeColorMode();
-setUserInfo();
+initUser();
 
 let allUsers = [], allLogs = [], editingId = null, resetUserId = null;
 let permissionCatalog = {pages: [], roles: []};

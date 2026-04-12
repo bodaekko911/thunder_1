@@ -4,12 +4,13 @@ from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
-from sqlalchemy import func
-from sqlalchemy.orm import Session
+from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from app.core.log import record
 from app.core.permissions import get_current_user, require_permission
-from app.database import get_db
+from app.database import get_async_session
 from app.models.accounting import Account, Journal, JournalEntry
 from app.models.customer import Customer
 from app.models.inventory import StockMove
@@ -38,12 +39,13 @@ class RefundCreate(BaseModel):
     items: List[RefundItemIn]
 
 
-def _next_refund_number(db: Session) -> str:
-    max_id = db.query(func.max(RetailRefund.id)).scalar() or 0
+async def _next_refund_number(db: AsyncSession) -> str:
+    _r = await db.execute(select(func.max(RetailRefund.id)))
+    max_id = _r.scalar() or 0
     return f"REF-{str(max_id + 1).zfill(5)}"
 
 
-def _post_journal(db: Session, description: str, amount: float, refund_method: str, user_id: Optional[int], ref_id: int):
+async def _post_journal(db: AsyncSession, description: str, amount: float, refund_method: str, user_id: Optional[int], ref_id: int):
     cash_like_code = "1000" if refund_method == "cash" else "1100"
     journal = Journal(
         ref_type="retail_refund",
@@ -52,10 +54,11 @@ def _post_journal(db: Session, description: str, amount: float, refund_method: s
         user_id=user_id,
     )
     db.add(journal)
-    db.flush()
+    await db.flush()
 
     for code, debit, credit in [("4000", amount, 0), (cash_like_code, 0, amount)]:
-        account = db.query(Account).filter(Account.code == code).first()
+        _r = await db.execute(select(Account).where(Account.code == code))
+        account = _r.scalar_one_or_none()
         if not account:
             continue
         db.add(JournalEntry(
@@ -67,41 +70,46 @@ def _post_journal(db: Session, description: str, amount: float, refund_method: s
         account.balance += Decimal(str(debit)) - Decimal(str(credit))
 
 
-def _refunded_qty_by_product(db: Session, invoice_id: int) -> dict[int, float]:
-    rows = (
-        db.query(
+async def _refunded_qty_by_product(db: AsyncSession, invoice_id: int) -> dict[int, float]:
+    _r = await db.execute(
+        select(
             RetailRefundItem.product_id,
             func.coalesce(func.sum(RetailRefundItem.qty), 0),
         )
         .join(RetailRefund, RetailRefund.id == RetailRefundItem.refund_id)
-        .filter(RetailRefund.invoice_id == invoice_id)
+        .where(RetailRefund.invoice_id == invoice_id)
         .group_by(RetailRefundItem.product_id)
-        .all()
     )
+    rows = _r.all()
     return {int(product_id): float(qty or 0) for product_id, qty in rows}
 
 
 @router.get("/api/invoices")
-def list_invoices(q: str = "", db: Session = Depends(get_db)):
-    query = db.query(Invoice)
+async def list_invoices(q: str = "", db: AsyncSession = Depends(get_async_session)):
+    stmt = (
+        select(Invoice)
+        .options(selectinload(Invoice.customer), selectinload(Invoice.items))
+        .order_by(Invoice.created_at.desc())
+        .limit(60)
+    )
     if q:
         like = f"%{q}%"
-        query = (
-            query.join(Customer, Customer.id == Invoice.customer_id)
-            .filter(
-                (Invoice.invoice_number.ilike(like))
-                | (Customer.name.ilike(like))
+        stmt = (
+            stmt.join(Customer, Customer.id == Invoice.customer_id)
+            .where(
+                Invoice.invoice_number.ilike(like)
+                | Customer.name.ilike(like)
             )
         )
-    invoices = query.order_by(Invoice.created_at.desc()).limit(60).all()
+    _r = await db.execute(stmt)
+    invoices = _r.scalars().all()
     result = []
     for inv in invoices:
-        refunded_total = float(
-            db.query(func.coalesce(func.sum(RetailRefund.total), 0))
-            .filter(RetailRefund.invoice_id == inv.id)
-            .scalar()
-            or 0
+        _r2 = await db.execute(
+            select(func.coalesce(func.sum(RetailRefund.total), 0))
+            .where(RetailRefund.invoice_id == inv.id)
         )
+        refunded_total = float(_r2.scalar() or 0)
         result.append({
             "id": inv.id,
             "invoice_number": inv.invoice_number,
@@ -117,12 +125,17 @@ def list_invoices(q: str = "", db: Session = Depends(get_db)):
 
 
 @router.get("/api/invoice/{invoice_id}")
-def invoice_detail(invoice_id: int, db: Session = Depends(get_db)):
-    invoice = db.query(Invoice).filter(Invoice.id == invoice_id).first()
+async def invoice_detail(invoice_id: int, db: AsyncSession = Depends(get_async_session)):
+    _r = await db.execute(
+        select(Invoice)
+        .where(Invoice.id == invoice_id)
+        .options(selectinload(Invoice.customer), selectinload(Invoice.items))
+    )
+    invoice = _r.scalar_one_or_none()
     if not invoice:
         raise HTTPException(status_code=404, detail="Invoice not found")
 
-    refunded_qty = _refunded_qty_by_product(db, invoice.id)
+    refunded_qty = await _refunded_qty_by_product(db, invoice.id)
     items = []
     for item in invoice.items:
         sold_qty = float(item.qty)
@@ -155,8 +168,17 @@ def invoice_detail(invoice_id: int, db: Session = Depends(get_db)):
 
 
 @router.get("/api/refunds")
-def list_refunds(db: Session = Depends(get_db)):
-    refunds = db.query(RetailRefund).order_by(RetailRefund.created_at.desc(), RetailRefund.id.desc()).limit(50).all()
+async def list_refunds(db: AsyncSession = Depends(get_async_session)):
+    _r = await db.execute(
+        select(RetailRefund)
+        .options(
+            selectinload(RetailRefund.invoice),
+            selectinload(RetailRefund.customer),
+        )
+        .order_by(RetailRefund.created_at.desc(), RetailRefund.id.desc())
+        .limit(50)
+    )
+    refunds = _r.scalars().all()
     return [
         {
             "id": refund.id,
@@ -173,19 +195,24 @@ def list_refunds(db: Session = Depends(get_db)):
 
 
 @router.post("/api/create")
-def create_refund(
+async def create_refund(
     data: RefundCreate,
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_async_session),
     current_user: User = Depends(get_current_user),
 ):
-    invoice = db.query(Invoice).filter(Invoice.id == data.invoice_id).first()
+    _r = await db.execute(
+        select(Invoice)
+        .where(Invoice.id == data.invoice_id)
+        .options(selectinload(Invoice.items))
+    )
+    invoice = _r.scalar_one_or_none()
     if not invoice:
         raise HTTPException(status_code=404, detail="Invoice not found")
     if not data.items:
         raise HTTPException(status_code=400, detail="Select at least one item to refund")
 
-    refund_number = _next_refund_number(db)
-    refunded_qty = _refunded_qty_by_product(db, invoice.id)
+    refund_number = await _next_refund_number(db)
+    refunded_qty = await _refunded_qty_by_product(db, invoice.id)
     invoice_items = {item.product_id: item for item in invoice.items}
 
     total = 0.0
@@ -220,10 +247,11 @@ def create_refund(
         total=round(total, 2),
     )
     db.add(refund)
-    db.flush()
+    await db.flush()
 
     for invoice_item, qty, line_total in parsed_items:
-        product = db.query(Product).filter(Product.id == invoice_item.product_id).first()
+        _r = await db.execute(select(Product).where(Product.id == invoice_item.product_id))
+        product = _r.scalar_one_or_none()
         if not product:
             raise HTTPException(status_code=404, detail=f"Product not found: {invoice_item.product_id}")
         db.add(RetailRefundItem(
@@ -248,7 +276,7 @@ def create_refund(
             user_id=current_user.id,
         ))
 
-    _post_journal(
+    await _post_journal(
         db=db,
         description=f"Retail refund - {refund_number} - {invoice.invoice_number}",
         amount=round(total, 2),
@@ -265,8 +293,8 @@ def create_refund(
         ref_type="retail_refund",
         ref_id=refund.id,
     )
-    db.commit()
-    db.refresh(refund)
+    await db.commit()
+    await db.refresh(refund)
 
     return {
         "id": refund.id,
@@ -277,8 +305,17 @@ def create_refund(
 
 
 @router.get("/print/{refund_id}", response_class=HTMLResponse)
-def print_refund(refund_id: int, db: Session = Depends(get_db)):
-    refund = db.query(RetailRefund).filter(RetailRefund.id == refund_id).first()
+async def print_refund(refund_id: int, db: AsyncSession = Depends(get_async_session)):
+    _r = await db.execute(
+        select(RetailRefund)
+        .where(RetailRefund.id == refund_id)
+        .options(
+            selectinload(RetailRefund.invoice),
+            selectinload(RetailRefund.customer),
+            selectinload(RetailRefund.items).selectinload(RetailRefundItem.product),
+        )
+    )
+    refund = _r.scalar_one_or_none()
     if not refund:
         raise HTTPException(status_code=404, detail="Refund not found")
 
@@ -809,15 +846,27 @@ nav {
 
 <script>
 // ── Init ─────────────────────────────────────────────────────
-const token = localStorage.getItem("token") || "";
+// Auth guard: redirect to login if the readable session cookie is absent
+function _hasAuthCookie() {
+    return document.cookie.split(";").some(c => c.trim().startsWith("logged_in="));
+}
+if (!_hasAuthCookie()) { window.location.href = "/"; }
+
 let selectedInvoiceId = null;
 let selectedInvoice   = null;
 let searchTimer       = null;
 
-function initUser() {
-    const name = localStorage.getItem("user_name") || "Admin";
-    document.getElementById("user-avatar").innerText = name.charAt(0).toUpperCase();
-    document.getElementById("user-name").innerText   = name;
+async function initUser() {
+    try {
+        const r = await fetch("/auth/me");
+        if (!r.ok) { window.location.href = "/"; return; }
+        const u = await r.json();
+        const nameEl = document.getElementById("user-name");
+        const avatarEl = document.getElementById("user-avatar");
+        if (nameEl) nameEl.innerText = u.name;
+        if (avatarEl) avatarEl.innerText = u.name.charAt(0).toUpperCase();
+        return u;
+    } catch(e) { window.location.href = "/"; }
 }
 
 function toggleMode() {
@@ -826,13 +875,10 @@ function toggleMode() {
     document.getElementById("mode-btn").innerText = light ? "☀️" : "🌙";
 }
 
-function logout() {
-    ["token","user_name","user_role","user_permissions"].forEach(k => localStorage.removeItem(k));
-    document.cookie = "access_token=; Max-Age=0; path=/; SameSite=Lax";
+async function logout() {
+    await fetch("/auth/logout", { method: "POST" });
     window.location.href = "/";
 }
-
-if (!token) window.location.href = "/";
 
 if (localStorage.getItem("refund-theme") === "light") {
     document.body.classList.add("light");
@@ -988,7 +1034,7 @@ async function submitRefund() {
     try {
         const res  = await fetch("/refunds/api/create", {
             method: "POST",
-            headers: { "Content-Type": "application/json", "Authorization": "Bearer " + token },
+            headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
                 invoice_id:    selectedInvoice.id,
                 reason,
