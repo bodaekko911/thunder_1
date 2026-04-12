@@ -1,0 +1,165 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - "**"
+  pull_request:
+
+env:
+  APP_ENV: development
+  SECRET_KEY: 12345678901234567890123456789012
+  DATABASE_URL: postgresql+asyncpg://postgres:postgres@localhost:5432/erp_ci
+  ADMIN_PASSWORD: change-me-now
+  MIGRATION_CHECK_ON_STARTUP: "false"
+  PYTHONDONTWRITEBYTECODE: "1"
+  PYTHONUNBUFFERED: "1"
+
+jobs:
+  fresh-install:
+    name: fresh-install
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+      - name: Fresh install smoke
+        run: |
+          python -m compileall app tests alembic
+          python -c "from app.main import app; print(app.title)"
+
+  import-checks:
+    name: import
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+      - name: Run import smoke tests
+        run: python -m pytest -q tests/test_import_checks.py
+
+  pytest:
+    name: pytest
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+      - name: Run test suite
+        run: python -m pytest -q
+
+  coverage:
+    name: coverage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+          python -m pip install pytest-cov
+      - name: Run coverage
+        run: python -m pytest -q --cov=app --cov-report=term-missing --cov-report=xml
+
+  alembic:
+    name: alembic
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+      - name: Verify Alembic history and heads
+        run: |
+          python -m alembic history
+          python -m alembic heads
+      - name: Render upgrade SQL
+        run: python -m alembic upgrade head --sql > /tmp/alembic-upgrade.sql
+
+  docker-build:
+    name: docker-build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build image
+        run: docker build --file Dockerfile --tag thunder-erp:ci .
+
+  prod-smoke:
+    name: prod-smoke
+    runs-on: ubuntu-latest
+    env:
+      APP_ENV: production
+      SECRET_KEY: 12345678901234567890123456789012
+      ADMIN_PASSWORD: change-me-now-strong
+      DEFAULT_ADMIN_EMAIL: admin@example.com
+      POSTGRES_DB: erp_ci
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      ALLOWED_HOSTS: localhost,127.0.0.1
+      CORS_ALLOW_ORIGINS: https://erp.example.com
+      MIGRATION_CHECK_ON_STARTUP: "true"
+      MIGRATION_CHECK_STRICT: "true"
+      API_PORT: "8000"
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build runtime image
+        run: docker compose -f docker-compose.prod.yml build app
+      - name: Start Postgres and Redis
+        run: docker compose -f docker-compose.prod.yml up -d postgres redis
+      - name: Apply migrations
+        run: docker compose -f docker-compose.prod.yml run --rm app python -m alembic upgrade head
+      - name: Start application
+        run: docker compose -f docker-compose.prod.yml up -d app
+      - name: Verify backing services
+        run: |
+          docker compose -f docker-compose.prod.yml exec -T postgres pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB"
+          docker compose -f docker-compose.prod.yml exec -T redis redis-cli ping
+      - name: Wait for app health
+        run: |
+          for attempt in {1..30}; do
+            if curl --fail --silent http://127.0.0.1:8000/health/live > /tmp/live.json && curl --fail --silent http://127.0.0.1:8000/health/ready > /tmp/ready.json; then
+              cat /tmp/live.json
+              cat /tmp/ready.json
+              exit 0
+            fi
+            sleep 2
+          done
+          docker compose -f docker-compose.prod.yml logs app postgres redis
+          exit 1
+      - name: Verify admin login
+        run: |
+          curl --fail --silent --show-error \
+            -H 'Content-Type: application/json' \
+            -d '{"email":"admin@example.com","password":"change-me-now-strong"}' \
+            http://127.0.0.1:8000/auth/login > /tmp/login.json
+          python -c "import json, pathlib; data = json.loads(pathlib.Path('/tmp/login.json').read_text()); assert data['role'] == 'admin'; print(data['role'])"
+      - name: Shutdown stack
+        if: always()
+        run: docker compose -f docker-compose.prod.yml down -v

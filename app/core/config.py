@@ -7,6 +7,8 @@ from typing import Annotated, Literal
 from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
+from app.core.password_policy import validate_password_policy
+
 
 BASE_DIR = Path(__file__).resolve().parents[2]
 LOG_DIR = BASE_DIR / "logs"
@@ -129,7 +131,7 @@ class BaseAppSettings(BaseSettings):
         password = (value or "").strip()
         if not password:
             raise ValueError("ADMIN_PASSWORD is required")
-        return password
+        return validate_password_policy(password, subject="ADMIN_PASSWORD")
 
     @field_validator("DATABASE_URL", mode="before")
     @classmethod

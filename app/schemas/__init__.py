@@ -1,4 +1,12 @@
-from app.schemas.user import UserCreate, UserOut, UserLogin
+from app.schemas.user import (
+    AdminResetPassword,
+    AdminUserCreate,
+    ChangePasswordData,
+    UserCreate,
+    UserLogin,
+    UserOut,
+    UserUpdate,
+)
 from app.schemas.invoice import InvoiceItemCreate, InvoiceCreate
 from app.schemas.product import ProductCreate, ProductUpdate
 from app.schemas.customer import CustomerCreate, CustomerUpdate
@@ -15,7 +23,8 @@ from app.schemas.b2b import (
 
 __all__ = [
     # user
-    "UserCreate", "UserOut", "UserLogin",
+    "AdminResetPassword", "AdminUserCreate", "ChangePasswordData",
+    "UserCreate", "UserOut", "UserLogin", "UserUpdate",
     # invoice
     "InvoiceItemCreate", "InvoiceCreate",
     # product

@@ -1,12 +1,17 @@
 from fastapi import APIRouter, Depends, HTTPException, Header, Request
 from fastapi.responses import HTMLResponse
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import Column, Integer, String, Boolean, DateTime, Text, ForeignKey, select
-from sqlalchemy.sql import func
+from sqlalchemy import select
 from pydantic import BaseModel
 from typing import Optional
 
-from app.core.permission_catalog import ROLE_DEFINITIONS, get_permission_catalog
+from app.core.password_policy import (
+    PASSWORD_MIN_LENGTH,
+    password_min_length_message,
+    password_must_change_message,
+    validate_password_change,
+)
+from app.core.permission_catalog import get_permission_catalog
 from app.core.permissions import (
     require_admin as core_require_admin,
     get_custom_permissions,
@@ -15,37 +20,16 @@ from app.core.permissions import (
 )
 from app.core.config import settings
 from app.core.rate_limit import limiter
-from app.database import get_async_session, Base
+from app.database import get_async_session
 from app.models.user import User
 from app.core.security import hash_password, verify_password, decode_token
-from app.core.log import ActivityLog, record as log_record
+from app.core.log import ActivityLog
+from app.schemas.user import AdminResetPassword, AdminUserCreate, ChangePasswordData, UserUpdate
 
 router = APIRouter(prefix="/users", tags=["Users"])
 
 
 # ── Schemas ─────────────────────────────────────────────
-class UserCreate(BaseModel):
-    name:        str
-    email:       str
-    password:    str
-    role:        str = "cashier"
-    is_active:   bool = True
-    permissions: Optional[str] = None
-
-class UserUpdate(BaseModel):
-    name:        Optional[str]  = None
-    email:       Optional[str]  = None
-    role:        Optional[str]  = None
-    is_active:   Optional[bool] = None
-    permissions: Optional[str]  = None
-
-class ChangePasswordData(BaseModel):
-    old_password: str
-    new_password: str
-
-class AdminResetPassword(BaseModel):
-    new_password: str
-
 class LogCreate(BaseModel):
     action:      str
     module:      str
@@ -158,12 +142,10 @@ def permissions_catalog(_=Depends(core_require_admin)):
     return get_permission_catalog()
 
 @router.post("/api/users")
-async def create_user(data: UserCreate, db: AsyncSession = Depends(get_async_session), admin=Depends(core_require_admin)):
+async def create_user(data: AdminUserCreate, db: AsyncSession = Depends(get_async_session), admin=Depends(core_require_admin)):
     existing = await db.execute(select(User).where(User.email == data.email))
     if existing.scalar_one_or_none():
         raise HTTPException(status_code=400, detail="Email already exists")
-    if len(data.password) < 6:
-        raise HTTPException(status_code=400, detail="Password must be at least 6 characters")
     u = User(
         name=data.name, email=data.email,
         password=hash_password(data.password),
@@ -196,6 +178,9 @@ async def update_user(user_id: int, data: UserUpdate, db: AsyncSession = Depends
         if dup.scalar_one_or_none():
             raise HTTPException(status_code=400, detail="Email already in use")
         u.email = data.email
+    password_updated = data.password is not None
+    if password_updated:
+        u.password = hash_password(data.password)
     if data.permissions is not None and hasattr(u, "permissions"):
         u.permissions = serialize_permissions(
             get_custom_permissions(data.role or u.role, data.permissions.split(","))
@@ -232,8 +217,6 @@ async def admin_reset_password(user_id: int, data: AdminResetPassword,
     u = result.scalar_one_or_none()
     if not u:
         raise HTTPException(status_code=404, detail="User not found")
-    if len(data.new_password) < 6:
-        raise HTTPException(status_code=400, detail="Password must be at least 6 characters")
     u.password = hash_password(data.new_password)
     await db.commit()
     log = ActivityLog(user_id=admin.id, user_name=admin.name, user_role=admin.role,
@@ -252,10 +235,10 @@ async def change_password(data: ChangePasswordData,
         raise HTTPException(status_code=401, detail="Not authenticated")
     if not verify_password(data.old_password, user.password):
         raise HTTPException(status_code=400, detail="Current password is incorrect")
-    if len(data.new_password) < 6:
-        raise HTTPException(status_code=400, detail="New password must be at least 6 characters")
-    if data.old_password == data.new_password:
-        raise HTTPException(status_code=400, detail="New password must be different")
+    try:
+        validate_password_change(data.old_password, data.new_password)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     user.password = hash_password(data.new_password)
     await db.commit()
     log = ActivityLog(user_id=user.id, user_name=user.name, user_role=user.role,
@@ -507,7 +490,7 @@ td.name{color:var(--text);font-weight:600;}
                 <input id="cp-old" type="password" placeholder="Enter your current password">
             </div>
             <div class="fld"><label>New Password *</label>
-                <input id="cp-new" type="password" placeholder="Minimum 6 characters" oninput="pwdStrength('cp-new','cp-bar')">
+                <input id="cp-new" type="password" placeholder="Minimum __PASSWORD_MIN_LENGTH__ characters" oninput="pwdStrength('cp-new','cp-bar')">
                 <div class="pwd-strength" id="cp-bar"></div>
             </div>
             <div class="fld"><label>Confirm New Password *</label>
@@ -532,7 +515,7 @@ td.name{color:var(--text);font-weight:600;}
             <input id="u-email" type="email" placeholder="ahmed@habiba.com">
         </div>
         <div class="fld"><label id="pass-label">Password *</label>
-            <input id="u-pass" type="password" placeholder="Min 6 characters" oninput="pwdStrength('u-pass','u-bar')">
+            <input id="u-pass" type="password" placeholder="Min __PASSWORD_MIN_LENGTH__ characters" oninput="pwdStrength('u-pass','u-bar')">
             <div class="pwd-strength" id="u-bar"></div>
         </div>
         <div class="fld"><label>Role *</label>
@@ -572,7 +555,7 @@ td.name{color:var(--text);font-weight:600;}
         <div class="modal-title">🔑 Reset Password</div>
         <div class="modal-sub" id="reset-sub">Reset password for user</div>
         <div class="fld"><label>New Password *</label>
-            <input id="rp-new" type="password" placeholder="Min 6 characters" oninput="pwdStrength('rp-new','rp-bar')">
+            <input id="rp-new" type="password" placeholder="Min __PASSWORD_MIN_LENGTH__ characters" oninput="pwdStrength('rp-new','rp-bar')">
             <div class="pwd-strength" id="rp-bar"></div>
         </div>
         <div class="fld"><label>Confirm Password *</label>
@@ -932,7 +915,7 @@ function updateRoleDesc(){
 function pwdStrength(inputId, barId){
     let v = document.getElementById(inputId).value;
     let s = 0;
-    if(v.length>=6)  s++;
+    if(v.length>=__PASSWORD_MIN_LENGTH__)  s++;
     if(v.length>=10) s++;
     if(/[A-Z]/.test(v)) s++;
     if(/[0-9]/.test(v)) s++;
@@ -954,7 +937,7 @@ async function saveUser(){
     if(!name)  { showToast("Name is required"); return; }
     if(!email) { showToast("Email is required"); return; }
     if(!editingId && !pass){ showToast("Password is required for new users"); return; }
-    if(pass && pass.length < 6){ showToast("Password must be at least 6 characters"); return; }
+    if(pass && pass.length < __PASSWORD_MIN_LENGTH__){ showToast("__PASSWORD_POLICY_MESSAGE__"); return; }
 
     let body = {name, email, role, is_active:active, permissions:perms};
     if(pass) body.password = pass;
@@ -992,7 +975,7 @@ function openResetModal(id, name){
 async function saveResetPassword(){
     let np  = document.getElementById("rp-new").value;
     let cnf = document.getElementById("rp-confirm").value;
-    if(!np || np.length<6){ showToast("Password must be at least 6 characters"); return; }
+    if(!np || np.length<__PASSWORD_MIN_LENGTH__){ showToast("__PASSWORD_POLICY_MESSAGE__"); return; }
     if(np !== cnf){ showToast("Passwords do not match"); return; }
     let res  = await fetch(`/users/api/users/${resetUserId}/reset-password`, {
         method:"POST", headers:H, body:JSON.stringify({new_password:np}),
@@ -1009,8 +992,9 @@ async function changeMyPassword(){
     let np  = document.getElementById("cp-new").value;
     let cnf = document.getElementById("cp-confirm").value;
     if(!old){ showToast("Enter your current password"); return; }
-    if(!np || np.length<6){ showToast("New password must be at least 6 characters"); return; }
+    if(!np || np.length<__PASSWORD_MIN_LENGTH__){ showToast("__NEW_PASSWORD_POLICY_MESSAGE__"); return; }
     if(np !== cnf){ showToast("Passwords do not match"); return; }
+    if(old === np){ showToast("__PASSWORD_MUST_CHANGE_MESSAGE__"); return; }
     let res  = await fetch("/users/api/change-password", {
         method:"POST", headers:H,
         body:JSON.stringify({old_password:old, new_password:np}),
@@ -1080,4 +1064,10 @@ async function initializeUsersPage(){
 initializeUsersPage();
 </script>
 </body>
-</html>"""
+</html>""".replace("__PASSWORD_MIN_LENGTH__", str(PASSWORD_MIN_LENGTH)).replace(
+        "__PASSWORD_POLICY_MESSAGE__", password_min_length_message()
+    ).replace(
+        "__NEW_PASSWORD_POLICY_MESSAGE__", password_min_length_message("New password")
+    ).replace(
+        "__PASSWORD_MUST_CHANGE_MESSAGE__", password_must_change_message()
+    )

@@ -14,7 +14,6 @@ from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 
 from app.api.routes import ROUTERS
-from app.bootstrap.database import initialize_database
 from app.core.config import settings
 from app.core.log import configure_logging, logger
 from app.core.middleware import RequestLoggingMiddleware, SecurityHeadersMiddleware
@@ -30,7 +29,6 @@ STATIC_DIR = Path(__file__).resolve().parent / "static"
 async def lifespan(_: FastAPI):
     configure_logging()
     configure_monitoring()
-    await initialize_database()
     await verify_migration_status()
     yield
 

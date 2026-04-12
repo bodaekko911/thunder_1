@@ -1,7 +1,10 @@
+import os
 from collections.abc import AsyncGenerator
 
 import pytest
 from fastapi.testclient import TestClient
+
+os.environ["ADMIN_PASSWORD"] = "change-me-now"
 
 from app.app_factory import create_app
 from app.database import get_async_session
@@ -22,7 +25,6 @@ def client(monkeypatch: pytest.MonkeyPatch) -> TestClient:
 
     monkeypatch.setattr("app.app_factory.configure_logging", lambda: None)
     monkeypatch.setattr("app.app_factory.configure_monitoring", lambda: None)
-    monkeypatch.setattr("app.app_factory.initialize_database", noop)
     monkeypatch.setattr("app.app_factory.verify_migration_status", noop)
 
     app = create_app()
