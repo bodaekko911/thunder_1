@@ -1,0 +1,71 @@
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-erp}
+      POSTGRES_USER: ${POSTGRES_USER:-erp}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-erp}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-erp} -d ${POSTGRES_DB:-erp}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  app:
+    build:
+      context: .
+      target: runtime
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      APP_ENV: development
+      APP_NAME: ${APP_NAME:-ERP System}
+      DEBUG: "true"
+      SECRET_KEY: ${SECRET_KEY:-dev-secret-key-that-is-definitely-long-enough}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-dev-admin-password}
+      DEFAULT_ADMIN_NAME: ${DEFAULT_ADMIN_NAME:-Administrator}
+      DEFAULT_ADMIN_EMAIL: ${DEFAULT_ADMIN_EMAIL:-admin@example.com}
+      API_HOST: 0.0.0.0
+      API_PORT: 8000
+      WORKERS: 1
+      LOG_LEVEL: ${LOG_LEVEL:-DEBUG}
+      LOG_FILE: ${LOG_FILE:-logs/app.log}
+      COOKIE_SECURE: "false"
+      ACCESS_TOKEN_EXPIRE_MINUTES: ${ACCESS_TOKEN_EXPIRE_MINUTES:-30}
+      REFRESH_TOKEN_EXPIRE_DAYS: ${REFRESH_TOKEN_EXPIRE_DAYS:-7}
+      CORS_ALLOW_ORIGINS: ${CORS_ALLOW_ORIGINS:-http://localhost:3000,http://localhost:8000}
+      CORS_ALLOW_CREDENTIALS: ${CORS_ALLOW_CREDENTIALS:-true}
+      CORS_ALLOW_METHODS: ${CORS_ALLOW_METHODS:-*}
+      CORS_ALLOW_HEADERS: ${CORS_ALLOW_HEADERS:-*}
+      RATE_LIMIT_REQUESTS: ${RATE_LIMIT_REQUESTS:-120}
+      RATE_LIMIT_WINDOW_SECONDS: ${RATE_LIMIT_WINDOW_SECONDS:-60}
+      REDIS_URL: redis://redis:6379/0
+      POOL_SIZE: ${POOL_SIZE:-10}
+      POOL_MAX_OVERFLOW: ${POOL_MAX_OVERFLOW:-20}
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-erp}:${POSTGRES_PASSWORD:-erp}@postgres:5432/${POSTGRES_DB:-erp}
+    ports:
+      - "${API_PORT:-8000}:8000"
+    volumes:
+      - ./:/app
+      - ./logs:/app/logs
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+
+volumes:
+  postgres_data:

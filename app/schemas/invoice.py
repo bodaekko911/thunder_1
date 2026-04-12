@@ -16,3 +16,12 @@ class InvoiceCreate(BaseModel):
     notes:            Optional[str] = Field(None, max_length=500)
     payment_method:   str = Field("cash", min_length=1, max_length=50)
     settle_later:     bool = False
+
+
+class InvoiceCollectionRequest(BaseModel):
+    payment_method: str = Field("cash", min_length=1, max_length=50)
+
+
+class B2BPaymentRequest(BaseModel):
+    amount: float = Field(..., gt=0)
+    month_label: Optional[str] = Field(None, max_length=100)

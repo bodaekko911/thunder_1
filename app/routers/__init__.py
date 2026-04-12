@@ -5,7 +5,7 @@ from app.routers import (
     b2b,
     customers,
     dashboard,
-    expenses,
+    expenses_refactored,
     farm,
     home,
     hr,
@@ -38,7 +38,7 @@ ROUTERS = (
     reports.router,
     users.router,
     refunds.router,
-    expenses.router,
+    expenses_refactored.router,
     audit_log.router,
 )
 

@@ -1,10 +1,10 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import HTMLResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import func, select
 from sqlalchemy.orm import selectinload
 from typing import Optional, List
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from app.database import get_async_session
 from app.core.permissions import get_current_user, require_permission
@@ -14,6 +14,7 @@ from app.models.b2b import B2BClient, B2BInvoice, B2BInvoiceItem, Consignment
 from app.models.product import Product
 from app.models.inventory import StockMove
 from app.models.user import User
+from app.schemas.invoice import B2BPaymentRequest
 from decimal import Decimal
 
 router = APIRouter(
@@ -25,25 +26,25 @@ router = APIRouter(
 
 # ── Schemas ────────────────────────────────────────────
 class AccountCreate(BaseModel):
-    code:      str
-    name:      str
-    type:      str
+    code:      str = Field(..., min_length=1, max_length=50)
+    name:      str = Field(..., min_length=1, max_length=150)
+    type:      str = Field(..., min_length=1, max_length=50)
     parent_id: Optional[int] = None
 
 class JournalEntryIn(BaseModel):
     account_id: int
-    debit:      float = 0
-    credit:     float = 0
-    note:       Optional[str] = None
+    debit:      float = Field(0, ge=0)
+    credit:     float = Field(0, ge=0)
+    note:       Optional[str] = Field(None, max_length=255)
 
 class JournalCreate(BaseModel):
-    ref_type:    Optional[str] = None
-    description: Optional[str] = None
+    ref_type:    Optional[str] = Field(None, max_length=100)
+    description: Optional[str] = Field(None, max_length=500)
     entries:     List[JournalEntryIn]
 
 class B2BRefundIn(BaseModel):
-    amount: float
-    reason: Optional[str] = None
+    amount: float = Field(..., gt=0)
+    reason: Optional[str] = Field(None, max_length=255)
 
 
 # ── ACCOUNTS API ───────────────────────────────────────
@@ -122,7 +123,11 @@ async def seed_accounts(db: AsyncSession = Depends(get_async_session)):
 
 # ── JOURNALS API ───────────────────────────────────────
 @router.get("/api/journals")
-async def get_journals(skip: int = 0, limit: int = 50, db: AsyncSession = Depends(get_async_session)):
+async def get_journals(
+    skip: int = Query(0, ge=0),
+    limit: int = Query(50, ge=1, le=200),
+    db: AsyncSession = Depends(get_async_session),
+):
     cnt_result = await db.execute(select(func.count()).select_from(Journal))
     total = cnt_result.scalar()
     result = await db.execute(
@@ -281,7 +286,11 @@ async def profit_loss(db: AsyncSession = Depends(get_async_session)):
 
 # ── B2B INVOICES (for Accounting tab) ─────────────────
 @router.get("/api/b2b-invoices")
-async def get_b2b_invoices(invoice_type: str = None, status: str = None, db: AsyncSession = Depends(get_async_session)):
+async def get_b2b_invoices(
+    invoice_type: Optional[str] = Query(None, max_length=50),
+    status: Optional[str] = Query(None, max_length=50),
+    db: AsyncSession = Depends(get_async_session),
+):
     stmt = (
         select(B2BInvoice)
         .options(
@@ -325,7 +334,12 @@ async def get_b2b_invoices(invoice_type: str = None, status: str = None, db: Asy
     ]
 
 @router.post("/api/b2b-invoices/{invoice_id}/collect")
-async def collect_b2b_payment(invoice_id: int, data: dict, db: AsyncSession = Depends(get_async_session), current_user: User = Depends(get_current_user)):
+async def collect_b2b_payment(
+    invoice_id: int,
+    data: B2BPaymentRequest,
+    db: AsyncSession = Depends(get_async_session),
+    current_user: User = Depends(get_current_user),
+):
     inv_result = await db.execute(
         select(B2BInvoice)
         .options(selectinload(B2BInvoice.client))
@@ -336,7 +350,7 @@ async def collect_b2b_payment(invoice_id: int, data: dict, db: AsyncSession = De
         raise HTTPException(status_code=404, detail="Invoice not found")
     if invoice.invoice_type not in ("cash", "full_payment"):
         raise HTTPException(status_code=400, detail="Use consignment-payment endpoint for consignment invoices")
-    amount  = round(float(data.get("amount", 0)), 2)
+    amount  = round(float(data.amount), 2)
     balance = round(float(invoice.total) - float(invoice.amount_paid), 2)
     if amount <= 0:
         raise HTTPException(status_code=400, detail="Amount must be greater than 0")
@@ -369,7 +383,12 @@ async def collect_b2b_payment(invoice_id: int, data: dict, db: AsyncSession = De
 
 
 @router.post("/api/b2b-invoices/{invoice_id}/consignment-payment")
-async def accounting_consignment_payment(invoice_id: int, data: dict, db: AsyncSession = Depends(get_async_session), current_user: User = Depends(get_current_user)):
+async def accounting_consignment_payment(
+    invoice_id: int,
+    data: B2BPaymentRequest,
+    db: AsyncSession = Depends(get_async_session),
+    current_user: User = Depends(get_current_user),
+):
     """Record a monthly/partial cash payment against a consignment invoice."""
     inv_result = await db.execute(
         select(B2BInvoice)
@@ -381,10 +400,8 @@ async def accounting_consignment_payment(invoice_id: int, data: dict, db: AsyncS
         raise HTTPException(status_code=404, detail="Invoice not found")
     if invoice.invoice_type != "consignment":
         raise HTTPException(status_code=400, detail="This endpoint is for consignment invoices only")
-    amount      = round(float(data.get("amount", 0)), 2)
-    month_label = data.get("month_label", "")
-    if amount <= 0:
-        raise HTTPException(status_code=400, detail="Amount must be greater than 0")
+    amount      = round(float(data.amount), 2)
+    month_label = (data.month_label or "").strip()
     balance = round(float(invoice.total) - float(invoice.amount_paid), 2)
     if amount > balance + 0.01:
         raise HTTPException(status_code=400, detail=f"Amount exceeds balance: {balance:.2f}")

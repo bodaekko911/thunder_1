@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import HTMLResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -12,7 +12,7 @@ from app.core.security import get_current_user
 from app.models.product import Product
 from app.models.customer import Customer
 from app.models.invoice import Invoice
-from app.schemas.invoice import InvoiceCreate
+from app.schemas.invoice import InvoiceCollectionRequest, InvoiceCreate
 from app.services.pos_service import create_invoice
 
 router = APIRouter(
@@ -32,7 +32,10 @@ async def products_cache(db: AsyncSession = Depends(get_async_session)):
 
 
 @router.get("/search-products")
-async def search_products(q: str = "", db: AsyncSession = Depends(get_async_session)):
+async def search_products(
+    q: str = Query("", max_length=100),
+    db: AsyncSession = Depends(get_async_session),
+):
     _r = await db.execute(
         select(Product)
         .where(
@@ -106,7 +109,11 @@ async def get_unpaid_invoices(db: AsyncSession = Depends(get_async_session)):
 
 
 @router.post("/invoice/{invoice_id}/collect")
-async def collect_payment(invoice_id: int, data: dict, db: AsyncSession = Depends(get_async_session)):
+async def collect_payment(
+    invoice_id: int,
+    data: InvoiceCollectionRequest,
+    db: AsyncSession = Depends(get_async_session),
+):
     from app.models.accounting import Account, Journal, JournalEntry
 
     _r = await db.execute(select(Invoice).where(Invoice.id == invoice_id))
@@ -116,7 +123,7 @@ async def collect_payment(invoice_id: int, data: dict, db: AsyncSession = Depend
     if invoice.status == "paid":
         raise HTTPException(status_code=400, detail="Invoice already paid")
 
-    payment_method         = data.get("payment_method", "cash")
+    payment_method         = data.payment_method
     invoice.status         = "paid"
     invoice.payment_method = payment_method
 

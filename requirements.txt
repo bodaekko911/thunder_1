@@ -4,6 +4,7 @@ bcrypt==4.0.1
 email-validator==2.2.0
 fastapi==0.116.1
 gunicorn==23.0.0
+httpx==0.28.1
 openpyxl==3.1.5
 pandas==2.3.2
 passlib==1.7.4
@@ -15,3 +16,4 @@ slowapi==0.1.9
 sqlalchemy==2.0.43
 starlette-csrf==3.0.0
 uvicorn==0.35.0
+pytest==8.3.5

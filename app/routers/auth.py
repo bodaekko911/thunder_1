@@ -27,6 +27,7 @@ from app.database import get_async_session
 from app.models.refresh_token import RefreshToken
 from app.models.user import User
 from app.schemas.user import UserCreate, UserOut, UserLogin
+from app.core.rate_limit import limiter
 
 router = APIRouter(tags=["Auth"])
 
@@ -235,6 +236,7 @@ def login_page():
 
 
 @router.post("/auth/login")
+@limiter.limit(settings.LOGIN_RATE_LIMIT)
 async def login(
     data: UserLogin,
     request: Request,
@@ -451,4 +453,3 @@ async def refresh(
         max_age=settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60,
     )
     return {"ok": True}
-

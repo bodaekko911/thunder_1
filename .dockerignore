@@ -1,6 +1,15 @@
 .git
 .env
+.env.*
+.claude
+.idea
+.vscode
+Thunder
 venv
+.venv
 __pycache__
 logs
 erp.db
+app/static/uploads
+*.pyc
+*.pyo

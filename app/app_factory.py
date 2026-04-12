@@ -7,34 +7,38 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
+from starlette.middleware.trustedhost import TrustedHostMiddleware
 from starlette_csrf import CSRFMiddleware
 
-from slowapi import Limiter, _rate_limit_exceeded_handler
-from slowapi.util import get_remote_address
+from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 
 from app.api.routes import ROUTERS
 from app.bootstrap.database import initialize_database
 from app.core.config import settings
 from app.core.log import configure_logging, logger
+from app.core.middleware import RequestLoggingMiddleware, SecurityHeadersMiddleware
+from app.core.migrations import verify_migration_status
+from app.core.monitoring import configure_monitoring
+from app.core.rate_limit import limiter
 from app.database import get_async_session
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
-
-limiter = Limiter(key_func=get_remote_address, default_limits=[f"{settings.RATE_LIMIT_REQUESTS}/{settings.RATE_LIMIT_WINDOW_SECONDS}seconds"])
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     configure_logging()
+    configure_monitoring()
     await initialize_database()
+    await verify_migration_status()
     yield
 
 
 def create_app() -> FastAPI:
     app = FastAPI(
         title=settings.APP_NAME,
-        debug=False,
+        debug=settings.DEBUG,
         lifespan=lifespan,
     )
 
@@ -52,6 +56,8 @@ def create_app() -> FastAPI:
         allow_methods=settings.CORS_ALLOW_METHODS,
         allow_headers=settings.CORS_ALLOW_HEADERS,
     )
+    app.add_middleware(TrustedHostMiddleware, allowed_hosts=settings.ALLOWED_HOSTS)
+    app.add_middleware(SecurityHeadersMiddleware)
     # CSRF protection: only triggers on requests that carry the access_token cookie.
     # Auth endpoints (/auth/*) are exempt — they use credentials as proof, not a session.
     # Pure JSON API calls (/*/api/*) are also exempt — protected by CORS same-origin policy.
@@ -68,10 +74,19 @@ def create_app() -> FastAPI:
             re.compile(r"^/health.*"),
         ],
     )
+    app.add_middleware(RequestLoggingMiddleware)
 
     @app.exception_handler(Exception)
-    async def unhandled_exception_handler(_: Request, exc: Exception):
-        logger.exception("Unhandled application error", exc_info=exc)
+    async def unhandled_exception_handler(request: Request, exc: Exception):
+        logger.exception(
+            "Unhandled application error",
+            exc_info=exc,
+            extra={
+                "method": request.method,
+                "path": request.url.path,
+                "query": str(request.url.query) or None,
+            },
+        )
         return JSONResponse(
             status_code=500,
             content={"detail": "An internal server error occurred."},
