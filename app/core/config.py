@@ -63,6 +63,9 @@ class BaseAppSettings(BaseSettings):
 
     RATE_LIMIT_REQUESTS: int = 120
     RATE_LIMIT_WINDOW_SECONDS: int = 60
+    LOGIN_RATE_LIMIT: str = "5/minute"
+    REFRESH_RATE_LIMIT: str = "10/minute"
+    PASSWORD_RATE_LIMIT: str = "5/minute"
 
     COOKIE_SECURE: bool = False
 
@@ -70,7 +73,8 @@ class BaseAppSettings(BaseSettings):
     POOL_MAX_OVERFLOW: int = 20
 
     REDIS_URL: str = "redis://localhost:6379/0"
-    LOGIN_RATE_LIMIT: str = "5/minute"
+    REDIS_SOCKET_CONNECT_TIMEOUT: float = 0.25
+    REDIS_SOCKET_TIMEOUT: float = 0.25
 
     SENTRY_DSN: str | None = None
     SENTRY_ENVIRONMENT: str | None = None

@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, Header
+from fastapi import APIRouter, Depends, HTTPException, Header, Request
 from fastapi.responses import HTMLResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import Column, Integer, String, Boolean, DateTime, Text, ForeignKey, select
@@ -13,6 +13,8 @@ from app.core.permissions import (
     get_effective_permissions,
     serialize_permissions,
 )
+from app.core.config import settings
+from app.core.rate_limit import limiter
 from app.database import get_async_session, Base
 from app.models.user import User
 from app.core.security import hash_password, verify_password, decode_token
@@ -223,8 +225,9 @@ async def delete_user(user_id: int, db: AsyncSession = Depends(get_async_session
     return {"ok": True}
 
 @router.post("/api/users/{user_id}/reset-password")
+@limiter.limit(settings.PASSWORD_RATE_LIMIT)
 async def admin_reset_password(user_id: int, data: AdminResetPassword,
-    db: AsyncSession = Depends(get_async_session), admin=Depends(core_require_admin)):
+    request: Request, db: AsyncSession = Depends(get_async_session), admin=Depends(core_require_admin)):
     result = await db.execute(select(User).where(User.id == user_id))
     u = result.scalar_one_or_none()
     if not u:
@@ -241,8 +244,9 @@ async def admin_reset_password(user_id: int, data: AdminResetPassword,
     return {"ok": True}
 
 @router.post("/api/change-password")
+@limiter.limit(settings.PASSWORD_RATE_LIMIT)
 async def change_password(data: ChangePasswordData,
-    authorization: str = Header(None), db: AsyncSession = Depends(get_async_session)):
+    request: Request, authorization: str = Header(None), db: AsyncSession = Depends(get_async_session)):
     user = await _extract_user(authorization, db)
     if not user:
         raise HTTPException(status_code=401, detail="Not authenticated")
@@ -803,7 +807,10 @@ const LEGACY_PAGE_TREE = [
         {value:"action_accounting_post_journal", label:"Post journal entries"},
     ]},
     { page: "page_customers",  icon: "👤", label: "Customers",   children: [] },
-    { page: "page_suppliers",  icon: "🏭", label: "Suppliers",   children: [] },
+    { page: "page_suppliers",  icon: "🏭", label: "Suppliers",   children: [
+        {value:"tab_suppliers_directory", label:"Suppliers tab"},
+        {value:"tab_suppliers_purchases", label:"Purchase orders tab"},
+    ] },
 ];
 
 let selectedPages = new Set();

@@ -117,7 +117,10 @@ PERMISSION_PAGES = [
         "key": "page_suppliers",
         "label": "Suppliers",
         "icon": "suppliers",
-        "actions": [],
+        "actions": [
+            {"key": "tab_suppliers_directory", "label": "Suppliers tab"},
+            {"key": "tab_suppliers_purchases", "label": "Purchase orders tab"},
+        ],
     },
 ]
 
@@ -162,6 +165,8 @@ ROLE_DEFINITIONS = {
             "page_farm",
             "page_customers",
             "page_suppliers",
+            "tab_suppliers_directory",
+            "tab_suppliers_purchases",
         },
     },
     "accountant": {

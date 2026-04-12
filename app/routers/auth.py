@@ -32,6 +32,18 @@ from app.core.rate_limit import limiter
 router = APIRouter(tags=["Auth"])
 
 
+def _redis_client():
+    import redis.asyncio as aioredis
+
+    return aioredis.from_url(
+        settings.REDIS_URL,
+        decode_responses=True,
+        socket_connect_timeout=settings.REDIS_SOCKET_CONNECT_TIMEOUT,
+        socket_timeout=settings.REDIS_SOCKET_TIMEOUT,
+        retry_on_timeout=False,
+    )
+
+
 @router.get("/", response_class=HTMLResponse)
 def login_page():
     return """
@@ -251,8 +263,7 @@ async def login(
     _client_ip = request.headers.get("x-forwarded-for", "").split(",")[0].strip() or "unknown"
     _fail_key = f"login_fail:{_client_ip}"
     try:
-        import redis.asyncio as aioredis
-        _redis = aioredis.from_url(settings.REDIS_URL, decode_responses=True)
+        _redis = _redis_client()
         _fails = await _redis.get(_fail_key)
         if _fails and int(_fails) >= 5:
             await _redis.aclose()
@@ -274,8 +285,7 @@ async def login(
                f"Failed login attempt for email: {data.email}")
         await db.commit()
         try:
-            import redis.asyncio as aioredis
-            _redis = aioredis.from_url(settings.REDIS_URL, decode_responses=True)
+            _redis = _redis_client()
             await _redis.incr(_fail_key)
             await _redis.expire(_fail_key, 900)  # 15 minutes TTL
             await _redis.aclose()
@@ -326,8 +336,7 @@ async def login(
 
     # Reset brute-force counter on successful login
     try:
-        import redis.asyncio as aioredis
-        _redis = aioredis.from_url(settings.REDIS_URL, decode_responses=True)
+        _redis = _redis_client()
         await _redis.delete(_fail_key)
         await _redis.aclose()
     except Exception:
@@ -410,7 +419,9 @@ async def logout(
 
 
 @router.post("/auth/refresh")
+@limiter.limit(settings.REFRESH_RATE_LIMIT)
 async def refresh(
+    request: Request,
     response: Response,
     db: AsyncSession = Depends(get_async_session),
     refresh_token: str | None = Cookie(None, alias="refresh_token"),

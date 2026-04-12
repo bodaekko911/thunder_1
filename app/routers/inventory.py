@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import HTMLResponse, StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import func, select
+from sqlalchemy.orm import selectinload
 from typing import Optional
 from pydantic import BaseModel
 from datetime import datetime, date
@@ -109,10 +110,22 @@ async def get_moves(
     limit:      int = 100,
     db: AsyncSession = Depends(get_async_session),
 ):
-    stmt = select(StockMove).join(Product, StockMove.product_id == Product.id)
+    count_stmt = select(StockMove).join(Product, StockMove.product_id == Product.id)
+    stmt = (
+        select(StockMove)
+        .options(selectinload(StockMove.product))
+        .join(Product, StockMove.product_id == Product.id)
+    )
     if product_id:
+        count_stmt = count_stmt.where(StockMove.product_id == product_id)
         stmt = stmt.where(StockMove.product_id == product_id)
     if q:
+        count_stmt = count_stmt.where(
+            Product.name.ilike(f"%{q}%") |
+            Product.sku.ilike(f"%{q}%") |
+            StockMove.ref_type.ilike(f"%{q}%") |
+            StockMove.note.ilike(f"%{q}%")
+        )
         stmt = stmt.where(
             Product.name.ilike(f"%{q}%") |
             Product.sku.ilike(f"%{q}%") |
@@ -122,16 +135,18 @@ async def get_moves(
     if date_from:
         try:
             dt_from = datetime.fromisoformat(date_from)
+            count_stmt = count_stmt.where(StockMove.created_at >= dt_from)
             stmt = stmt.where(StockMove.created_at >= dt_from)
         except ValueError:
             pass
     if date_to:
         try:
             dt_to = datetime.fromisoformat(date_to).replace(hour=23, minute=59, second=59)
+            count_stmt = count_stmt.where(StockMove.created_at <= dt_to)
             stmt = stmt.where(StockMove.created_at <= dt_to)
         except ValueError:
             pass
-    cnt_result = await db.execute(select(func.count()).select_from(stmt.subquery()))
+    cnt_result = await db.execute(select(func.count()).select_from(count_stmt.subquery()))
     total = cnt_result.scalar()
     result = await db.execute(stmt.order_by(StockMove.created_at.desc()).offset(skip).limit(limit))
     moves = result.scalars().all()

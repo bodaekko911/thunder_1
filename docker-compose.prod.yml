@@ -64,6 +64,12 @@ services:
     volumes:
       - ./logs:/app/logs
     command: ["gunicorn", "-c", "gunicorn.conf.py", "app.main:app"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/live').read()"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
 
 volumes:
   postgres_data:

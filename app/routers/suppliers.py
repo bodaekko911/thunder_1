@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import HTMLResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
+from sqlalchemy.orm import selectinload
 from typing import Optional, List
 from pydantic import BaseModel
 
@@ -35,7 +36,7 @@ class PurchaseCreate(BaseModel):
 # ── SUPPLIER API ───────────────────────────────────────
 @router.get("/api/list")
 async def get_suppliers(q: str = "", db: AsyncSession = Depends(get_async_session)):
-    stmt = select(Supplier)
+    stmt = select(Supplier).options(selectinload(Supplier.purchases))
     if q:
         stmt = stmt.where(Supplier.name.ilike(f"%{q}%"))
     result = await db.execute(stmt.order_by(Supplier.name))
@@ -82,7 +83,10 @@ async def delete_supplier(supplier_id: int, db: AsyncSession = Depends(get_async
 # ── PURCHASE API ───────────────────────────────────────
 @router.get("/api/purchases")
 async def get_purchases(supplier_id: int = None, db: AsyncSession = Depends(get_async_session)):
-    stmt = select(Purchase)
+    stmt = select(Purchase).options(
+        selectinload(Purchase.supplier),
+        selectinload(Purchase.items),
+    )
     if supplier_id:
         stmt = stmt.where(Purchase.supplier_id == supplier_id)
     result = await db.execute(stmt.order_by(Purchase.created_at.desc()).limit(100))
@@ -104,7 +108,14 @@ async def get_purchases(supplier_id: int = None, db: AsyncSession = Depends(get_
 
 @router.get("/api/purchase/{purchase_id}")
 async def get_purchase(purchase_id: int, db: AsyncSession = Depends(get_async_session)):
-    result = await db.execute(select(Purchase).where(Purchase.id == purchase_id))
+    result = await db.execute(
+        select(Purchase)
+        .options(
+            selectinload(Purchase.supplier),
+            selectinload(Purchase.items).selectinload(PurchaseItem.product),
+        )
+        .where(Purchase.id == purchase_id)
+    )
     p = result.scalar_one_or_none()
     if not p:
         raise HTTPException(status_code=404, detail="Purchase not found")
@@ -208,7 +219,7 @@ async def products_list(db: AsyncSession = Depends(get_async_session)):
 # ── UI ─────────────────────────────────────────────────
 @router.get("/", response_class=HTMLResponse)
 def suppliers_ui():
-    return """
+    html = """
 <!DOCTYPE html>
 <html>
 <head>
@@ -467,11 +478,11 @@ td.mono { font-family: var(--mono); color: var(--green); }
     <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px;">
         <div class="tabs">
             <button class="tab active" id="tab-suppliers" onclick="switchTab('suppliers')">Suppliers</button>
-            <button class="tab"        id="tab-purchases" onclick="switchTab('purchases')">Purchase Orders</button>
+            <button class="tab" id="tab-purchases" onclick="switchTab('purchases')">Purchase Orders</button>
         </div>
         <div style="display:flex;gap:10px;">
             <button class="btn btn-green" id="add-supplier-btn" onclick="openAddSupplierModal()">+ Add Supplier</button>
-            <button class="btn btn-blue"  id="new-po-btn"       onclick="openNewPOModal()" style="display:none">+ New Purchase Order</button>
+            <button class="btn btn-blue" id="new-po-btn" onclick="openNewPOModal()" style="display:none">+ New Purchase Order</button>
         </div>
     </div>
 
@@ -631,6 +642,13 @@ async function initUser() {
         const avatarEl = document.getElementById("user-avatar");
         if (nameEl) nameEl.innerText = u.name;
         if (avatarEl) avatarEl.innerText = u.name.charAt(0).toUpperCase();
+        currentUserRole = u.role || "";
+        currentUserPermissions = new Set(
+            (typeof u.permissions === "string" ? u.permissions.split(",") : (u.permissions || []))
+                .map(v => String(v).trim())
+                .filter(Boolean)
+        );
+        configureSupplierPermissions();
         return u;
     } catch(e) { window.location.href = "/"; }
 }
@@ -645,22 +663,72 @@ let allProducts = [];
 let currentTab  = "suppliers";
 let editingSupplierId = null;
 let searchTimer = null;
+let currentUserRole = "";
+let currentUserPermissions = new Set();
+const supplierTabPermissions = {
+    suppliers: "tab_suppliers_directory",
+    purchases: "tab_suppliers_purchases",
+};
+
+function hasPermission(permission){
+    return currentUserRole === "admin" || currentUserPermissions.has(permission);
+}
+function hasExplicitSupplierTabPermissions(){
+    return Object.values(supplierTabPermissions).some(p => currentUserPermissions.has(p));
+}
+function canAccessSupplierTab(tab){
+    const permission = supplierTabPermissions[tab];
+    if(!permission) return false;
+    if(hasPermission(permission)) return true;
+    return hasPermission("page_suppliers") && !hasExplicitSupplierTabPermissions();
+}
+function configureSupplierPermissions(){
+    const tabMap = [
+        { id: "tab-suppliers", tab: "suppliers" },
+        { id: "tab-purchases", tab: "purchases" },
+    ];
+    let firstAllowed = null;
+    tabMap.forEach(conf => {
+        const el = document.getElementById(conf.id);
+        if(!el) return;
+        const allowed = canAccessSupplierTab(conf.tab);
+        el.style.display = allowed ? "" : "none";
+        if(allowed && !firstAllowed) firstAllowed = conf.tab;
+    });
+    if(firstAllowed && !canAccessSupplierTab(currentTab)){
+        switchTab(firstAllowed);
+    } else {
+        updateTabActionButtons();
+    }
+}
 
 /* ── INIT ── */
 async function init(){
-    await loadSuppliers();
-    allProducts = await (await fetch("/suppliers/api/products-list")).json();
+    try {
+        await loadSuppliers();
+        allProducts = await (await fetch("/suppliers/api/products-list")).json();
+    } catch (error) {
+        console.error("Suppliers page init failed", error);
+        showToast("Couldn't load supplier data");
+    }
+}
+
+function updateTabActionButtons(){
+    document.getElementById("add-supplier-btn").style.display =
+        currentTab === "suppliers" && canAccessSupplierTab("suppliers") ? "" : "none";
+    document.getElementById("new-po-btn").style.display =
+        currentTab === "purchases" && canAccessSupplierTab("purchases") ? "" : "none";
 }
 
 /* ── TABS ── */
 function switchTab(tab){
+    if(!canAccessSupplierTab(tab)) return;
     currentTab = tab;
     document.getElementById("tab-suppliers").classList.toggle("active", tab==="suppliers");
     document.getElementById("tab-purchases").classList.toggle("active", tab==="purchases");
     document.getElementById("suppliers-section").style.display = tab==="suppliers" ? "" : "none";
     document.getElementById("purchases-section").style.display = tab==="purchases" ? "" : "none";
-    document.getElementById("add-supplier-btn").style.display  = tab==="suppliers" ? "" : "none";
-    document.getElementById("new-po-btn").style.display        = tab==="purchases" ? "" : "none";
+    updateTabActionButtons();
     document.getElementById("search").value = "";
     if(tab==="purchases") loadPurchases();
 }
@@ -673,30 +741,44 @@ function onSearch(){
     }, 300);
 }
 
+function escapeJsString(value){
+    return String(value ?? "")
+        .replace(/\\/g, "\\\\")
+        .replace(/'/g, "\\'")
+        .replace(/\r/g, "\\r")
+        .replace(/\n/g, "\\n");
+}
+
 /* ── SUPPLIERS ── */
 async function loadSuppliers(){
-    let q    = document.getElementById("search").value.trim();
-    let url  = `/suppliers/api/list${q?"?q="+encodeURIComponent(q):""}`;
-    suppliers = await (await fetch(url)).json();
+    try {
+        let q    = document.getElementById("search").value.trim();
+        let url  = `/suppliers/api/list${q?"?q="+encodeURIComponent(q):""}`;
+        suppliers = await (await fetch(url)).json();
 
-    if(!suppliers.length){
+        if(!suppliers.length){
+            document.getElementById("suppliers-body").innerHTML =
+                `<tr><td colspan="6" style="text-align:center;color:var(--muted);padding:40px">No suppliers found</td></tr>`;
+            return;
+        }
+
+        document.getElementById("suppliers-body").innerHTML = suppliers.map(s => `
+            <tr>
+                <td class="name">${s.name}</td>
+                <td style="font-family:var(--mono);font-size:12px">${s.phone}</td>
+                <td style="font-size:12px">${s.email}</td>
+                <td style="font-size:12px">${s.address}</td>
+                <td style="font-family:var(--mono);color:var(--blue)">${s.purchases}</td>
+                <td style="display:flex;gap:6px">
+                    <button class="action-btn" onclick="openEditSupplierModal(${s.id},'${escapeJsString(s.name)}','${escapeJsString(s.phone)}','${escapeJsString(s.email)}','${escapeJsString(s.address)}')">Edit</button>
+                    <button class="action-btn danger" onclick="deleteSupplier(${s.id},'${escapeJsString(s.name)}')">Delete</button>
+                </td>
+            </tr>`).join("");
+    } catch (error) {
+        console.error("Failed to load suppliers", error);
         document.getElementById("suppliers-body").innerHTML =
-            `<tr><td colspan="6" style="text-align:center;color:var(--muted);padding:40px">No suppliers found</td></tr>`;
-        return;
+            `<tr><td colspan="6" style="text-align:center;color:var(--danger);padding:40px">Failed to load suppliers</td></tr>`;
     }
-
-    document.getElementById("suppliers-body").innerHTML = suppliers.map(s => `
-        <tr>
-            <td class="name">${s.name}</td>
-            <td style="font-family:var(--mono);font-size:12px">${s.phone}</td>
-            <td style="font-size:12px">${s.email}</td>
-            <td style="font-size:12px">${s.address}</td>
-            <td style="font-family:var(--mono);color:var(--blue)">${s.purchases}</td>
-            <td style="display:flex;gap:6px">
-                <button class="action-btn" onclick="openEditSupplierModal(${s.id},'${s.name.replace(/'/g,"\\'")}','${s.phone}','${s.email}','${s.address}')">Edit</button>
-                <button class="action-btn danger" onclick="deleteSupplier(${s.id},'${s.name.replace(/'/g,"\\'")}')">Delete</button>
-            </td>
-        </tr>`).join("");
 }
 
 function openAddSupplierModal(){
@@ -755,31 +837,37 @@ async function deleteSupplier(id,name){
 
 /* ── PURCHASES ── */
 async function loadPurchases(){
-    let q    = document.getElementById("search").value.trim();
-    let purchases = await (await fetch("/suppliers/api/purchases")).json();
-    if(q) purchases = purchases.filter(p =>
-        p.supplier.toLowerCase().includes(q.toLowerCase()) ||
-        p.purchase_number.toLowerCase().includes(q.toLowerCase())
-    );
+    try {
+        let q    = document.getElementById("search").value.trim();
+        let purchases = await (await fetch("/suppliers/api/purchases")).json();
+        if(q) purchases = purchases.filter(p =>
+            p.supplier.toLowerCase().includes(q.toLowerCase()) ||
+            p.purchase_number.toLowerCase().includes(q.toLowerCase())
+        );
 
-    if(!purchases.length){
+        if(!purchases.length){
+            document.getElementById("purchases-body").innerHTML =
+                `<tr><td colspan="7" style="text-align:center;color:var(--muted);padding:40px">No purchase orders yet</td></tr>`;
+            return;
+        }
+
+        document.getElementById("purchases-body").innerHTML = purchases.map(p => `
+            <tr>
+                <td style="font-family:var(--mono);font-size:12px;color:var(--blue)">${p.purchase_number}</td>
+                <td class="name">${p.supplier}</td>
+                <td style="color:var(--sub)">${p.items_count} items</td>
+                <td class="mono">${p.total.toFixed(2)}</td>
+                <td><span style="color:var(--green);font-size:12px">● ${p.status}</span></td>
+                <td style="font-size:12px;color:var(--muted)">${p.created_at}</td>
+                <td>
+                    <button class="action-btn green" onclick="viewPO(${p.id})">View</button>
+                </td>
+            </tr>`).join("");
+    } catch (error) {
+        console.error("Failed to load purchases", error);
         document.getElementById("purchases-body").innerHTML =
-            `<tr><td colspan="7" style="text-align:center;color:var(--muted);padding:40px">No purchase orders yet</td></tr>`;
-        return;
+            `<tr><td colspan="7" style="text-align:center;color:var(--danger);padding:40px">Failed to load purchase orders</td></tr>`;
     }
-
-    document.getElementById("purchases-body").innerHTML = purchases.map(p => `
-        <tr>
-            <td style="font-family:var(--mono);font-size:12px;color:var(--blue)">${p.purchase_number}</td>
-            <td class="name">${p.supplier}</td>
-            <td style="color:var(--sub)">${p.items_count} items</td>
-            <td class="mono">${p.total.toFixed(2)}</td>
-            <td><span style="color:var(--green);font-size:12px">● ${p.status}</span></td>
-            <td style="font-size:12px;color:var(--muted)">${p.created_at}</td>
-            <td>
-                <button class="action-btn green" onclick="viewPO(${p.id})">View</button>
-            </td>
-        </tr>`).join("");
 }
 
 /* ── NEW PO MODAL ── */
@@ -929,3 +1017,4 @@ init();
 </body>
 </html>
 """
+    return html

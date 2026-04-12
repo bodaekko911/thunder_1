@@ -943,6 +943,12 @@ async function initUser() {
         const avatarEl = document.getElementById("user-avatar");
         if (nameEl) nameEl.innerText = u.name;
         if (avatarEl) avatarEl.innerText = u.name.charAt(0).toUpperCase();
+        currentUserRole = u.role || "";
+        currentUserPermissions = new Set(
+            (typeof u.permissions === "string" ? u.permissions.split(",") : (u.permissions || []))
+                .map(v => String(v).trim())
+                .filter(Boolean)
+        );
         return u;
     } catch(e) { window.location.href = "/"; }
 }
@@ -951,8 +957,10 @@ async function logout(){
     window.location.href = "/";
 }
   function hasPermission(permission, u){
-      const role = u ? (u.role || "") : "";
-      const perms = new Set(u ? (u.permissions || []) : []);
+      const role = u ? (u.role || "") : currentUserRole;
+      const perms = u
+          ? new Set(typeof u.permissions === "string" ? u.permissions.split(",").map(v => v.trim()).filter(Boolean) : (u.permissions || []))
+          : currentUserPermissions;
       return role === "admin" || perms.has(permission);
   }
   function configureAccountingPermissions(u){
@@ -974,6 +982,8 @@ async function logout(){
   initUser().then(u => { if(u) configureAccountingPermissions(u); });
   let accounts    = [];
 let currentTab  = "accounts";
+let currentUserRole = "";
+let currentUserPermissions = new Set();
 
 async function init(){
     await loadAccounts();

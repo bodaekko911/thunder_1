@@ -806,8 +806,10 @@ async function logout(){
     window.location.href = "/";
 }
   function hasPermission(permission, u){
-      const role = u ? (u.role || "") : "";
-      const perms = new Set(u ? (u.permissions || []) : []);
+      const role = u ? (u.role || "") : currentUserRole;
+      const perms = u
+          ? new Set(typeof u.permissions === "string" ? u.permissions.split(",").map(v => v.trim()).filter(Boolean) : (u.permissions || []))
+          : currentUserPermissions;
       return role === "admin" || perms.has(permission);
   }
   function configureProductionPermissions(u){
@@ -830,6 +832,8 @@ async function logout(){
   initUser().then(u => {
       if(!u) return;
       isAdmin = (u.role === "admin");
+      currentUserRole = u.role || "";
+      currentUserPermissions = new Set((u.permissions || "").split(",").map(v => v.trim()).filter(Boolean));
       configureProductionPermissions(u);
   });
   let allProducts   = [];
@@ -843,6 +847,8 @@ let totalBatches  = 0;
 let isPackagingRecipe = false;
 let editingBatchId    = null;
 let isAdmin = false;
+let currentUserRole = "";
+let currentUserPermissions = new Set();
 const WEIGHT_UNITS = ["gram","g","kg","ltr","ml","liter","litre"];
 
 async function init(){
