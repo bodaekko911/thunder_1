@@ -9,7 +9,7 @@ from decimal import Decimal
 from datetime import date, datetime
 
 from app.database import get_async_session
-from app.core.permissions import get_current_user, require_permission
+from app.core.permissions import get_current_user, require_action, require_permission
 from app.core.log import record
 from app.models.b2b import B2BClient, B2BInvoice, B2BInvoiceItem, Consignment, ConsignmentItem, B2BRefund, B2BRefundItem, B2BClientPrice
 from app.models.product import Product
@@ -206,7 +206,7 @@ async def get_clients(q: str = "", db: AsyncSession = Depends(get_async_session)
         for c in clients
     ]
 
-@router.post("/api/clients")
+@router.post("/api/clients", dependencies=[Depends(require_action("b2b", "clients", "create_client"))])
 async def create_client(data: ClientCreate, db: AsyncSession = Depends(get_async_session), current_user: User = Depends(get_current_user)):
     c = B2BClient(
         name=data.name, contact_person=data.contact_person,
@@ -219,7 +219,7 @@ async def create_client(data: ClientCreate, db: AsyncSession = Depends(get_async
     db.add(c); await db.commit(); await db.refresh(c)
     return {"id": c.id, "name": c.name}
 
-@router.put("/api/clients/{client_id}")
+@router.put("/api/clients/{client_id}", dependencies=[Depends(require_action("b2b", "clients", "update_client"))])
 async def update_client(client_id: int, data: ClientUpdate, db: AsyncSession = Depends(get_async_session), current_user: User = Depends(get_current_user)):
     _r = await db.execute(select(B2BClient).where(B2BClient.id == client_id))
     c = _r.scalar_one_or_none()
@@ -237,7 +237,7 @@ async def update_client(client_id: int, data: ClientUpdate, db: AsyncSession = D
     await db.commit()
     return {"ok": True}
 
-@router.delete("/api/clients/{client_id}")
+@router.delete("/api/clients/{client_id}", dependencies=[Depends(require_action("b2b", "clients", "delete_client"))])
 async def delete_client(client_id: int, db: AsyncSession = Depends(get_async_session), current_user: User = Depends(get_current_user)):
     _r = await db.execute(select(B2BClient).where(B2BClient.id == client_id))
     c = _r.scalar_one_or_none()
@@ -300,7 +300,7 @@ async def get_invoices(client_id: int = None, skip: int = 0, limit: int = 100, d
         ],
     }
 
-@router.post("/api/invoices")
+@router.post("/api/invoices", dependencies=[Depends(require_action("b2b", "invoices", "create"))])
 async def create_invoice(data: InvoiceCreate, db: AsyncSession = Depends(get_async_session), current_user: User = Depends(get_current_user)):
     await _seed_deferred_revenue(db)
 
@@ -400,7 +400,7 @@ async def create_invoice(data: InvoiceCreate, db: AsyncSession = Depends(get_asy
     return {"id": invoice.id, "invoice_number": invoice_number, "total": total}
 
 
-@router.put("/api/invoices/{invoice_id}")
+@router.put("/api/invoices/{invoice_id}", dependencies=[Depends(require_action("b2b", "invoices", "update"))])
 async def edit_invoice(invoice_id: int, data: InvoiceCreate, db: AsyncSession = Depends(get_async_session), current_user: User = Depends(get_current_user)):
     _r = await db.execute(
         select(B2BInvoice)
@@ -521,7 +521,7 @@ async def edit_invoice(invoice_id: int, data: InvoiceCreate, db: AsyncSession = 
     return {"ok": True, "invoice_number": invoice.invoice_number, "total": total}
 
 
-@router.delete("/api/invoices/{invoice_id}", dependencies=[Depends(require_permission("action_b2b_delete"))])
+@router.delete("/api/invoices/{invoice_id}", dependencies=[Depends(require_action("b2b", "invoices", "delete"))])
 async def delete_invoice(invoice_id: int, db: AsyncSession = Depends(get_async_session), current_user: User = Depends(get_current_user)):
     _r = await db.execute(
         select(B2BInvoice)
@@ -554,7 +554,7 @@ async def delete_invoice(invoice_id: int, db: AsyncSession = Depends(get_async_s
     return {"ok": True}
 
 
-@router.post("/api/invoices/{invoice_id}/pay", dependencies=[Depends(require_permission("action_b2b_collect"))])
+@router.post("/api/invoices/{invoice_id}/pay", dependencies=[Depends(require_action("b2b", "invoices", "approve"))])
 async def record_payment(invoice_id: int, data: PaymentRecord, db: AsyncSession = Depends(get_async_session), current_user: User = Depends(get_current_user)):
     """
     Collect payment on a full_payment invoice.
@@ -633,7 +633,7 @@ async def get_consignments(db: AsyncSession = Depends(get_async_session)):
         for c in conses
     ]
 
-@router.post("/api/consignments/{cons_id}/settle")
+@router.post("/api/consignments/{cons_id}/settle", dependencies=[Depends(require_action("b2b", "invoices", "settle"))])
 async def settle_consignment(cons_id: int, data: ConsignmentSettle, db: AsyncSession = Depends(get_async_session), current_user: User = Depends(get_current_user)):
     """
     Settle consignment — for each qty sold, move from Deferred Revenue → Sales Revenue.
@@ -712,7 +712,7 @@ class ConsignmentPayment(BaseModel):
     month_label: Optional[str] = None
     notes:       Optional[str] = None
 
-@router.post("/api/invoices/{invoice_id}/consignment-payment", dependencies=[Depends(require_permission("action_b2b_collect"))])
+@router.post("/api/invoices/{invoice_id}/consignment-payment", dependencies=[Depends(require_action("b2b", "invoices", "approve"))])
 async def consignment_payment(invoice_id: int, data: ConsignmentPayment, db: AsyncSession = Depends(get_async_session), current_user: User = Depends(get_current_user)):
     """
     Record a cash payment from a consignment client.
@@ -755,7 +755,7 @@ async def consignment_payment(invoice_id: int, data: ConsignmentPayment, db: Asy
     await db.commit()
     return {"ok": True, "invoice_number": invoice.invoice_number, "amount": amount, "status": invoice.status}
 
-@router.post("/api/refunds")
+@router.post("/api/refunds", dependencies=[Depends(require_action("b2b", "invoices", "refund"))])
 async def create_client_refund(data: ClientRefundCreate, db: AsyncSession = Depends(get_async_session), current_user: User = Depends(get_current_user)):
     _r = await db.execute(select(B2BClient).where(B2BClient.id == data.client_id, B2BClient.is_active == True))
     client = _r.scalar_one_or_none()

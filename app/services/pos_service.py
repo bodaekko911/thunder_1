@@ -9,6 +9,7 @@ from app.models.customer import Customer
 from app.models.inventory import StockMove
 from app.models.accounting import Account, Journal, JournalEntry
 from app.schemas.invoice import InvoiceCreate
+from app.services.barcode_service import normalize_barcode_value
 from app.core.log import record
 
 
@@ -46,8 +47,13 @@ async def create_invoice(db: AsyncSession, data: InvoiceCreate, user_id: int) ->
         line_items = []
 
         for item in data.items:
-            _r = await db.execute(select(Product).where(Product.sku == item.sku))
-            product = _r.scalar_one_or_none()
+            normalized_sku = normalize_barcode_value(item.sku)
+            _r = await db.execute(select(Product).where(Product.is_active == True))
+            products = _r.scalars().all()
+            product = next(
+                (candidate for candidate in products if normalize_barcode_value(candidate.sku) == normalized_sku),
+                None,
+            )
             if not product:
                 raise HTTPException(status_code=404, detail=f"Product not found: {item.sku}")
             if product.stock < item.qty:

@@ -1,128 +1,178 @@
 from __future__ import annotations
 
+from collections import defaultdict
 from typing import Iterable
 
-PERMISSION_PAGES = [
+
+PERMISSION_MATRIX = [
     {
-        "key": "page_dashboard",
+        "module": "dashboard",
+        "resource": "overview",
         "label": "Dashboard",
         "icon": "chart",
-        "actions": [],
+        "actions": [
+            {"action": "view", "key": "page_dashboard", "label": "View dashboard"},
+        ],
     },
     {
-        "key": "page_reports",
+        "module": "reports",
+        "resource": "reports",
         "label": "Reports",
         "icon": "reports",
         "actions": [
-            {"key": "tab_reports_sales", "label": "Sales tab"},
-            {"key": "tab_reports_pl", "label": "P&L tab"},
-            {"key": "tab_reports_inventory", "label": "Inventory tab"},
-            {"key": "tab_reports_transactions", "label": "Transactions tab"},
-            {"key": "action_export_excel", "label": "Export to Excel"},
+            {"action": "view", "key": "page_reports", "label": "Open reports"},
+            {"action": "view_sales", "key": "tab_reports_sales", "label": "Sales tab"},
+            {"action": "view_pl", "key": "tab_reports_pl", "label": "P&L tab"},
+            {"action": "view_inventory", "key": "tab_reports_inventory", "label": "Inventory tab"},
+            {"action": "view_transactions", "key": "tab_reports_transactions", "label": "Transactions tab"},
+            {"action": "export", "key": "action_export_excel", "label": "Export to Excel"},
         ],
     },
     {
-        "key": "page_pos",
+        "module": "pos",
+        "resource": "sales",
         "label": "POS",
         "icon": "pos",
         "actions": [
-            {"key": "action_pos_delete_invoice", "label": "Delete invoices"},
-            {"key": "action_pos_discount", "label": "Apply discounts"},
-            {"key": "action_pos_settle_later", "label": "Settle later"},
+            {"action": "view", "key": "page_pos", "label": "Open POS"},
+            {"action": "create", "key": "action_pos_create_sale", "label": "Create sales"},
+            {"action": "delete", "key": "action_pos_delete_invoice", "label": "Delete invoices"},
+            {"action": "discount_override", "key": "action_pos_discount", "label": "Discount override"},
+            {"action": "approve", "key": "action_pos_settle_later", "label": "Approve settle later"},
+            {"action": "refund", "key": "action_pos_refund", "label": "Create retail refunds"},
         ],
     },
     {
-        "key": "page_b2b",
+        "module": "b2b",
+        "resource": "clients",
         "label": "B2B",
         "icon": "b2b",
         "actions": [
-            {"key": "tab_b2b_clients", "label": "Clients tab"},
-            {"key": "tab_b2b_invoices", "label": "Invoices tab"},
-            {"key": "tab_b2b_consignment", "label": "Consignment tab"},
-            {"key": "action_b2b_delete", "label": "Delete invoices"},
-            {"key": "action_b2b_collect", "label": "Collect payments"},
+            {"action": "view", "key": "page_b2b", "label": "Open B2B"},
+            {"action": "view_clients", "key": "tab_b2b_clients", "label": "Clients tab"},
+            {"action": "view_invoices", "key": "tab_b2b_invoices", "label": "Invoices tab"},
+            {"action": "view_consignment", "key": "tab_b2b_consignment", "label": "Consignment tab"},
+            {"action": "create_client", "key": "action_b2b_clients_create", "label": "Create clients"},
+            {"action": "update_client", "key": "action_b2b_clients_update", "label": "Update clients"},
+            {"action": "delete_client", "key": "action_b2b_clients_delete", "label": "Delete clients"},
         ],
     },
     {
-        "key": "page_inventory",
+        "module": "b2b",
+        "resource": "invoices",
+        "label": "B2B Invoices",
+        "icon": "b2b",
+        "actions": [
+            {"action": "create", "key": "action_b2b_invoices_create", "label": "Create invoices"},
+            {"action": "update", "key": "action_b2b_invoices_update", "label": "Update invoices"},
+            {"action": "delete", "key": "action_b2b_delete", "label": "Delete invoices"},
+            {"action": "approve", "key": "action_b2b_collect", "label": "Collect payments"},
+            {"action": "refund", "key": "action_b2b_refund", "label": "Create client refunds"},
+            {"action": "settle", "key": "action_b2b_consignment_settle", "label": "Settle consignments"},
+        ],
+    },
+    {
+        "module": "inventory",
+        "resource": "stock",
         "label": "Inventory",
         "icon": "inventory",
         "actions": [
-            {"key": "action_inventory_adjust", "label": "Adjust stock"},
+            {"action": "view", "key": "page_inventory", "label": "Open inventory"},
+            {"action": "update", "key": "action_inventory_adjust", "label": "Adjust stock"},
         ],
     },
     {
-        "key": "page_products",
+        "module": "products",
+        "resource": "products",
         "label": "Products",
         "icon": "products",
         "actions": [
-            {"key": "action_products_edit", "label": "Edit products"},
-            {"key": "action_products_delete", "label": "Delete products"},
+            {"action": "view", "key": "page_products", "label": "Open products"},
+            {"action": "update", "key": "action_products_edit", "label": "Edit products"},
+            {"action": "delete", "key": "action_products_delete", "label": "Delete products"},
         ],
     },
     {
-        "key": "page_import",
+        "module": "import",
+        "resource": "imports",
         "label": "Import Data",
         "icon": "import",
-        "actions": [],
+        "actions": [
+            {"action": "view", "key": "page_import", "label": "Open import data"},
+        ],
     },
     {
-        "key": "page_production",
+        "module": "production",
+        "resource": "production",
         "label": "Production",
         "icon": "production",
         "actions": [
-            {"key": "tab_production_batches", "label": "Batches tab"},
-            {"key": "tab_production_packaging", "label": "Packaging tab"},
-            {"key": "tab_production_spoilage", "label": "Spoilage tab"},
-            {"key": "tab_production_recipes", "label": "Recipes tab"},
+            {"action": "view", "key": "page_production", "label": "Open production"},
+            {"action": "view_batches", "key": "tab_production_batches", "label": "Batches tab"},
+            {"action": "view_packaging", "key": "tab_production_packaging", "label": "Packaging tab"},
+            {"action": "view_spoilage", "key": "tab_production_spoilage", "label": "Spoilage tab"},
+            {"action": "view_recipes", "key": "tab_production_recipes", "label": "Recipes tab"},
         ],
     },
     {
-        "key": "page_farm",
+        "module": "farm",
+        "resource": "intake",
         "label": "Farm Intake",
         "icon": "farm",
-        "actions": [],
+        "actions": [
+            {"action": "view", "key": "page_farm", "label": "Open farm intake"},
+        ],
     },
     {
-        "key": "page_hr",
+        "module": "hr",
+        "resource": "payroll",
         "label": "HR & Payroll",
         "icon": "hr",
         "actions": [
-            {"key": "tab_hr_employees", "label": "Employees tab"},
-            {"key": "tab_hr_attendance", "label": "Attendance tab"},
-            {"key": "tab_hr_payroll", "label": "Payroll tab"},
-            {"key": "action_hr_run_payroll", "label": "Run payroll"},
-            {"key": "action_hr_mark_paid", "label": "Mark payroll paid"},
+            {"action": "view", "key": "page_hr", "label": "Open HR"},
+            {"action": "view_employees", "key": "tab_hr_employees", "label": "Employees tab"},
+            {"action": "view_attendance", "key": "tab_hr_attendance", "label": "Attendance tab"},
+            {"action": "view_payroll", "key": "tab_hr_payroll", "label": "Payroll tab"},
+            {"action": "approve", "key": "action_hr_run_payroll", "label": "Run payroll"},
+            {"action": "mark_paid", "key": "action_hr_mark_paid", "label": "Mark payroll paid"},
         ],
     },
     {
-        "key": "page_accounting",
+        "module": "accounting",
+        "resource": "journals",
         "label": "Accounting",
         "icon": "accounting",
         "actions": [
-            {"key": "tab_accounting_pos", "label": "POS invoices tab"},
-            {"key": "tab_accounting_b2b", "label": "B2B invoices tab"},
-            {"key": "tab_accounting_journal", "label": "Journal tab"},
-            {"key": "tab_accounting_pl", "label": "P&L tab"},
-            {"key": "action_accounting_post_journal", "label": "Post journal entries"},
+            {"action": "view", "key": "page_accounting", "label": "Open accounting"},
+            {"action": "view_pos", "key": "tab_accounting_pos", "label": "POS invoices tab"},
+            {"action": "view_b2b", "key": "tab_accounting_b2b", "label": "B2B invoices tab"},
+            {"action": "view_journal", "key": "tab_accounting_journal", "label": "Journal tab"},
+            {"action": "view_pl", "key": "tab_accounting_pl", "label": "P&L tab"},
+            {"action": "create", "key": "action_accounting_post_journal", "label": "Post journal entries"},
         ],
     },
     {
-        "key": "page_customers",
+        "module": "customers",
+        "resource": "customers",
         "label": "Customers",
         "icon": "customers",
-        "actions": [],
+        "actions": [
+            {"action": "view", "key": "page_customers", "label": "Open customers"},
+        ],
     },
     {
-        "key": "page_suppliers",
+        "module": "suppliers",
+        "resource": "suppliers",
         "label": "Suppliers",
         "icon": "suppliers",
         "actions": [
-            {"key": "tab_suppliers_directory", "label": "Suppliers tab"},
-            {"key": "tab_suppliers_purchases", "label": "Purchase orders tab"},
+            {"action": "view", "key": "page_suppliers", "label": "Open suppliers"},
+            {"action": "view_directory", "key": "tab_suppliers_directory", "label": "Suppliers tab"},
+            {"action": "view_purchases", "key": "tab_suppliers_purchases", "label": "Purchase orders tab"},
         ],
     },
 ]
+
 
 ROLE_DEFINITIONS = {
     "cashier": {
@@ -130,6 +180,7 @@ ROLE_DEFINITIONS = {
         "description": "POS terminal access with checkout actions.",
         "permissions": {
             "page_pos",
+            "action_pos_create_sale",
             "action_pos_discount",
             "action_pos_settle_later",
         },
@@ -145,13 +196,23 @@ ROLE_DEFINITIONS = {
             "tab_reports_transactions",
             "action_export_excel",
             "page_pos",
+            "action_pos_create_sale",
             "action_pos_discount",
             "action_pos_settle_later",
+            "action_pos_refund",
             "page_b2b",
             "tab_b2b_clients",
             "tab_b2b_invoices",
             "tab_b2b_consignment",
+            "action_b2b_clients_create",
+            "action_b2b_clients_update",
+            "action_b2b_clients_delete",
+            "action_b2b_invoices_create",
+            "action_b2b_invoices_update",
+            "action_b2b_delete",
             "action_b2b_collect",
+            "action_b2b_refund",
+            "action_b2b_consignment_settle",
             "page_inventory",
             "action_inventory_adjust",
             "page_products",
@@ -222,9 +283,8 @@ ROLE_DEFINITIONS = {
 
 
 def iter_known_permissions() -> Iterable[str]:
-    for page in PERMISSION_PAGES:
-        yield page["key"]
-        for action in page["actions"]:
+    for entry in PERMISSION_MATRIX:
+        for action in entry["actions"]:
             yield action["key"]
 
 
@@ -239,9 +299,86 @@ def is_known_permission(permission: str) -> bool:
     return permission == "*" or permission in KNOWN_PERMISSIONS
 
 
+def get_permission_key(module: str, resource: str, action: str) -> str:
+    for entry in PERMISSION_MATRIX:
+        if entry["module"] != module or entry["resource"] != resource:
+            continue
+        for action_entry in entry["actions"]:
+            if action_entry["action"] == action:
+                return action_entry["key"]
+    raise KeyError(f"Unknown permission action: {module}.{resource}.{action}")
+
+
+def _build_page_catalog() -> list[dict]:
+    pages: dict[str, dict] = {}
+    for entry in PERMISSION_MATRIX:
+        page_key = None
+        page_label = entry["label"]
+        icon = entry["icon"]
+        children = []
+        for action in entry["actions"]:
+            if action["action"] == "view" and action["key"].startswith("page_"):
+                page_key = action["key"]
+                page_label = entry["label"]
+            else:
+                children.append({"key": action["key"], "label": action["label"]})
+        if page_key is None:
+            continue
+        page_entry = pages.setdefault(
+            page_key,
+            {"key": page_key, "label": page_label, "icon": icon, "actions": []},
+        )
+        page_entry["actions"].extend(children)
+
+    for page_entry in pages.values():
+        deduped = {action["key"]: action for action in page_entry["actions"]}
+        page_entry["actions"] = list(deduped.values())
+    return list(pages.values())
+
+
+PERMISSION_PAGES = _build_page_catalog()
+
+
 def get_permission_catalog() -> dict:
+    role_permissions = {
+        role_key: set(role_data["permissions"])
+        for role_key, role_data in ROLE_DEFINITIONS.items()
+    }
+    matrix = []
+    for entry in PERMISSION_MATRIX:
+        actions = []
+        for action in entry["actions"]:
+            allowed_roles = [
+                role_key
+                for role_key, permissions in role_permissions.items()
+                if "*" in permissions or action["key"] in permissions
+            ]
+            actions.append(
+                {
+                    "action": action["action"],
+                    "key": action["key"],
+                    "label": action["label"],
+                    "roles": allowed_roles,
+                }
+            )
+        matrix.append(
+            {
+                "module": entry["module"],
+                "resource": entry["resource"],
+                "label": entry["label"],
+                "icon": entry["icon"],
+                "actions": actions,
+            }
+        )
+
+    grouped_roles: dict[str, list[str]] = defaultdict(list)
+    for entry in matrix:
+        for action in entry["actions"]:
+            grouped_roles[action["key"]] = list(action["roles"])
+
     return {
         "pages": PERMISSION_PAGES,
+        "matrix": matrix,
         "roles": [
             {
                 "key": role_key,
@@ -251,4 +388,5 @@ def get_permission_catalog() -> dict:
             }
             for role_key, role_data in ROLE_DEFINITIONS.items()
         ],
+        "role_access": grouped_roles,
     }

@@ -17,9 +17,12 @@ def test_database_url_normalizes_to_asyncpg() -> None:
     assert settings.DATABASE_URL == "postgresql+asyncpg://erp:erp@localhost:5432/erp"
 
 
-def test_production_settings_require_allowed_hosts() -> None:
+def test_production_settings_require_allowed_hosts(monkeypatch) -> None:
+    monkeypatch.delenv("ALLOWED_HOSTS", raising=False)
+
     with pytest.raises(ValueError, match="ALLOWED_HOSTS must be set in production"):
         ProductionSettings(
+            APP_ENV="production",
             SECRET_KEY="x" * 32,
             DATABASE_URL="postgresql://erp:erp@localhost:5432/erp",
             ADMIN_PASSWORD="strong-password",
@@ -31,6 +34,7 @@ def test_production_settings_require_allowed_hosts() -> None:
 def test_production_settings_reject_wildcard_cors_with_credentials() -> None:
     with pytest.raises(ValueError, match="CORS_ALLOW_ORIGINS cannot contain '\\*'"):
         ProductionSettings(
+            APP_ENV="production",
             SECRET_KEY="x" * 32,
             DATABASE_URL="postgresql://erp:erp@localhost:5432/erp",
             ADMIN_PASSWORD="strong-password",

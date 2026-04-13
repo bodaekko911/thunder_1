@@ -3,8 +3,10 @@ from fastapi.responses import HTMLResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import func, select
 from datetime import date, datetime, timedelta
+from pydantic import BaseModel
 
 from app.core.permissions import require_permission
+from app.core.security import get_current_user
 from app.database import get_async_session
 from app.models.invoice import Invoice, InvoiceItem
 from app.models.product import Product
@@ -14,11 +16,17 @@ from app.models.farm import FarmDelivery
 from app.models.spoilage import SpoilageRecord
 from app.models.production import ProductionBatch
 from app.models.refund import RetailRefund
+from app.models.user import User
+from app.services.dashboard_assistant_service import answer_dashboard_question
 
 router = APIRouter(
     tags=["Dashboard"],
     dependencies=[Depends(require_permission("page_dashboard"))],
 )
+
+
+class DashboardAssistantQuestion(BaseModel):
+    question: str
 
 
 @router.get("/dashboard/data")
@@ -247,6 +255,19 @@ async def dashboard_data(db: AsyncSession = Depends(get_async_session)):
     }
 
 
+@router.post("/dashboard/assistant")
+async def dashboard_assistant(
+    data: DashboardAssistantQuestion,
+    db: AsyncSession = Depends(get_async_session),
+    current_user: User = Depends(get_current_user),
+):
+    return await answer_dashboard_question(
+        db,
+        question=data.question,
+        current_user=current_user,
+    )
+
+
 @router.get("/dashboard", response_class=HTMLResponse)
 def dashboard_ui():
     return """<!DOCTYPE html>
@@ -342,6 +363,15 @@ nav{position:sticky;top:0;z-index:100;display:flex;align-items:center;gap:10px;p
 .panel-title{font-size:13px;font-weight:700;letter-spacing:.5px;}
 .panel-badge{font-size:11px;font-weight:700;padding:3px 9px;border-radius:20px;}
 .panel-body{padding:16px 18px;}
+.assistant-panel{background:var(--card);border:1px solid var(--border);border-radius:var(--r);padding:16px 18px;display:flex;flex-direction:column;gap:12px;}
+.assistant-row{display:flex;gap:10px;flex-wrap:wrap;}
+.assistant-input{flex:1;min-width:240px;background:var(--card2);border:1px solid var(--border2);border-radius:12px;padding:12px 14px;color:var(--text);font-family:var(--sans);font-size:14px;outline:none;}
+.assistant-input:focus{border-color:rgba(0,255,157,.3);}
+.assistant-btn{padding:12px 16px;border:none;border-radius:12px;background:linear-gradient(135deg,var(--green),var(--blue));color:#021a10;font-family:var(--sans);font-size:13px;font-weight:800;cursor:pointer;}
+.assistant-hints{display:flex;gap:8px;flex-wrap:wrap;}
+.assistant-chip{padding:6px 10px;border-radius:999px;border:1px solid var(--border2);background:var(--card2);color:var(--sub);font-size:11px;cursor:pointer;}
+.assistant-result{min-height:44px;color:var(--sub);font-size:13px;line-height:1.5;}
+.assistant-meta{font-size:11px;color:var(--muted);font-family:var(--mono);margin-top:6px;}
 
 /* CHART */
 .chart-wrap{display:flex;align-items:flex-end;gap:6px;height:140px;padding:0 18px 14px;border-top:1px solid var(--border);}
@@ -434,6 +464,27 @@ tr:hover td{background:rgba(255,255,255,.02);}
     <div>
         <div class="page-title">Dashboard</div>
         <div class="page-sub" id="date-sub"></div>
+    </div>
+
+    <div class="assistant-panel">
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap">
+            <div>
+                <div class="panel-title">Dashboard Assistant</div>
+                <div class="page-sub" style="margin-top:4px">Ask a supported business question using current dashboard data.</div>
+            </div>
+        </div>
+        <div class="assistant-row">
+            <input id="assistant-question" class="assistant-input" placeholder="Try: today's sales, top products, low-stock items, expenses this month, unpaid invoices">
+            <button class="assistant-btn" onclick="askAssistant()">Ask</button>
+        </div>
+        <div class="assistant-hints">
+            <button class="assistant-chip" onclick="askPresetQuestion(`today's sales`)">Today's sales</button>
+            <button class="assistant-chip" onclick="askPresetQuestion('top products')">Top products</button>
+            <button class="assistant-chip" onclick="askPresetQuestion('low-stock items')">Low-stock items</button>
+            <button class="assistant-chip" onclick="askPresetQuestion('expenses this month')">Expenses this month</button>
+            <button class="assistant-chip" onclick="askPresetQuestion('unpaid invoices')">Unpaid invoices</button>
+        </div>
+        <div id="assistant-result" class="assistant-result">Supported questions: today's sales, top products, low-stock items, expenses this month, unpaid invoices.</div>
     </div>
 
     <!-- ROW 1: REVENUE STATS -->
@@ -733,6 +784,109 @@ async function load(){
             `<div style="color:var(--danger)">Failed to load. <a href="/dashboard" style="color:var(--green)">Retry</a></div>`;
     }
 }
+
+function renderAssistantResult(data){
+    const resultEl = document.getElementById("assistant-result");
+    if (!resultEl) return;
+
+    const params = data.parameters && Object.keys(data.parameters).length
+        ? `<div class="assistant-meta">Intent: ${data.intent || "unsupported"} · Parameters: ${JSON.stringify(data.parameters)}</div>`
+        : `<div class="assistant-meta">Intent: ${data.intent || "unsupported"}</div>`;
+
+    if (!data.supported || !data.result) {
+        resultEl.innerHTML = `${params}<div>${data.message || "That question is not supported yet."}</div>`;
+        return;
+    }
+
+    if (data.intent === "sales_today") {
+        resultEl.innerHTML = `${params}
+            <div><strong>${data.message}</strong></div>
+            <div>Total: ${Number(data.result.total_sales || 0).toFixed(2)} · POS: ${Number(data.result.pos_sales || 0).toFixed(2)} · B2B: ${Number(data.result.b2b_sales || 0).toFixed(2)} · Refunds: ${Number(data.result.refunds || 0).toFixed(2)}</div>`;
+        return;
+    }
+
+    if (data.intent === "top_products") {
+        const items = (data.result.items || []).slice(0, 5);
+        resultEl.innerHTML = `${params}
+            <div><strong>${data.message}</strong></div>
+            ${items.length
+                ? `<div>${items.map(item => `${item.name} (${Number(item.qty || 0).toFixed(2)} units, ${Number(item.revenue || 0).toFixed(2)})`).join("<br>")}</div>`
+                : `<div>No top-product data is available yet.</div>`}`;
+        return;
+    }
+
+    if (data.intent === "low_stock") {
+        const items = (data.result.items || []).slice(0, 5);
+        resultEl.innerHTML = `${params}
+            <div><strong>${data.message}</strong></div>
+            ${items.length
+                ? `<div>${items.map(item => `${item.name} (${item.sku}) · stock ${Number(item.stock || 0).toFixed(2)}`).join("<br>")}</div>`
+                : `<div>No low-stock items right now.</div>`}`;
+        return;
+    }
+
+    if (data.intent === "expenses_month") {
+        const breakdown = (data.result.breakdown || []).slice(0, 5);
+        resultEl.innerHTML = `${params}
+            <div><strong>${data.message}</strong></div>
+            <div>This month: ${Number(data.result.this_month || 0).toFixed(2)} · Last month: ${Number(data.result.last_month || 0).toFixed(2)}</div>
+            ${breakdown.length
+                ? `<div style="margin-top:8px">${breakdown.map(item => `${item.name || item.category}: ${Number(item.total || 0).toFixed(2)}`).join("<br>")}</div>`
+                : ""}`;
+        return;
+    }
+
+    if (data.intent === "unpaid_invoices") {
+        resultEl.innerHTML = `${params}
+            <div><strong>${data.message}</strong></div>
+            <div>POS unpaid: ${data.result.pos_unpaid_count || 0} · B2B unpaid/partial: ${data.result.b2b_unpaid_count || 0} · B2B outstanding: ${Number(data.result.b2b_outstanding_amount || 0).toFixed(2)}</div>`;
+        return;
+    }
+
+    resultEl.innerHTML = `${params}<div>${data.message || "Answer ready."}</div>`;
+}
+
+async function askAssistant(){
+    const input = document.getElementById("assistant-question");
+    const resultEl = document.getElementById("assistant-result");
+    const question = (input?.value || "").trim();
+    if (!question) {
+        resultEl.innerHTML = `<div class="assistant-meta">Intent: unsupported</div><div>Please enter a dashboard question first.</div>`;
+        return;
+    }
+
+    resultEl.innerHTML = `<div class="assistant-meta">Checking question...</div><div>Looking up the latest dashboard answer.</div>`;
+
+    try {
+        const response = await fetch("/dashboard/assistant", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ question }),
+        });
+        const data = await response.json();
+        if (!response.ok) {
+            resultEl.innerHTML = `<div class="assistant-meta">Request failed</div><div>${data.detail || "The assistant could not answer that question right now."}</div>`;
+            return;
+        }
+        renderAssistantResult(data);
+    } catch (error) {
+        console.error(error);
+        resultEl.innerHTML = `<div class="assistant-meta">Request failed</div><div>The assistant is temporarily unavailable. Please try again.</div>`;
+    }
+}
+
+function askPresetQuestion(question){
+    const input = document.getElementById("assistant-question");
+    if (input) input.value = question;
+    askAssistant();
+}
+
+document.getElementById("assistant-question")?.addEventListener("keydown", function(event){
+    if (event.key === "Enter") {
+        event.preventDefault();
+        askAssistant();
+    }
+});
 
 load();
 </script>

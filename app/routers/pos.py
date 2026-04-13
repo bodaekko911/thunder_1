@@ -7,12 +7,14 @@ from decimal import Decimal
 from datetime import datetime
 
 from app.database import get_async_session
-from app.core.permissions import require_permission
+from app.core.log import logger
+from app.core.permissions import ensure_action_permission, require_action, require_permission
 from app.core.security import get_current_user
 from app.models.product import Product
 from app.models.customer import Customer
 from app.models.invoice import Invoice
 from app.schemas.invoice import InvoiceCollectionRequest, InvoiceCreate
+from app.services.barcode_service import find_product_by_barcode, normalize_barcode_value
 from app.services.pos_service import create_invoice
 
 router = APIRouter(
@@ -36,6 +38,14 @@ async def search_products(
     q: str = Query("", max_length=100),
     db: AsyncSession = Depends(get_async_session),
 ):
+    normalized_query = normalize_barcode_value(q)
+    if normalized_query:
+        exact_match = await find_product_by_barcode(db, normalized_query)
+        if exact_match is not None:
+            return [
+                {"sku": exact_match.sku, "name": exact_match.name, "price": float(exact_match.price), "stock": float(exact_match.stock)}
+            ]
+
     _r = await db.execute(
         select(Product)
         .where(
@@ -51,6 +61,43 @@ async def search_products(
     ]
 
 
+@router.get("/barcode-lookup")
+async def barcode_lookup(
+    barcode: str = Query("", max_length=200),
+    db: AsyncSession = Depends(get_async_session),
+):
+    normalized = normalize_barcode_value(barcode)
+    if not normalized:
+        return {
+            "found": False,
+            "barcode": normalized,
+            "detail": "Scan a barcode or enter a SKU.",
+        }
+
+    product = await find_product_by_barcode(db, normalized)
+    if product is None:
+        logger.warning(
+            "Barcode lookup failed",
+            extra={"barcode": normalized, "path": "/barcode-lookup"},
+        )
+        return {
+            "found": False,
+            "barcode": normalized,
+            "detail": f"No product found for barcode '{normalized}'.",
+        }
+
+    return {
+        "found": True,
+        "barcode": normalized,
+        "product": {
+            "sku": product.sku,
+            "name": product.name,
+            "price": float(product.price),
+            "stock": float(product.stock),
+        },
+    }
+
+
 @router.get("/customers")
 async def list_customers(db: AsyncSession = Depends(get_async_session)):
     _r = await db.execute(select(Customer).order_by(Customer.name))
@@ -58,12 +105,16 @@ async def list_customers(db: AsyncSession = Depends(get_async_session)):
     return [{"id": c.id, "name": c.name, "phone": c.phone} for c in customers]
 
 
-@router.post("/invoice")
+@router.post("/invoice", dependencies=[Depends(require_action("pos", "sales", "create"))])
 async def checkout(
     data: InvoiceCreate,
     db: AsyncSession = Depends(get_async_session),
     user=Depends(get_current_user),
 ):
+    if data.discount_percent > 0:
+        await ensure_action_permission(db, user, "pos", "sales", "discount_override", path="/invoice")
+    if data.settle_later:
+        await ensure_action_permission(db, user, "pos", "sales", "approve", path="/invoice")
     user_id = user.id
     invoice = create_invoice(db=db, data=data, user_id=user_id)
     return {
@@ -108,7 +159,7 @@ async def get_unpaid_invoices(db: AsyncSession = Depends(get_async_session)):
     return result
 
 
-@router.post("/invoice/{invoice_id}/collect")
+@router.post("/invoice/{invoice_id}/collect", dependencies=[Depends(require_action("pos", "sales", "approve"))])
 async def collect_payment(
     invoice_id: int,
     data: InvoiceCollectionRequest,
@@ -482,7 +533,7 @@ body.light .toast{background:var(--card);}
         <svg width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
             <path d="M3 5v14M7 5v14M11 5v14M15 5v9M19 5v9M15 17v2M19 17v2"/>
         </svg>
-        <input id="barcode" placeholder="Scan / SKU…" autocomplete="off">
+        <input id="barcode" placeholder="Scan barcode / SKU…" autocomplete="off">
     </div>
 
     <div class="tb-field" id="search_wrap">
@@ -694,6 +745,11 @@ let selectedCustomer = null;
 let selectedPayMethod = "cash";
 let toastTimer = null;
 let currentInvoiceData = null;
+let barcodeLookupTimer = null;
+let lastBarcodeInputAt = 0;
+let barcodeBurstCount = 0;
+let lastProcessedBarcode = "";
+let lastProcessedBarcodeAt = 0;
 initUser().then(u => {
     if(!u) return;
     if(!hasPermission("action_pos_discount", u)){
@@ -906,18 +962,64 @@ document.addEventListener("click", e=>{
 });
 
 /* ── BARCODE ── */
-document.getElementById("barcode").addEventListener("keydown", function(e){
-    if(e.key!=="Enter") return;
-    let v = this.value.trim(); if(!v) return;
-    let p = products.find(p=>String(p.sku).toLowerCase()===v.toLowerCase());
-    if(p){
+function normalizeBarcodeValue(value){
+    return String(value || "")
+        .normalize("NFKC")
+        .replace(/[\u200B\uFEFF]/g, "")
+        .replace(/\s+/g, "")
+        .trim()
+        .toLowerCase();
+}
+
+async function processBarcodeInput(){
+    const input = document.getElementById("barcode");
+    const rawValue = input.value;
+    const normalized = normalizeBarcodeValue(rawValue);
+    if(!normalized) return;
+
+    const now = Date.now();
+    if(lastProcessedBarcode === normalized && (now - lastProcessedBarcodeAt) < 350){
+        input.value = "";
+        return;
+    }
+
+    let data;
+    try {
+        const res = await fetch("/barcode-lookup?barcode=" + encodeURIComponent(rawValue));
+        data = await res.json();
+    } catch(e) {
+        showToast("Barcode lookup failed. Please try again.");
+        return;
+    }
+
+    if(data.found && data.product){
+        const p = data.product;
         add(p.sku, p.name, p.price);
         let card = document.querySelector(`[data-sku="${p.sku}"]`);
         if(card){ card.classList.add("flash"); setTimeout(()=>card.classList.remove("flash"),450); }
+        lastProcessedBarcode = normalized;
+        lastProcessedBarcodeAt = now;
     } else {
-        showToast("SKU not found: "+v);
+        showToast(data.detail || `No product found for barcode '${normalized}'.`);
     }
-    this.value = "";
+    input.value = "";
+}
+
+document.getElementById("barcode").addEventListener("keydown", function(e){
+    if(e.key !== "Enter" && e.key !== "Tab") return;
+    e.preventDefault();
+    clearTimeout(barcodeLookupTimer);
+    processBarcodeInput();
+});
+
+document.getElementById("barcode").addEventListener("input", function(){
+    const now = Date.now();
+    barcodeBurstCount = (now - lastBarcodeInputAt) < 35 ? (barcodeBurstCount + 1) : 1;
+    lastBarcodeInputAt = now;
+    clearTimeout(barcodeLookupTimer);
+    if(normalizeBarcodeValue(this.value).length >= 3 && barcodeBurstCount >= 4){
+        barcodeLookupTimer = setTimeout(() => processBarcodeInput(), 60);
+    }
 });
 
 /* ── PRODUCT GRID ── */

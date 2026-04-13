@@ -706,10 +706,13 @@ function configureSupplierPermissions(){
 async function init(){
     try {
         await loadSuppliers();
-        allProducts = await (await fetch("/suppliers/api/products-list")).json();
+        const res = await fetch("/suppliers/api/products-list");
+        if (res.ok) {
+            const data = await res.json();
+            allProducts = Array.isArray(data) ? data : [];
+        }
     } catch (error) {
         console.error("Suppliers page init failed", error);
-        showToast("Couldn't load supplier data");
     }
 }
 
@@ -953,7 +956,12 @@ async function viewPO(id){
     document.getElementById("side-bg").classList.add("open");
     document.getElementById("side-panel").classList.add("open");
 
-    let p = await (await fetch(`/suppliers/api/purchase/${id}`)).json();
+    const poRes = await fetch(`/suppliers/api/purchase/${id}`);
+    if (!poRes.ok) {
+        document.getElementById("side-body").innerHTML = `<div style="color:var(--danger);font-size:13px">Failed to load purchase order.</div>`;
+        return;
+    }
+    let p = await poRes.json();
     document.getElementById("side-title").innerText = p.purchase_number;
 
     document.getElementById("side-body").innerHTML = `

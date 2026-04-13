@@ -135,6 +135,8 @@ jobs:
         run: docker compose -f docker-compose.prod.yml up -d postgres redis
       - name: Apply migrations
         run: docker compose -f docker-compose.prod.yml run --rm app python -m alembic upgrade head
+      - name: Initialize optional bootstrap data
+        run: docker compose -f docker-compose.prod.yml run --rm app python -m app.bootstrap.init_data --all --yes
       - name: Start application
         run: docker compose -f docker-compose.prod.yml up -d app
       - name: Verify backing services

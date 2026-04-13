@@ -1,10 +1,11 @@
-import os
 from collections.abc import AsyncGenerator
 
 import pytest
 from fastapi.testclient import TestClient
 
-os.environ["ADMIN_PASSWORD"] = "change-me-now"
+from tests.env_defaults import apply_test_environment_defaults
+
+apply_test_environment_defaults()
 
 from app.app_factory import create_app
 from app.database import get_async_session

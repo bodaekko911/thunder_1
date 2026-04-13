@@ -13,7 +13,21 @@ from app.core.permissions import get_current_user, require_permission
 from app.core.log import record
 from app.models.product import Product
 from app.models.user import User
-from app.models.inventory import StockMove
+from app.models.inventory import LocationStock, StockLocation, StockMove, StockTransfer
+from app.services.location_inventory_service import (
+    create_stock_transfer,
+    get_or_create_location_stock,
+    quantize_qty,
+    serialize_location,
+    serialize_product_location_stock,
+    serialize_transfer,
+)
+from app.services.replenishment_service import (
+    create_or_reuse_draft_purchases,
+    is_low_stock,
+    serialize_low_stock_product,
+    suggested_reorder_qty,
+)
 
 router = APIRouter(
     prefix="/inventory",
@@ -60,7 +74,27 @@ def to_xlsx(headers, rows, sheet_name="Report"):
 class StockAdjustment(BaseModel):
     product_id: int
     qty:        float
+    location_id: Optional[int] = None
     note:       Optional[str] = None
+
+
+class LowStockDraftRequest(BaseModel):
+    product_ids: list[int]
+
+
+class LocationCreate(BaseModel):
+    name: str
+    code: Optional[str] = None
+    location_type: str = "warehouse"
+    is_active: bool = True
+
+
+class StockTransferCreate(BaseModel):
+    source_location_id: int
+    destination_location_id: int
+    product_id: int
+    qty: float
+    note: Optional[str] = None
 
 
 # ── API ────────────────────────────────────────────────
@@ -72,13 +106,14 @@ async def get_stock(
     limit:     int  = 50,
     db: AsyncSession = Depends(get_async_session),
 ):
+    low_stock_threshold = func.coalesce(Product.reorder_level, Product.min_stock)
     stmt = select(Product).where(Product.is_active == True)
     if q:
         stmt = stmt.where(
             Product.name.ilike(f"%{q}%") | Product.sku.ilike(f"%{q}%")
         )
     if low_stock:
-        stmt = stmt.where(Product.stock <= Product.min_stock)
+        stmt = stmt.where(Product.stock <= low_stock_threshold)
     cnt_result = await db.execute(select(func.count()).select_from(stmt.subquery()))
     total = cnt_result.scalar()
     result = await db.execute(stmt.order_by(Product.name).offset(skip).limit(limit))
@@ -92,11 +127,324 @@ async def get_stock(
                 "name":      p.name,
                 "stock":     float(p.stock),
                 "min_stock": float(p.min_stock),
+                "reorder_level": float(p.reorder_level) if p.reorder_level is not None else None,
+                "reorder_qty": float(p.reorder_qty) if p.reorder_qty is not None else None,
+                "preferred_supplier_id": p.preferred_supplier_id,
+                "suggested_reorder_qty": float(suggested_reorder_qty(p)),
                 "unit":      p.unit,
-                "low":       p.stock <= p.min_stock,
+                "low":       is_low_stock(p),
+                "alert_state": "low_stock" if is_low_stock(p) else "ok",
             }
             for p in items
         ],
+    }
+
+
+@router.get("/api/low-stock")
+async def get_low_stock_products(
+    q: str = "",
+    supplier_id: int | None = None,
+    skip: int = 0,
+    limit: int = 50,
+    db: AsyncSession = Depends(get_async_session),
+):
+    low_stock_threshold = func.coalesce(Product.reorder_level, Product.min_stock)
+    stmt = (
+        select(Product)
+        .options(selectinload(Product.preferred_supplier))
+        .where(Product.is_active == True, Product.stock <= low_stock_threshold)
+    )
+    if q:
+        stmt = stmt.where(Product.name.ilike(f"%{q}%") | Product.sku.ilike(f"%{q}%"))
+    if supplier_id is not None:
+        stmt = stmt.where(Product.preferred_supplier_id == supplier_id)
+
+    count_result = await db.execute(select(func.count()).select_from(stmt.subquery()))
+    total = count_result.scalar() or 0
+    result = await db.execute(stmt.order_by(Product.name).offset(skip).limit(limit))
+    products = result.scalars().all()
+    return {
+        "total": total,
+        "items": [serialize_low_stock_product(product) for product in products],
+    }
+
+
+@router.post("/api/low-stock/draft-purchases")
+async def create_low_stock_draft_purchases(
+    data: LowStockDraftRequest,
+    db: AsyncSession = Depends(get_async_session),
+    current_user: User = Depends(get_current_user),
+):
+    product_ids = sorted(set(data.product_ids))
+    if not product_ids:
+        raise HTTPException(status_code=400, detail="Select at least one low-stock product")
+
+    result = await db.execute(
+        select(Product)
+        .options(selectinload(Product.preferred_supplier))
+        .where(Product.is_active == True, Product.id.in_(product_ids))
+    )
+    products = result.scalars().all()
+    found_ids = {product.id for product in products}
+    missing_ids = [product_id for product_id in product_ids if product_id not in found_ids]
+    if missing_ids:
+        raise HTTPException(status_code=404, detail=f"Product IDs not found: {', '.join(str(product_id) for product_id in missing_ids)}")
+
+    not_low_stock = [product.name for product in products if not is_low_stock(product)]
+    if not_low_stock:
+        raise HTTPException(status_code=400, detail=f"Selected products are not low stock: {', '.join(not_low_stock)}")
+
+    missing_supplier = [product.name for product in products if product.preferred_supplier_id is None]
+    if missing_supplier:
+        raise HTTPException(status_code=400, detail=f"Preferred supplier is required for: {', '.join(missing_supplier)}")
+
+    zero_suggestion = [product.name for product in products if suggested_reorder_qty(product) <= 0]
+    if zero_suggestion:
+        raise HTTPException(status_code=400, detail=f"Reorder suggestion is zero for: {', '.join(zero_suggestion)}")
+
+    purchases = await create_or_reuse_draft_purchases(
+        db,
+        products=products,
+        user_id=current_user.id,
+    )
+    await db.commit()
+    return {
+        "ok": True,
+        "created": sum(1 for purchase in purchases if not purchase["reused"]),
+        "reused": sum(1 for purchase in purchases if purchase["reused"]),
+        "purchases": purchases,
+    }
+
+
+@router.get("/api/locations")
+async def get_locations(
+    q: str = "",
+    include_inactive: bool = False,
+    db: AsyncSession = Depends(get_async_session),
+):
+    stmt = select(StockLocation)
+    if not include_inactive:
+        stmt = stmt.where(StockLocation.is_active == True)
+    if q:
+        stmt = stmt.where(
+            StockLocation.name.ilike(f"%{q}%") |
+            StockLocation.code.ilike(f"%{q}%") |
+            StockLocation.location_type.ilike(f"%{q}%")
+        )
+
+    result = await db.execute(stmt.order_by(StockLocation.name))
+    locations = result.scalars().all()
+
+    summary_result = await db.execute(
+        select(
+            LocationStock.location_id,
+            func.count(LocationStock.product_id),
+            func.coalesce(func.sum(LocationStock.qty), 0),
+        ).group_by(LocationStock.location_id)
+    )
+    summary_map = {
+        location_id: {"product_count": product_count, "total_qty": total_qty}
+        for location_id, product_count, total_qty in summary_result.all()
+    }
+
+    return {
+        "total": len(locations),
+        "items": [
+            serialize_location(
+                location,
+                product_count=summary_map.get(location.id, {}).get("product_count", 0),
+                total_qty=summary_map.get(location.id, {}).get("total_qty", 0),
+            )
+            for location in locations
+        ],
+    }
+
+
+@router.post("/api/locations", dependencies=[Depends(require_permission("action_inventory_adjust"))])
+async def create_location(
+    data: LocationCreate,
+    db: AsyncSession = Depends(get_async_session),
+    current_user: User = Depends(get_current_user),
+):
+    clean_name = data.name.strip()
+    if not clean_name:
+        raise HTTPException(status_code=400, detail="Location name is required")
+
+    existing_name = await db.execute(select(StockLocation).where(StockLocation.name == clean_name))
+    if existing_name.scalar_one_or_none() is not None:
+        raise HTTPException(status_code=400, detail="Location name already exists")
+
+    clean_code = data.code.strip() if data.code else None
+    if clean_code:
+        existing_code = await db.execute(select(StockLocation).where(StockLocation.code == clean_code))
+        if existing_code.scalar_one_or_none() is not None:
+            raise HTTPException(status_code=400, detail="Location code already exists")
+
+    location = StockLocation(
+        name=clean_name,
+        code=clean_code,
+        location_type=data.location_type.strip() or "warehouse",
+        is_active=data.is_active,
+    )
+    db.add(location)
+    await db.flush()
+    record(
+        db,
+        "Inventory",
+        "create_location",
+        f"Created stock location {location.name}",
+        user=current_user,
+        ref_type="stock_location",
+        ref_id=location.id,
+    )
+    await db.commit()
+    await db.refresh(location)
+    return serialize_location(location)
+
+
+@router.get("/api/location-stock")
+async def get_location_stock(
+    q: str = "",
+    product_id: int | None = None,
+    location_id: int | None = None,
+    skip: int = 0,
+    limit: int = 50,
+    db: AsyncSession = Depends(get_async_session),
+):
+    stmt = select(Product).where(Product.is_active == True)
+    if q:
+        stmt = stmt.where(Product.name.ilike(f"%{q}%") | Product.sku.ilike(f"%{q}%"))
+    if product_id is not None:
+        stmt = stmt.where(Product.id == product_id)
+    if location_id is not None:
+        stmt = stmt.where(
+            Product.id.in_(
+                select(LocationStock.product_id).where(LocationStock.location_id == location_id)
+            )
+        )
+
+    count_result = await db.execute(select(func.count()).select_from(stmt.subquery()))
+    total = count_result.scalar() or 0
+    result = await db.execute(stmt.order_by(Product.name).offset(skip).limit(limit))
+    products = result.scalars().all()
+
+    location_stock_map: dict[int, list[LocationStock]] = {}
+    if products:
+        product_ids = [product.id for product in products]
+        stock_stmt = (
+            select(LocationStock)
+            .options(selectinload(LocationStock.location))
+            .where(LocationStock.product_id.in_(product_ids))
+        )
+        if location_id is not None:
+            stock_stmt = stock_stmt.where(LocationStock.location_id == location_id)
+        stock_result = await db.execute(stock_stmt.order_by(LocationStock.product_id, LocationStock.location_id))
+        for location_stock in stock_result.scalars().all():
+            location_stock_map.setdefault(location_stock.product_id, []).append(location_stock)
+
+    return {
+        "total": total,
+        "items": [
+            serialize_product_location_stock(product, location_stock_map.get(product.id, []))
+            for product in products
+        ],
+    }
+
+
+@router.post("/api/transfers", dependencies=[Depends(require_permission("action_inventory_adjust"))])
+async def create_transfer(
+    data: StockTransferCreate,
+    db: AsyncSession = Depends(get_async_session),
+    current_user: User = Depends(get_current_user),
+):
+    product_result = await db.execute(
+        select(Product).where(Product.id == data.product_id, Product.is_active == True)
+    )
+    product = product_result.scalar_one_or_none()
+    if product is None:
+        raise HTTPException(status_code=404, detail="Product not found")
+
+    locations_result = await db.execute(
+        select(StockLocation).where(
+            StockLocation.id.in_([data.source_location_id, data.destination_location_id])
+        )
+    )
+    locations = {location.id: location for location in locations_result.scalars().all()}
+    source_location = locations.get(data.source_location_id)
+    destination_location = locations.get(data.destination_location_id)
+    if source_location is None or destination_location is None:
+        raise HTTPException(status_code=404, detail="Source or destination location not found")
+
+    try:
+        summary = await create_stock_transfer(
+            db,
+            product=product,
+            source_location=source_location,
+            destination_location=destination_location,
+            qty=data.qty,
+            user_id=current_user.id,
+            note=data.note,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    summary["transfer"]["actor"] = current_user.name
+    record(
+        db,
+        "Inventory",
+        "create_transfer",
+        (
+            f"Transferred {float(quantize_qty(data.qty)):.3f} {product.unit} of {product.name} "
+            f"from {source_location.name} to {destination_location.name}"
+        ),
+        user=current_user,
+        ref_type="stock_transfer",
+        ref_id=summary["transfer"]["id"],
+    )
+    await db.commit()
+    return {"ok": True, **summary}
+
+
+@router.get("/api/transfers")
+async def get_transfers(
+    q: str = "",
+    product_id: int | None = None,
+    source_location_id: int | None = None,
+    destination_location_id: int | None = None,
+    skip: int = 0,
+    limit: int = 100,
+    db: AsyncSession = Depends(get_async_session),
+):
+    stmt = (
+        select(StockTransfer)
+        .options(
+            selectinload(StockTransfer.product),
+            selectinload(StockTransfer.source_location),
+            selectinload(StockTransfer.destination_location),
+            selectinload(StockTransfer.user),
+        )
+        .join(Product, StockTransfer.product_id == Product.id)
+    )
+    if q:
+        stmt = stmt.where(
+            Product.name.ilike(f"%{q}%") |
+            Product.sku.ilike(f"%{q}%") |
+            StockTransfer.note.ilike(f"%{q}%")
+        )
+    if product_id is not None:
+        stmt = stmt.where(StockTransfer.product_id == product_id)
+    if source_location_id is not None:
+        stmt = stmt.where(StockTransfer.source_location_id == source_location_id)
+    if destination_location_id is not None:
+        stmt = stmt.where(StockTransfer.destination_location_id == destination_location_id)
+
+    count_result = await db.execute(select(func.count()).select_from(stmt.subquery()))
+    total = count_result.scalar() or 0
+    result = await db.execute(stmt.order_by(StockTransfer.created_at.desc()).offset(skip).limit(limit))
+    transfers = result.scalars().all()
+    return {
+        "total": total,
+        "items": [serialize_transfer(transfer) for transfer in transfers],
     }
 
 
@@ -209,6 +557,34 @@ async def adjust_stock(data: StockAdjustment, db: AsyncSession = Depends(get_asy
     if after < 0:
         raise HTTPException(status_code=400, detail=f"Stock cannot go below 0. Current stock: {before}")
 
+    location = None
+    location_after = None
+    ref_type = "manual"
+    ref_id = None
+    note = data.note or "Manual adjustment"
+    if data.location_id is not None:
+        location_result = await db.execute(select(StockLocation).where(StockLocation.id == data.location_id))
+        location = location_result.scalar_one_or_none()
+        if location is None:
+            raise HTTPException(status_code=404, detail="Location not found")
+
+        location_stock = await get_or_create_location_stock(
+            db,
+            product_id=product.id,
+            location_id=location.id,
+        )
+        location_before = float(location_stock.qty)
+        location_after = location_before + data.qty
+        if location_after < 0:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Location stock cannot go below 0. Current stock in {location.name}: {location_before}",
+            )
+        location_stock.qty = location_after
+        ref_type = "location_adjust"
+        ref_id = location.id
+        note = data.note or f"Manual adjustment for {location.name}"
+
     product.stock = after
 
     move = StockMove(
@@ -217,24 +593,47 @@ async def adjust_stock(data: StockAdjustment, db: AsyncSession = Depends(get_asy
         qty=data.qty,
         qty_before=before,
         qty_after=after,
-        ref_type="manual",
-        note=data.note or "Manual adjustment",
+        ref_type=ref_type,
+        ref_id=ref_id,
+        note=note,
+        user_id=current_user.id,
     )
     db.add(move)
-    record(db, "Inventory", "adjust_stock",
+    description = (
+        f"Stock adjusted: {product.name} - {before:+.3g} -> {after:.3g} (delta {data.qty:+.3g})"
+        + (f" - {data.note}" if data.note else "")
+    )
+    if location is not None:
+        description += f" at {location.name}"
+    record(
+        db,
+        "Inventory",
+        "adjust_stock",
+        description,
+        user=current_user,
+        ref_type="stock_move",
+        ref_id=move.id if hasattr(move, "id") else None,
+    )
+    if False:
+        record(db, "Inventory", "adjust_stock",
            f"Stock adjusted: {product.name} — {before:+.3g} → {after:.3g} (Δ{data.qty:+.3g})"
            + (f" — {data.note}" if data.note else ""),
            ref_type="stock_move", ref_id=move.id if hasattr(move, 'id') else None)
     await db.commit()
-    return {"ok": True, "new_stock": after}
+    payload = {"ok": True, "new_stock": after}
+    if location is not None:
+        payload["location_id"] = location.id
+        payload["new_location_stock"] = location_after
+    return payload
 
 
 @router.get("/api/summary")
 async def get_summary(db: AsyncSession = Depends(get_async_session)):
+    low_stock_threshold = func.coalesce(Product.reorder_level, Product.min_stock)
     r1 = await db.execute(select(func.count(Product.id)).where(Product.is_active == True))
     total_products = r1.scalar() or 0
     r2 = await db.execute(select(func.count(Product.id)).where(
-        Product.is_active == True, Product.stock <= Product.min_stock
+        Product.is_active == True, Product.stock <= low_stock_threshold
     ))
     low_stock = r2.scalar() or 0
     r3 = await db.execute(select(func.count(Product.id)).where(

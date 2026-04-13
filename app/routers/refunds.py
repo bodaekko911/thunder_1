@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.core.log import record
-from app.core.permissions import get_current_user, require_permission
+from app.core.permissions import get_current_user, require_action, require_permission
 from app.database import get_async_session
 from app.models.accounting import Account, Journal, JournalEntry
 from app.models.customer import Customer
@@ -194,7 +194,7 @@ async def list_refunds(db: AsyncSession = Depends(get_async_session)):
     ]
 
 
-@router.post("/api/create")
+@router.post("/api/create", dependencies=[Depends(require_action("pos", "sales", "refund"))])
 async def create_refund(
     data: RefundCreate,
     db: AsyncSession = Depends(get_async_session),

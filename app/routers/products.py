@@ -8,6 +8,7 @@ from pydantic import BaseModel
 from app.database import get_async_session
 from app.core.permissions import get_current_user, require_permission
 from app.models.product import Product
+from app.models.supplier import Supplier
 from app.models.user import User
 from app.core.log import record
 from app.schemas.product import ProductCreate, ProductUpdate
@@ -63,12 +64,13 @@ async def get_products(
     db: AsyncSession = Depends(get_async_session),
 ):
     conditions = [Product.is_active == True]
+    low_stock_threshold = func.coalesce(Product.reorder_level, Product.min_stock)
     if q:
         conditions.append(
             Product.name.ilike(f"%{q}%") | Product.sku.ilike(f"%{q}%")
         )
     if low_stock:
-        conditions.append(Product.stock <= Product.min_stock)
+        conditions.append(Product.stock <= low_stock_threshold)
     if category:
         conditions.append(Product.category == category)
     if item_type:
@@ -94,11 +96,14 @@ async def get_products(
                 "cost":      float(p.cost),
                 "stock":     float(p.stock),
                 "min_stock": float(p.min_stock),
+                "reorder_level": float(p.reorder_level) if p.reorder_level is not None else None,
+                "reorder_qty": float(p.reorder_qty) if p.reorder_qty is not None else None,
+                "preferred_supplier_id": p.preferred_supplier_id,
                 "unit":      p.unit,
                 "category":  p.category or "—",
                 "item_type": p.item_type or "finished",
                 "is_active": p.is_active,
-                "low":       float(p.stock) <= float(p.min_stock),
+                "low":       float(p.stock) <= float(p.reorder_level if p.reorder_level is not None else p.min_stock),
             }
             for p in items
         ],
@@ -110,9 +115,15 @@ async def add_product(data: ProductCreate, db: AsyncSession = Depends(get_async_
     sku_result = await db.execute(select(Product).where(Product.sku == data.sku))
     if sku_result.scalar_one_or_none():
         raise HTTPException(status_code=400, detail="SKU already exists")
+    if data.preferred_supplier_id is not None:
+        supplier_result = await db.execute(select(Supplier).where(Supplier.id == data.preferred_supplier_id))
+        if supplier_result.scalar_one_or_none() is None:
+            raise HTTPException(status_code=404, detail="Preferred supplier not found")
     p = Product(
         sku=data.sku, name=data.name, price=data.price,
         cost=data.cost, stock=data.stock, min_stock=data.min_stock,
+        reorder_level=data.reorder_level, reorder_qty=data.reorder_qty,
+        preferred_supplier_id=data.preferred_supplier_id,
         unit=data.unit,
     )
     if hasattr(p, 'category'):  p.category  = data.category
@@ -133,6 +144,10 @@ async def edit_product(product_id: int, data: ProductUpdate, db: AsyncSession = 
     p = result.scalar_one_or_none()
     if not p:
         raise HTTPException(status_code=404, detail="Product not found")
+    if data.preferred_supplier_id is not None:
+        supplier_result = await db.execute(select(Supplier).where(Supplier.id == data.preferred_supplier_id))
+        if supplier_result.scalar_one_or_none() is None:
+            raise HTTPException(status_code=404, detail="Preferred supplier not found")
     for k, v in data.model_dump(exclude_unset=True).items():
         if hasattr(p, k):
             setattr(p, k, v)
@@ -508,7 +523,8 @@ async function logout(){
       });
   }
   initializeColorMode();
-  initUser().then(u => { if(u) applyProductActionPermissions(u); });
+  let currentUser = null;
+  initUser().then(u => { currentUser = u; if(u) applyProductActionPermissions(u); });
   let products    = [];
 let categories  = [];
 let editingId   = null;
@@ -647,7 +663,7 @@ async function loadProducts(){
             <button class="action-btn danger" onclick="deleteProduct(${p.id},'${p.name.replace(/'/g,"\\'")}')">Delete</button>
         </td>
     </tr>`).join("");
-    applyProductActionPermissions();
+    applyProductActionPermissions(currentUser);
 }
 
 let searchTimer = null;

@@ -1,5 +1,6 @@
 from app.core.log import ActivityLog
 from app.models.accounting import Account, Journal, JournalEntry
+from app.models.receipt import ProductReceipt
 from app.models.b2b import (
     B2BClient,
     B2BClientPrice,
@@ -14,7 +15,7 @@ from app.models.customer import Customer
 from app.models.expense import Expense, ExpenseCategory
 from app.models.farm import Farm, FarmDelivery, FarmDeliveryItem, WeatherLog
 from app.models.hr import Attendance, Employee, Payroll
-from app.models.inventory import StockMove
+from app.models.inventory import LocationStock, StockLocation, StockMove, StockTransfer
 from app.models.invoice import Invoice, InvoiceItem
 from app.models.product import Product
 from app.models.production import (
@@ -56,8 +57,10 @@ __all__ = [
     "InvoiceItem",
     "Journal",
     "JournalEntry",
+    "LocationStock",
     "Payroll",
     "Product",
+    "ProductReceipt",
     "ProductionBatch",
     "Purchase",
     "RefreshToken",
@@ -68,7 +71,9 @@ __all__ = [
     "RetailRefund",
     "RetailRefundItem",
     "SpoilageRecord",
+    "StockLocation",
     "StockMove",
+    "StockTransfer",
     "Supplier",
     "User",
     "WeatherLog",

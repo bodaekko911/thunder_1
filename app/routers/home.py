@@ -444,14 +444,14 @@ body {
                 </div>
             </a>
 
-            <a href="/suppliers/" class="module-card c-orange" data-permission="page_suppliers">
-                <div class="card-icon">🚚</div>
+            <a href="/receive/" class="module-card c-orange" data-permission="page_suppliers">
+                <div class="card-icon">📬</div>
                 <div class="card-body">
-                    <div class="card-name">Suppliers</div>
-                    <div class="card-desc">Supplier list, purchase orders, receiving</div>
+                    <div class="card-name">Receive Products</div>
+                    <div class="card-desc">Receive stock, log unit costs, auto-post to expenses</div>
                 </div>
                 <div class="card-footer">
-                    <span class="card-tag">Purchasing</span>
+                    <span class="card-tag">Inventory</span>
                     <span class="card-arrow">↗</span>
                 </div>
             </a>

@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Text, Numeric, Boolean, DateTime
+from sqlalchemy import Column, Integer, String, Text, Numeric, Boolean, DateTime, ForeignKey
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 from app.database import Base
@@ -14,6 +14,9 @@ class Product(Base):
     cost      = Column(Numeric(12, 2), default=0)
     stock     = Column(Numeric(12, 3), default=0)
     min_stock = Column(Numeric(12, 3), default=5)
+    reorder_level = Column(Numeric(12, 3), nullable=True)
+    reorder_qty = Column(Numeric(12, 3), nullable=True)
+    preferred_supplier_id = Column(Integer, ForeignKey("suppliers.id"), nullable=True)
     unit      = Column(String(30), default="pcs")
     is_active = Column(Boolean, default=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
@@ -23,3 +26,4 @@ class Product(Base):
     invoice_items  = relationship("InvoiceItem", back_populates="product")
     purchase_items = relationship("PurchaseItem", back_populates="product")
     stock_moves    = relationship("StockMove", back_populates="product")
+    preferred_supplier = relationship("Supplier", foreign_keys=[preferred_supplier_id])
