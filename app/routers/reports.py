@@ -3,7 +3,7 @@ from fastapi.responses import HTMLResponse, StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 from sqlalchemy import func, select
-from datetime import datetime, date, timedelta
+from datetime import datetime, date, timedelta, timezone
 from typing import Optional
 import io
 
@@ -18,6 +18,8 @@ from app.models.spoilage import SpoilageRecord
 from app.models.refund import RetailRefund
 from app.models.production import ProductionBatch, BatchInput, BatchOutput
 from app.models.accounting import Account, Journal, JournalEntry
+from app.models.receipt import ProductReceipt
+from app.models.expense import Expense
 
 router = APIRouter(
     prefix="/reports",
@@ -63,11 +65,11 @@ def to_xlsx(headers, rows, sheet_name="Report"):
 
 
 def parse_dates(date_from, date_to):
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     if date_from and date_to:
         try:
-            d_from = datetime.fromisoformat(date_from)
-            d_to   = datetime.fromisoformat(date_to).replace(hour=23, minute=59, second=59)
+            d_from = datetime.fromisoformat(date_from).replace(tzinfo=timezone.utc)
+            d_to   = datetime.fromisoformat(date_to).replace(hour=23, minute=59, second=59, tzinfo=timezone.utc)
         except Exception:
             d_from = now.replace(day=1, hour=0, minute=0, second=0)
             d_to   = now
@@ -522,12 +524,12 @@ async def pl_report(date_from: Optional[str] = None, date_to: Optional[str] = No
         raise HTTPException(status_code=400, detail="Date range cannot exceed 1 year")
     acc_res = await db.execute(
         select(Account)
-        .options(selectinload(Account.journal_entries).selectinload(JournalEntry.journal))
+        .options(selectinload(Account.entries).selectinload(JournalEntry.journal))
     )
     accounts = acc_res.scalars().all()
 
     def acc_entries(acc):
-        return [e for e in acc.journal_entries
+        return [e for e in acc.entries
                 if e.journal and d_from <= e.journal.created_at <= d_to]
 
     def acc_movement(acc):
@@ -563,12 +565,27 @@ async def pl_report(date_from: Optional[str] = None, date_to: Optional[str] = No
             if mv != 0:
                 expense_lines.append({"name": a.name, "code": a.code, "amount": round(abs(mv), 2), "entries": entry_details(a)})
 
+    used_balance_fallback = False
+    if not revenue_lines and not expense_lines:
+        used_balance_fallback = True
+        revenue_lines = [
+            {"name": a.name, "code": a.code, "amount": round(abs(float(a.balance)), 2), "entries": []}
+            for a in accounts
+            if a.type == "revenue" and round(abs(float(a.balance)), 2) > 0
+        ]
+        expense_lines = [
+            {"name": a.name, "code": a.code, "amount": round(abs(float(a.balance)), 2), "entries": []}
+            for a in accounts
+            if a.type == "expense" and round(abs(float(a.balance)), 2) > 0
+        ]
+
     total_revenue = sum(r["amount"] for r in revenue_lines)
     total_expense = sum(e["amount"] for e in expense_lines)
     return {"revenue_lines": revenue_lines, "expense_lines": expense_lines,
             "total_revenue": round(total_revenue, 2), "total_expense": round(total_expense, 2),
             "net_profit": round(total_revenue - total_expense, 2),
-            "date_from": d_from.strftime("%Y-%m-%d"), "date_to": d_to.strftime("%Y-%m-%d")}
+            "date_from": d_from.strftime("%Y-%m-%d"), "date_to": d_to.strftime("%Y-%m-%d"),
+            "used_balance_fallback": used_balance_fallback}
 
 @router.get("/export/pl", dependencies=[Depends(require_permission("action_export_excel"))])
 async def export_pl(date_from: str = None, date_to: str = None, db: AsyncSession = Depends(get_async_session)):
@@ -740,8 +757,11 @@ async def transactions_report(
     from app.models.customer import Customer
     from app.models.refund import RetailRefundItem
     from app.models.user import User
-    d_from = datetime.fromisoformat(date_from) if date_from else datetime(2000, 1, 1)
-    d_to   = datetime.fromisoformat(date_to).replace(hour=23, minute=59) if date_to else datetime.now()
+    receipt_expense_ids_res = await db.execute(
+        select(ProductReceipt.expense_id).where(ProductReceipt.expense_id.is_not(None))
+    )
+    receipt_expense_ids = {row[0] for row in receipt_expense_ids_res.all() if row[0] is not None}
+    d_from, d_to = parse_dates(date_from, date_to)
     rows   = []
 
     # POS
@@ -845,6 +865,79 @@ async def transactions_report(
                     "reason":         ref.reason or "—",
                 })
 
+    # Receive
+    if not source or source == "receive":
+        rec_res = await db.execute(
+            select(ProductReceipt)
+            .where(
+                ProductReceipt.receive_date >= d_from.date(),
+                ProductReceipt.receive_date <= d_to.date(),
+            )
+            .order_by(ProductReceipt.receive_date.desc(), ProductReceipt.id.desc())
+            .options(
+                selectinload(ProductReceipt.product),
+                selectinload(ProductReceipt.user),
+                selectinload(ProductReceipt.expense),
+            )
+        )
+        for rec in rec_res.scalars().all():
+            product = rec.product
+            expense = rec.expense
+            total_cost = float(rec.total_cost or 0)
+            rows.append({
+                "date":           rec.created_at.strftime("%Y-%m-%d %H:%M") if rec.created_at else (rec.receive_date.isoformat() if rec.receive_date else "—"),
+                "invoice_number": rec.ref_number,
+                "user_name":      rec.user.name if rec.user else "—",
+                "source":         "Receive",
+                "customer":       rec.supplier_ref or "—",
+                "sku":            product.sku if product else "—",
+                "product":        product.name if product else "—",
+                "qty":            float(rec.qty),
+                "unit_price":     float(rec.unit_cost or 0),
+                "line_total":     -total_cost,
+                "discount":       0,
+                "discount_pct":   0,
+                "payment_method": expense.payment_method if expense and expense.payment_method else "cash",
+                "invoice_total":  -total_cost,
+                "status":         "received",
+                "row_type":       "receipt",
+                "reason":         rec.notes or "—",
+            })
+
+    # Expenses
+    if not source or source == "expense":
+        exp_res = await db.execute(
+            select(Expense)
+            .where(
+                Expense.expense_date >= d_from.date(),
+                Expense.expense_date <= d_to.date(),
+            )
+            .order_by(Expense.expense_date.desc(), Expense.id.desc())
+            .options(selectinload(Expense.category), selectinload(Expense.user))
+        )
+        for exp in exp_res.scalars().all():
+            if exp.id in receipt_expense_ids:
+                continue
+            rows.append({
+                "date":           exp.created_at.strftime("%Y-%m-%d %H:%M") if exp.created_at else (exp.expense_date.isoformat() if exp.expense_date else "—"),
+                "invoice_number": exp.ref_number,
+                "user_name":      exp.user.name if exp.user else "—",
+                "source":         "Expense",
+                "customer":       exp.vendor or "—",
+                "sku":            "—",
+                "product":        exp.category.name if exp.category else "Expense",
+                "qty":            1.0,
+                "unit_price":     float(exp.amount),
+                "line_total":     -float(exp.amount),
+                "discount":       0,
+                "discount_pct":   0,
+                "payment_method": exp.payment_method or "cash",
+                "invoice_total":  -float(exp.amount),
+                "status":         "posted",
+                "row_type":       "expense",
+                "reason":         exp.description or "—",
+            })
+
     rows.sort(key=lambda x: x["date"], reverse=True)
     total_revenue  = sum(r["line_total"] for r in rows)
     total_qty      = sum(r["qty"]        for r in rows)
@@ -889,6 +982,7 @@ def reports_ui():
 body.light{
     --bg:#f4f5ef;--surface:#f1f3eb;--card:#eceee6;--card2:#e4e6de;
     --border:rgba(0,0,0,0.08);--border2:rgba(0,0,0,0.14);
+    --green:#0f8a43;
     --text:#1a1e14;--sub:#4a5040;--muted:#7b816f;
 }
 body.light nav{background:rgba(244,245,239,.92);}
@@ -1126,6 +1220,8 @@ td.mono{font-family:var(--mono);}
                 <option value="pos">POS Only</option>
                 <option value="b2b">B2B Only</option>
                 <option value="refund">Refunds Only</option>
+                <option value="receive">Receive Only</option>
+                <option value="expense">Expenses Only</option>
             </select>
             <button class="btn btn-lime" onclick="loadTransactions()">Apply</button>
             <div class="filter-sep"></div>
@@ -1497,30 +1593,47 @@ async function loadTransactions(){
         if(s==="partial")   return "var(--blue)";
         if(s==="consignment") return "var(--teal)";
         if(s==="refunded")  return "var(--danger)";
+        if(s==="received")  return "var(--warn)";
+        if(s==="posted")    return "var(--purple)";
         return "var(--muted)";
     };
 
     document.getElementById("tx-body").innerHTML = data.rows.length
         ? data.rows.map(r => {
             const isRef = r.row_type === "refund";
-            const rowStyle = isRef ? 'style="background:rgba(255,77,109,.04);"' : '';
-            const numColor = isRef ? "var(--danger)" : "var(--green)";
-            const refBadge = isRef ? `<br><span style="font-size:9px;font-weight:800;letter-spacing:.5px;color:var(--danger);background:rgba(255,77,109,.15);padding:1px 5px;border-radius:4px">↩ REFUND</span>` : "";
+            const isReceipt = r.row_type === "receipt";
+            const isExpense = r.row_type === "expense";
+            const isOutflow = isRef || isReceipt || isExpense;
+            const rowStyle = isRef
+                ? 'style="background:rgba(255,77,109,.04);"'
+                : isReceipt
+                    ? 'style="background:rgba(255,181,71,.06);"'
+                    : isExpense
+                        ? 'style="background:rgba(168,85,247,.06);"'
+                            : '';
+            const numColor = isRef ? "var(--danger)" : isReceipt ? "var(--warn)" : isExpense ? "var(--purple)" : "var(--green)";
+            const refBadge = isRef
+                ? `<br><span style="font-size:9px;font-weight:800;letter-spacing:.5px;color:var(--danger);background:rgba(255,77,109,.15);padding:1px 5px;border-radius:4px">↩ REFUND</span>`
+                : isReceipt
+                    ? `<br><span style="font-size:9px;font-weight:800;letter-spacing:.5px;color:var(--warn);background:rgba(255,181,71,.16);padding:1px 5px;border-radius:4px">↑ RECEIVE</span>`
+                    : isExpense
+                        ? `<br><span style="font-size:9px;font-weight:800;letter-spacing:.5px;color:var(--purple);background:rgba(168,85,247,.16);padding:1px 5px;border-radius:4px">↓ EXPENSE</span>`
+                            : "";
             return `<tr ${rowStyle}>
                 <td class="mono" style="font-size:11px;white-space:nowrap">${r.date}</td>
-                <td class="mono" style="font-size:11px;color:${isRef?"var(--danger)":"var(--lime)"}">${r.invoice_number}${refBadge}</td>
-                <td style="font-size:11px;color:${isRef?"var(--danger)":"var(--sub)"}">${r.source}</td>
+                <td class="mono" style="font-size:11px;color:${isRef?"var(--danger)":isReceipt?"var(--warn)":isExpense?"var(--purple)":"var(--lime)"}">${r.invoice_number}${refBadge}</td>
+                <td style="font-size:11px;color:${isRef?"var(--danger)":isReceipt?"var(--warn)":isExpense?"var(--purple)":"var(--sub)"}">${r.source}</td>
                 <td class="name" style="white-space:nowrap">${r.customer}</td>
                 <td style="font-size:12px;color:var(--muted);white-space:nowrap">${r.user_name}</td>
                 <td class="mono" style="font-size:11px;color:var(--muted)">${r.sku}</td>
-                <td style="font-weight:600;white-space:nowrap">${r.product}${isRef&&r.reason?`<br><span style="font-size:10px;color:var(--muted);font-weight:400">${r.reason}</span>`:""}</td>
-                <td class="mono" style="color:${isRef?"var(--danger)":"var(--blue)"};font-weight:700">${r.qty.toFixed(2)}</td>
+                <td style="font-weight:600;white-space:nowrap">${r.product}${isOutflow&&r.reason?`<br><span style="font-size:10px;color:var(--muted);font-weight:400">${r.reason}</span>`:""}</td>
+                <td class="mono" style="color:${isRef?"var(--danger)":isReceipt?"var(--amber)":isExpense?"var(--purple)":"var(--blue)"};font-weight:700">${r.qty.toFixed(2)}</td>
                 <td class="mono">${r.unit_price.toFixed(2)}</td>
-                <td class="mono" style="color:${numColor};font-weight:700">${isRef?"−":""}${Math.abs(r.line_total).toFixed(2)}</td>
+                <td class="mono" style="color:${numColor};font-weight:700">${isOutflow?"−":""}${Math.abs(r.line_total).toFixed(2)}</td>
                 <td class="mono" style="color:${r.discount>0?"var(--warn)":"var(--muted)"}">${r.discount>0?"-"+r.discount.toFixed(2):"—"}</td>
                 <td class="mono" style="color:${r.discount_pct>0?"var(--warn)":"var(--muted)"}">${r.discount_pct>0?r.discount_pct.toFixed(1)+"%":"—"}</td>
                 <td style="font-size:12px;font-weight:700;color:${payColor(r.payment_method)}">${r.payment_method}</td>
-                <td class="mono" style="font-weight:700;color:${isRef?"var(--danger)":"inherit"}">${isRef?"−":""}${Math.abs(r.invoice_total).toFixed(2)}</td>
+                <td class="mono" style="font-weight:700;color:${isOutflow?"var(--danger)":"inherit"}">${isOutflow?"−":""}${Math.abs(r.invoice_total).toFixed(2)}</td>
                 <td><span style="font-size:11px;font-weight:700;padding:2px 8px;border-radius:20px;background:rgba(0,0,0,.2);color:${statusColor(r.status)}">${r.status}</span></td>
               </tr>`;
         }).join("")
@@ -1849,6 +1962,7 @@ async function loadPL(){
                 <div class="stat-value ${isProfit?"sv-green":"sv-danger"}">${Math.abs(data.net_profit).toFixed(2)}</div>
             </div>
         </div>
+        ${data.used_balance_fallback ? `<div style="font-size:12px;color:var(--warn);margin-bottom:12px">Showing account-balance fallback because no dated journal entry details were found for this range.</div>` : ``}
         <div style="font-size:12px;color:var(--muted);margin-bottom:12px">💡 Click any account line to expand its journal entries</div>
         <div class="pl-section">
             <div class="pl-header">Revenue</div>

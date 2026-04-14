@@ -12,13 +12,37 @@ from app.database import get_async_session
 from app.models.user import User
 from app.core.log import ActivityLog
 
+LEGACY_PERMISSION_EXPANSIONS = {
+    "page_accounting": {
+        "page_expenses",
+        "action_expenses_create",
+        "action_expenses_update",
+        "action_expenses_delete",
+    },
+    "page_suppliers": {
+        "page_receive_products",
+        "action_receive_products_create",
+        "action_receive_products_update",
+        "action_receive_products_delete",
+        "action_receive_products_export",
+    },
+}
+
+
+def expand_legacy_permissions(permissions: Iterable[str]) -> Set[str]:
+    expanded = {permission for permission in permissions if permission}
+    for permission in list(expanded):
+        expanded.update(LEGACY_PERMISSION_EXPANSIONS.get(permission, set()))
+    return expanded
+
 
 def normalize_permissions(raw_permissions: str | None) -> Set[str]:
-    return {
+    normalized = {
         permission.strip()
         for permission in (raw_permissions or "").split(",")
         if permission and permission.strip() and is_known_permission(permission.strip())
     }
+    return expand_legacy_permissions(normalized)
 
 
 def serialize_permissions(permissions: Iterable[str]) -> str:
@@ -33,10 +57,47 @@ def serialize_permissions(permissions: Iterable[str]) -> str:
     )
 
 
+def _split_permission_overrides(raw_permissions: str | None) -> tuple[Set[str], Set[str]]:
+    grants: Set[str] = set()
+    revokes: Set[str] = set()
+    for token in (raw_permissions or "").split(","):
+        value = (token or "").strip()
+        if not value:
+            continue
+        is_revoke = value.startswith("-")
+        permission = value[1:].strip() if is_revoke else value
+        if not permission or not is_known_permission(permission):
+            continue
+        expanded = expand_legacy_permissions({permission})
+        if is_revoke:
+            revokes.update(expanded)
+        else:
+            grants.update(expanded)
+    return grants, revokes
+
+
+def serialize_permission_overrides(role: str | None, selected_permissions: Iterable[str]) -> str:
+    cleaned = {
+        permission.strip()
+        for permission in selected_permissions
+        if permission and permission.strip() and is_known_permission(permission.strip())
+    }
+    role_permissions = expand_legacy_permissions(get_role_permissions(role))
+    if "*" in role_permissions:
+        return ""
+    grants = cleaned - role_permissions
+    revokes = role_permissions - cleaned
+    return ",".join(sorted([*grants, *[f"-{permission}" for permission in revokes]]))
+
+
 def get_effective_permissions(role: str | None, raw_permissions: str | None) -> Set[str]:
-    role_permissions = get_role_permissions(role)
+    role_permissions = expand_legacy_permissions(get_role_permissions(role))
     if "*" in role_permissions:
         return {"*"}
+    grants, revokes = _split_permission_overrides(raw_permissions)
+    # Backward compatibility: old rows stored additive-only custom permissions.
+    if grants or revokes:
+        return (role_permissions | grants) - revokes
     return role_permissions | normalize_permissions(raw_permissions)
 
 
@@ -46,7 +107,7 @@ def get_custom_permissions(role: str | None, selected_permissions: Iterable[str]
         for permission in selected_permissions
         if permission and permission.strip() and is_known_permission(permission.strip())
     }
-    role_permissions = get_role_permissions(role)
+    role_permissions = expand_legacy_permissions(get_role_permissions(role))
     if "*" in role_permissions:
         return set()
     return cleaned - role_permissions

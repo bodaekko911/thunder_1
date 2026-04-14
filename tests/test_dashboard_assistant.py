@@ -35,6 +35,31 @@ class FakePermissionSession:
         return None
 
 
+class FakeDashboardScalarResult:
+    def __init__(self, value) -> None:
+        self._value = value
+
+    def scalar(self):
+        return self._value
+
+    def scalar_one_or_none(self):
+        return self._value
+
+    def scalars(self):
+        return self
+
+    def all(self):
+        return self._value if isinstance(self._value, list) else []
+
+
+class FakeDashboardDataSession:
+    async def execute(self, statement):
+        entity = statement.column_descriptions[0].get("entity")
+        if entity is not None:
+            return FakeDashboardScalarResult([])
+        return FakeDashboardScalarResult(0)
+
+
 def _make_client(user, fake_db) -> TestClient:
     async def override_session() -> AsyncGenerator[FakePermissionSession, None]:
         yield fake_db
@@ -167,3 +192,49 @@ def test_dashboard_assistant_endpoint_returns_structured_answer(monkeypatch: pyt
         "result": {"items": [{"name": "Olives", "qty": 5, "revenue": 250.0}], "count": 1},
         "message": "Here are the current top products for this month.",
     }
+
+
+def test_dashboard_assistant_endpoint_is_csrf_exempt_for_session_cookie(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def fake_answer(db, *, question, current_user):
+        return {
+            "supported": True,
+            "intent": "sales_today",
+            "parameters": {},
+            "result": {"total_sales": 100.0, "pos_sales": 100.0, "b2b_sales": 0.0, "refunds": 0.0},
+            "message": "Today's total sales are 100.00.",
+        }
+
+    monkeypatch.setattr(dashboard_router, "answer_dashboard_question", fake_answer)
+
+    user = SimpleNamespace(
+        id=1,
+        name="Admin",
+        role="admin",
+        permissions="page_dashboard",
+        is_active=True,
+    )
+    fake_db = FakePermissionSession()
+
+    with _make_client(user, fake_db) as client:
+        client.cookies.set("access_token", "session-cookie-token")
+        response = client.post("/dashboard/assistant", json={"question": "today's sales"})
+
+    assert response.status_code == 200
+    assert response.json()["intent"] == "sales_today"
+
+
+def test_dashboard_data_includes_monthly_expenses(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def fake_expense_summary(_db):
+        return {
+            "this_month": 4200.5,
+            "last_month": 3150.25,
+            "total_all": 10000.75,
+            "breakdown": [],
+        }
+
+    monkeypatch.setattr(dashboard_router, "get_expense_summary", fake_expense_summary)
+
+    payload = asyncio.run(dashboard_router.dashboard_data(db=FakeDashboardDataSession()))
+
+    assert payload["expenses_month"] == 4200.5
+    assert payload["expenses_last_month"] == 3150.25

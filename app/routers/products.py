@@ -19,6 +19,16 @@ router = APIRouter(
     dependencies=[Depends(require_permission("page_products"))],
 )
 
+ITEM_TYPE_OPTIONS = [
+    ("finished", "Finished Product"),
+    ("raw", "Raw Material"),
+    ("fresh", "Fresh"),
+    ("packing", "Packing"),
+    ("ingredient", "Ingredient"),
+]
+
+ITEM_TYPE_LABELS = {value: label for value, label in ITEM_TYPE_OPTIONS}
+
 
 # ── API ────────────────────────────────────────────────
 @router.get("/api/next-sku")
@@ -194,6 +204,7 @@ def products_ui():
 body.light{
     --bg:#f4f5ef;--surface:#f1f3eb;--card:#eceee6;--card2:#e4e6de;
     --border:rgba(0,0,0,0.08);--border2:rgba(0,0,0,0.14);
+    --green:#0f8a43;
     --text:#1a1e14;--sub:#4a5040;--muted:#7b816f;
 }
 body.light nav{background:rgba(244,245,239,.92);}
@@ -247,6 +258,9 @@ tr:hover td{background:rgba(255,255,255,.02);}
 .badge{display:inline-flex;padding:2px 8px;border-radius:20px;font-size:11px;font-weight:700;}
 .badge-raw     {background:rgba(251,146,60,.1);color:var(--orange);}
 .badge-finished{background:rgba(0,255,157,.1); color:var(--green);}
+.badge-fresh   {background:rgba(45,212,191,.1);color:var(--teal);}
+.badge-packing {background:rgba(77,159,255,.1);color:var(--blue);}
+.badge-ingredient{background:rgba(255,181,71,.12);color:var(--warn);}
 .badge-low     {background:rgba(255,181,71,.1);color:var(--warn);}
 .pagination{display:flex;align-items:center;justify-content:space-between;padding:14px 16px;border-top:1px solid var(--border);font-size:13px;color:var(--muted);}
 .page-btns{display:flex;gap:6px;}
@@ -342,6 +356,9 @@ tr:hover td{background:rgba(255,255,255,.02);}
                 <option value="">All Types</option>
                 <option value="raw">Raw Material</option>
                 <option value="finished">Finished Product</option>
+                <option value="fresh">Fresh</option>
+                <option value="packing">Packing</option>
+                <option value="ingredient">Ingredient</option>
             </select>
         </div>
         <div class="table-wrap">
@@ -423,6 +440,9 @@ tr:hover td{background:rgba(255,255,255,.02);}
                 <select id="f-item-type">
                     <option value="finished">Finished Product</option>
                     <option value="raw">Raw Material</option>
+                    <option value="fresh">Fresh</option>
+                    <option value="packing">Packing</option>
+                    <option value="ingredient">Ingredient</option>
                 </select>
             </div>
 
@@ -532,6 +552,13 @@ let page        = 0;
 let pageSize    = 50;
 let totalItems  = 0;
 let toastTimer  = null;
+const ITEM_TYPE_LABELS = {
+    finished: "Finished Product",
+    raw: "Raw Material",
+    fresh: "Fresh",
+    packing: "Packing",
+    ingredient: "Ingredient",
+};
 
 async function init(){
     await loadCategories();
@@ -653,7 +680,7 @@ async function loadProducts(){
         <td class="sku">${p.sku}</td>
         <td class="name">${p.name}</td>
         <td style="font-size:12px;color:var(--sub)">${p.category}</td>
-        <td><span class="badge badge-${p.item_type}">${p.item_type==="raw"?"Raw Material":"Finished"}</span></td>
+        <td><span class="badge badge-${p.item_type}">${getItemTypeLabel(p.item_type)}</span></td>
         <td class="mono">${p.price.toFixed(2)}</td>
         <td class="mono" style="color:var(--muted)">${p.cost>0?p.cost.toFixed(2):"—"}</td>
         <td class="mono" style="color:${p.stock<=0?"var(--danger)":p.low?"var(--warn)":"var(--text)"};font-weight:700">${p.stock.toFixed(0)}</td>
@@ -670,6 +697,9 @@ let searchTimer = null;
 function onSearch(){ clearTimeout(searchTimer); searchTimer=setTimeout(()=>{page=0;loadProducts();},300); }
 function prevPage(){ if(page>0){ page--; loadProducts(); } }
 function nextPage(){ if((page+1)*pageSize<totalItems){ page++; loadProducts(); } }
+function getItemTypeLabel(itemType){
+    return ITEM_TYPE_LABELS[itemType] || itemType || "Finished Product";
+}
 
 /* ── SKU AUTO-GENERATE ── */
 async function autoSKU(){

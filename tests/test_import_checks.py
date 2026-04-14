@@ -151,6 +151,27 @@ def test_import_products_creates_and_updates_records() -> None:
     assert fake_db.committed is True
 
 
+def test_import_products_keeps_extended_item_types() -> None:
+    fake_db = FakeImportSession()
+    upload = _upload_workbook(
+        "products.xlsx",
+        [
+            ["SKU", "Item", "Item Type"],
+            ["2001", "Fresh Basil", "fresh"],
+            ["2002", "Paper Tray", "packing"],
+            ["2003", "Citric Acid", "ingredient"],
+        ],
+    )
+
+    payload = asyncio.run(import_data.import_products(upload, fake_db))
+
+    assert payload["ok"] is True
+    assert payload["created"] == 3
+    assert next(product for product in fake_db.products if product.sku == "2001").item_type == "fresh"
+    assert next(product for product in fake_db.products if product.sku == "2002").item_type == "packing"
+    assert next(product for product in fake_db.products if product.sku == "2003").item_type == "ingredient"
+
+
 def test_import_stock_updates_product_and_records_adjustment() -> None:
     existing = Product(
         id=1,

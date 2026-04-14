@@ -16,6 +16,19 @@ router = APIRouter(
     dependencies=[Depends(require_permission("page_import"))],
 )
 
+ITEM_TYPE_ALIASES = {
+    "finished": "finished",
+    "finished product": "finished",
+    "product": "finished",
+    "raw": "raw",
+    "raw material": "raw",
+    "fresh": "fresh",
+    "packing": "packing",
+    "packaging": "packing",
+    "ingredient": "ingredient",
+    "ingredients": "ingredient",
+}
+
 
 def find_col(raw_headers, names):
     for name in names:
@@ -32,6 +45,13 @@ def safe_str(v):
 def safe_float(v):
     try: return float(v)
     except (ValueError, TypeError): return None
+
+
+def normalize_item_type(value):
+    raw_value = (safe_str(value) or "").strip().lower()
+    if not raw_value:
+        return "finished"
+    return ITEM_TYPE_ALIASES.get(raw_value, raw_value)
 
 
 # ── PREVIEW ────────────────────────────────────────────
@@ -99,8 +119,7 @@ async def import_products(file: UploadFile = File(...), db: AsyncSession = Depen
         price = safe_float(ws.cell(row, col_price).value if col_price else None) or 0.0
         cat   = v(col_cat)
 
-        raw_t = v(col_type) or ""
-        item_type = "raw" if "raw" in raw_t.lower() else "finished"
+        item_type = normalize_item_type(v(col_type))
 
         ex_r = await db.execute(select(Product).where(Product.sku == sku))
         existing = ex_r.scalar_one_or_none()
@@ -265,6 +284,7 @@ def import_ui():
 body.light{
     --bg:#f4f5ef;--surface:#f1f3eb;--card:#eceee6;--card2:#e4e6de;
     --border:rgba(0,0,0,0.08);--border2:rgba(0,0,0,0.14);
+    --green:#0f8a43;
     --text:#1a1e14;--sub:#4a5040;--muted:#7b816f;
 }
 body.light nav{background:rgba(244,245,239,.92);}
@@ -385,7 +405,7 @@ td{padding:8px 12px;border-top:1px solid var(--border);color:var(--sub);white-sp
                     <div class="col-row"><span class="col-excel">Unit Cost</span><span class="col-arrow">→</span><span class="col-field">Cost Price</span></div>
                     <div class="col-row"><span class="col-excel">Sales price</span><span class="col-arrow">→</span><span class="col-field">Sale Price</span></div>
                     <div class="col-row"><span class="col-excel">Group</span><span class="col-arrow">→</span><span class="col-field">Category</span></div>
-                    <div class="col-row"><span class="col-excel">Item Type</span><span class="col-arrow">→</span><span class="col-field">Raw / Finished</span><span class="col-opt">(defaults to finished)</span></div>
+                    <div class="col-row"><span class="col-excel">Item Type</span><span class="col-arrow">→</span><span class="col-field">Raw / Finished / Fresh / Packing / Ingredient</span><span class="col-opt">(defaults to finished)</span></div>
                 </div>
                 <div class="drop-zone" id="drop-products" ondragover="onDrag(event,'products')" ondragleave="offDrag('products')" ondrop="onDrop(event,'products')">
                     <input type="file" accept=".xlsx,.xls" onchange="onFile(this,'products')">

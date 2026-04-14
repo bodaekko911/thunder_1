@@ -22,7 +22,7 @@ from app.models.user import User
 router = APIRouter(
     prefix="/refunds",
     tags=["Refunds"],
-    dependencies=[Depends(require_permission("page_pos"))],
+    dependencies=[Depends(require_action("pos", "sales", "refund"))],
 )
 
 
@@ -405,6 +405,7 @@ def refunds_ui():
 body.light {
     --bg: #f2f4f8; --card: #ffffff; --card2: #f7f8fb;
     --border: rgba(0,0,0,0.07); --border2: rgba(0,0,0,0.13);
+    --green: #0f8a43;
     --text: #141820; --sub: #505870; --muted: #8090a8;
 }
 body.light nav { background: rgba(242,244,248,.92); }

@@ -64,6 +64,7 @@ class UserLogin(BaseModel):
 class ChangePasswordData(BaseModel):
     old_password: str = Field(..., min_length=1, max_length=PASSWORD_MAX_LENGTH)
     new_password: str = Field(..., min_length=1, max_length=PASSWORD_MAX_LENGTH)
+    confirm_new_password: str = Field(..., min_length=1, max_length=PASSWORD_MAX_LENGTH)
 
     @field_validator("new_password")
     @classmethod

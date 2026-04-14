@@ -60,6 +60,15 @@ class BatchReceiptCreate(BaseModel):
     items:        list[BatchReceiptItem] = Field(..., min_length=1)
 
 
+class ReceiptUpdate(BaseModel):
+    """Editable fields for an existing receipt."""
+    qty:          float           = Field(..., gt=0)
+    unit_cost:    Optional[float] = Field(None, ge=0)
+    receive_date: date_type
+    supplier_ref: Optional[str]   = Field(None, max_length=150)
+    notes:        Optional[str]   = None
+
+
 # ── Private helpers ───────────────────────────────────────────────────────────
 
 async def _next_receipt_ref(db: AsyncSession) -> str:
@@ -160,6 +169,178 @@ async def _post_receipt_expense(
     )
     db.add(expense)
     return expense
+
+
+async def _get_receipt_or_404(db: AsyncSession, receipt_id: int) -> ProductReceipt:
+    result = await db.execute(
+        select(ProductReceipt)
+        .options(
+            selectinload(ProductReceipt.product),
+            selectinload(ProductReceipt.user),
+            selectinload(ProductReceipt.expense),
+        )
+        .where(ProductReceipt.id == receipt_id)
+    )
+    receipt = result.scalar_one_or_none()
+    if receipt is None:
+        raise HTTPException(status_code=404, detail=f"Receipt {receipt_id} not found")
+    return receipt
+
+
+def _quantize_receipt_values(
+    qty_value: float,
+    unit_cost_value: Optional[float],
+) -> tuple[Decimal, Optional[Decimal], Optional[Decimal]]:
+    qty = Decimal(str(qty_value)).quantize(_QTY, rounding=ROUND_HALF_UP)
+    unit_cost: Optional[Decimal] = None
+    total_cost: Optional[Decimal] = None
+    if unit_cost_value is not None and unit_cost_value > 0:
+        unit_cost = Decimal(str(unit_cost_value)).quantize(_MONEY, rounding=ROUND_HALF_UP)
+        total_cost = (qty * unit_cost).quantize(_MONEY, rounding=ROUND_HALF_UP)
+    return qty, unit_cost, total_cost
+
+
+async def _get_receipt_move(db: AsyncSession, receipt_id: int) -> StockMove | None:
+    result = await db.execute(
+        select(StockMove)
+        .where(StockMove.ref_type == "receipt", StockMove.ref_id == receipt_id)
+        .order_by(StockMove.id.desc())
+    )
+    return result.scalar_one_or_none()
+
+
+async def _delete_expense_bundle(db: AsyncSession, expense: Expense | None) -> None:
+    if expense is None:
+        return
+
+    journal = None
+    if expense.journal_id:
+        result = await db.execute(
+            select(Journal)
+            .options(selectinload(Journal.entries).selectinload(JournalEntry.account))
+            .where(Journal.id == expense.journal_id)
+        )
+        journal = result.scalar_one_or_none()
+
+    if journal is not None:
+        for entry in journal.entries:
+            if entry.account is not None and entry.account.balance is not None:
+                entry.account.balance = Decimal(str(entry.account.balance)) - Decimal(str(entry.debit or 0)) + Decimal(str(entry.credit or 0))
+        await db.delete(journal)
+
+    await db.delete(expense)
+
+
+async def _sync_receipt_expense(
+    db: AsyncSession,
+    *,
+    receipt: ProductReceipt,
+    product_name: str,
+    qty: Decimal,
+    total_cost: Optional[Decimal],
+    receive_date: date_type,
+    supplier_ref: Optional[str],
+) -> Optional[str]:
+    if total_cost is None or total_cost <= 0:
+        if receipt.expense_id:
+            expense_result = await db.execute(
+                select(Expense)
+                .options(selectinload(Expense.category))
+                .where(Expense.id == receipt.expense_id)
+            )
+            expense = expense_result.scalar_one_or_none()
+            await _delete_expense_bundle(db, expense)
+            receipt.expense_id = None
+        return None
+
+    if receipt.expense_id is None:
+        category = await _get_or_create_stock_purchase_category(db)
+        expense = await _post_receipt_expense(
+            db,
+            category=category,
+            product_name=product_name,
+            receipt_ref=receipt.ref_number,
+            qty=qty,
+            total_cost=total_cost,
+            receive_date=receive_date,
+            supplier_ref=supplier_ref,
+            user_id=receipt.user_id,
+        )
+        await db.flush()
+        receipt.expense_id = expense.id
+        return expense.ref_number
+
+    expense_result = await db.execute(
+        select(Expense)
+        .options(selectinload(Expense.category))
+        .where(Expense.id == receipt.expense_id)
+    )
+    expense = expense_result.scalar_one_or_none()
+    if expense is None:
+        receipt.expense_id = None
+        return await _sync_receipt_expense(
+            db,
+            receipt=receipt,
+            product_name=product_name,
+            qty=qty,
+            total_cost=total_cost,
+            receive_date=receive_date,
+            supplier_ref=supplier_ref,
+        )
+
+    old_amount = Decimal(str(expense.amount or 0)).quantize(_MONEY, rounding=ROUND_HALF_UP)
+    delta = total_cost - old_amount
+
+    expense_account = await _ensure_account(db, STOCK_PURCHASE_ACCOUNT_CODE, STOCK_PURCHASE_CATEGORY_NAME, "expense")
+    cash_account = await _ensure_account(db, "1000", "Cash", "asset")
+    if delta:
+        expense_account.balance = Decimal(str(expense_account.balance or 0)) + delta
+        cash_account.balance = Decimal(str(cash_account.balance or 0)) - delta
+
+    if expense.journal_id:
+        journal_result = await db.execute(
+            select(Journal)
+            .options(selectinload(Journal.entries))
+            .where(Journal.id == expense.journal_id)
+        )
+        journal = journal_result.scalar_one_or_none()
+    else:
+        journal = None
+
+    if journal is None:
+        journal = Journal(
+            ref_type="expense",
+            description=f"{STOCK_PURCHASE_CATEGORY_NAME} — {receipt.ref_number}",
+            user_id=receipt.user_id,
+        )
+        db.add(journal)
+        await db.flush()
+        expense.journal_id = journal.id
+
+    debit_entry = next((entry for entry in journal.entries if Decimal(str(entry.debit or 0)) > 0), None)
+    credit_entry = next((entry for entry in journal.entries if Decimal(str(entry.credit or 0)) > 0), None)
+    if debit_entry is None:
+        debit_entry = JournalEntry(journal_id=journal.id, account_id=expense_account.id, debit=0, credit=0)
+        db.add(debit_entry)
+    debit_entry.account_id = expense_account.id
+    debit_entry.debit = float(total_cost)
+    debit_entry.credit = 0
+    if credit_entry is None:
+        credit_entry = JournalEntry(journal_id=journal.id, account_id=cash_account.id, debit=0, credit=0)
+        db.add(credit_entry)
+    credit_entry.account_id = cash_account.id
+    credit_entry.debit = 0
+    credit_entry.credit = float(total_cost)
+    journal.description = f"{STOCK_PURCHASE_CATEGORY_NAME} — {receipt.ref_number}"
+
+    expense.expense_date = receive_date
+    expense.amount = float(total_cost)
+    expense.vendor = supplier_ref
+    expense.description = (
+        f"Stock receipt {receipt.ref_number} — "
+        f"{float(qty):.3f} × {product_name}"
+    )
+    return expense.ref_number
 
 
 async def _create_receipt_core(
@@ -279,6 +460,133 @@ async def create_receipt(
     result = await _create_receipt_core(db, data, current_user)
     await db.commit()
     return result
+
+
+async def update_receipt(
+    db: AsyncSession,
+    receipt_id: int,
+    data: ReceiptUpdate,
+    current_user: User,
+) -> dict[str, Any]:
+    receipt = await _get_receipt_or_404(db, receipt_id)
+    product = receipt.product
+    if product is None:
+        raise HTTPException(status_code=404, detail=f"Product {receipt.product_id} not found")
+
+    old_qty = Decimal(str(receipt.qty or 0)).quantize(_QTY, rounding=ROUND_HALF_UP)
+    new_qty, unit_cost, total_cost = _quantize_receipt_values(data.qty, data.unit_cost)
+    qty_delta = new_qty - old_qty
+
+    current_stock = Decimal(str(product.stock or 0)).quantize(_QTY, rounding=ROUND_HALF_UP)
+    stock_before_receipt = current_stock - old_qty
+    new_stock = stock_before_receipt + new_qty
+    if new_stock < 0:
+        raise HTTPException(status_code=400, detail="Cannot reduce receipt below current available stock")
+
+    product.stock = new_stock
+    if unit_cost is not None:
+        product.cost = unit_cost
+
+    supplier_ref = (data.supplier_ref or "").strip() or None
+    notes = (data.notes or "").strip() or None
+
+    receipt.qty = new_qty
+    receipt.unit_cost = unit_cost
+    receipt.total_cost = total_cost
+    receipt.receive_date = data.receive_date
+    receipt.supplier_ref = supplier_ref
+    receipt.notes = notes
+
+    move = await _get_receipt_move(db, receipt.id)
+    if move is not None:
+        move.qty_before = stock_before_receipt
+        move.qty = new_qty
+        move.qty_after = new_stock
+        move.note = f"Receipt {receipt.ref_number}"
+
+    expense_ref = await _sync_receipt_expense(
+        db,
+        receipt=receipt,
+        product_name=product.name,
+        qty=new_qty,
+        total_cost=total_cost,
+        receive_date=data.receive_date,
+        supplier_ref=supplier_ref,
+    )
+
+    record(
+        db,
+        "Receive",
+        "update_receipt",
+        f"{receipt.ref_number} updated",
+        user=current_user,
+        ref_type="receipt",
+        ref_id=receipt.id,
+    )
+    await db.commit()
+
+    return {
+        "id": receipt.id,
+        "ref_number": receipt.ref_number,
+        "product_id": product.id,
+        "product_name": product.name,
+        "product_sku": product.sku,
+        "receive_date": receipt.receive_date.isoformat() if receipt.receive_date else None,
+        "qty": float(new_qty),
+        "unit_cost": float(unit_cost) if unit_cost is not None else None,
+        "total_cost": float(total_cost) if total_cost is not None else None,
+        "supplier_ref": supplier_ref,
+        "notes": notes,
+        "expense_id": receipt.expense_id,
+        "expense_ref": expense_ref,
+        "received_by": receipt.user.name if receipt.user else None,
+    }
+
+
+async def delete_receipt(
+    db: AsyncSession,
+    receipt_id: int,
+    current_user: User,
+) -> dict[str, Any]:
+    receipt = await _get_receipt_or_404(db, receipt_id)
+    product = receipt.product
+    if product is None:
+        raise HTTPException(status_code=404, detail=f"Product {receipt.product_id} not found")
+
+    receipt_qty = Decimal(str(receipt.qty or 0)).quantize(_QTY, rounding=ROUND_HALF_UP)
+    current_stock = Decimal(str(product.stock or 0)).quantize(_QTY, rounding=ROUND_HALF_UP)
+    new_stock = current_stock - receipt_qty
+    if new_stock < 0:
+        raise HTTPException(status_code=400, detail="Cannot delete receipt because stock has already been consumed")
+
+    product.stock = new_stock
+
+    move = await _get_receipt_move(db, receipt.id)
+    if move is not None:
+        await db.delete(move)
+
+    if receipt.expense_id:
+        expense_result = await db.execute(
+            select(Expense)
+            .options(selectinload(Expense.category))
+            .where(Expense.id == receipt.expense_id)
+        )
+        expense = expense_result.scalar_one_or_none()
+        await _delete_expense_bundle(db, expense)
+
+    deleted_ref = receipt.ref_number
+    await db.delete(receipt)
+    record(
+        db,
+        "Receive",
+        "delete_receipt",
+        f"{deleted_ref} deleted",
+        user=current_user,
+        ref_type="receipt",
+        ref_id=receipt_id,
+    )
+    await db.commit()
+    return {"ok": True, "id": receipt_id, "ref_number": deleted_ref}
 
 
 async def create_receipt_batch(

@@ -152,6 +152,18 @@ PERMISSION_MATRIX = [
         ],
     },
     {
+        "module": "expenses",
+        "resource": "expenses",
+        "label": "Expenses",
+        "icon": "accounting",
+        "actions": [
+            {"action": "view", "key": "page_expenses", "label": "Open expenses"},
+            {"action": "create", "key": "action_expenses_create", "label": "Create expenses"},
+            {"action": "update", "key": "action_expenses_update", "label": "Edit expenses"},
+            {"action": "delete", "key": "action_expenses_delete", "label": "Delete expenses"},
+        ],
+    },
+    {
         "module": "customers",
         "resource": "customers",
         "label": "Customers",
@@ -171,13 +183,26 @@ PERMISSION_MATRIX = [
             {"action": "view_purchases", "key": "tab_suppliers_purchases", "label": "Purchase orders tab"},
         ],
     },
+    {
+        "module": "receive_products",
+        "resource": "receipts",
+        "label": "Receive Products",
+        "icon": "suppliers",
+        "actions": [
+            {"action": "view", "key": "page_receive_products", "label": "Open receive products"},
+            {"action": "create", "key": "action_receive_products_create", "label": "Receive stock"},
+            {"action": "update", "key": "action_receive_products_update", "label": "Edit received stock"},
+            {"action": "delete", "key": "action_receive_products_delete", "label": "Delete received stock"},
+            {"action": "export", "key": "action_receive_products_export", "label": "Export receive products"},
+        ],
+    },
 ]
 
 
 ROLE_DEFINITIONS = {
     "cashier": {
         "label": "Cashier",
-        "description": "POS terminal access with checkout actions.",
+        "description": "Frontline sales role for checkout staff. Includes POS access, creating sales, applying approved discounts, and settle-later handling. Excludes refunds, reporting, accounting, inventory management, and user administration unless added manually.",
         "permissions": {
             "page_pos",
             "action_pos_create_sale",
@@ -187,7 +212,7 @@ ROLE_DEFINITIONS = {
     },
     "manager": {
         "label": "Manager",
-        "description": "Operations access across sales, inventory, production, farm, and reports.",
+        "description": "Operations leadership role with broad day-to-day control. Covers dashboard, reports, POS including refunds, B2B workflows, inventory adjustments, products, imports, production, farm intake, customers, and suppliers. Does not include accounting journals, HR/payroll, or user administration by default.",
         "permissions": {
             "page_dashboard",
             "page_reports",
@@ -228,11 +253,16 @@ ROLE_DEFINITIONS = {
             "page_suppliers",
             "tab_suppliers_directory",
             "tab_suppliers_purchases",
+            "page_receive_products",
+            "action_receive_products_create",
+            "action_receive_products_update",
+            "action_receive_products_delete",
+            "action_receive_products_export",
         },
     },
     "accountant": {
         "label": "Accountant",
-        "description": "Financial operations, journals, and reporting.",
+        "description": "Finance-focused role for bookkeeping and financial oversight. Includes dashboard, reporting, accounting tabs, journal posting, and financial review tools. Excludes sales execution, operational stock handling, HR, and user administration unless explicitly granted.",
         "permissions": {
             "page_dashboard",
             "page_reports",
@@ -247,11 +277,15 @@ ROLE_DEFINITIONS = {
             "tab_accounting_journal",
             "tab_accounting_pl",
             "action_accounting_post_journal",
+            "page_expenses",
+            "action_expenses_create",
+            "action_expenses_update",
+            "action_expenses_delete",
         },
     },
     "hr": {
         "label": "HR",
-        "description": "People operations, attendance, and payroll.",
+        "description": "People operations role for workforce administration. Includes dashboard visibility plus employee records, attendance, payroll processing, and payroll payment actions. Excludes sales, accounting, stock operations, and user management by default.",
         "permissions": {
             "page_dashboard",
             "page_hr",
@@ -264,7 +298,7 @@ ROLE_DEFINITIONS = {
     },
     "viewer": {
         "label": "Viewer",
-        "description": "Read-only access to dashboards and selected reports.",
+        "description": "Read-only role for owners, auditors, or supervisors who need visibility without operational control. Includes dashboard access and report tabs only. Cannot create, edit, approve, delete, refund, post journals, or manage users unless extra permissions are added.",
         "permissions": {
             "page_dashboard",
             "page_reports",
@@ -276,7 +310,7 @@ ROLE_DEFINITIONS = {
     },
     "admin": {
         "label": "Admin",
-        "description": "Full system access including user management and audit visibility.",
+        "description": "Full system administrator with unrestricted access across all modules, permissions, settings, users, and audit visibility. Use sparingly for trusted system owners only.",
         "permissions": {"*"},
     },
 }
@@ -309,8 +343,12 @@ def get_permission_key(module: str, resource: str, action: str) -> str:
     raise KeyError(f"Unknown permission action: {module}.{resource}.{action}")
 
 
+PAGE_ALIASES = {}
+
+
 def _build_page_catalog() -> list[dict]:
     pages: dict[str, dict] = {}
+    module_page_map: dict[str, str] = {}
     for entry in PERMISSION_MATRIX:
         page_key = None
         page_label = entry["label"]
@@ -329,10 +367,27 @@ def _build_page_catalog() -> list[dict]:
             {"key": page_key, "label": page_label, "icon": icon, "actions": []},
         )
         page_entry["actions"].extend(children)
+        module_page_map[entry["module"]] = page_key
+
+    for entry in PERMISSION_MATRIX:
+        has_page_view = any(
+            action["action"] == "view" and action["key"].startswith("page_")
+            for action in entry["actions"]
+        )
+        if has_page_view:
+            continue
+        page_key = module_page_map.get(entry["module"])
+        if page_key is None or page_key not in pages:
+            continue
+        pages[page_key]["actions"].extend(
+            {"key": action["key"], "label": action["label"]}
+            for action in entry["actions"]
+        )
 
     for page_entry in pages.values():
         deduped = {action["key"]: action for action in page_entry["actions"]}
         page_entry["actions"] = list(deduped.values())
+        page_entry["aliases"] = PAGE_ALIASES.get(page_entry["key"], [])
     return list(pages.values())
 
 

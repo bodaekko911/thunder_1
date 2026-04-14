@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends
 from fastapi.responses import HTMLResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.permissions import get_current_user, require_permission
+from app.core.permissions import require_action, require_permission
 from app.database import get_async_session
 from app.models.user import User
 from app.routers.expenses import expenses_ui as legacy_expenses_ui
@@ -24,7 +24,7 @@ from app.services.expense_service import (
 router = APIRouter(
     prefix="/expenses",
     tags=["Expenses"],
-    dependencies=[Depends(require_permission("page_accounting"))],
+    dependencies=[Depends(require_permission("page_expenses"))],
 )
 
 
@@ -37,7 +37,7 @@ async def get_categories(db: AsyncSession = Depends(get_async_session)):
 async def create_expense_category(
     data: ExpenseCategoryCreate,
     db: AsyncSession = Depends(get_async_session),
-    _: User = Depends(get_current_user),
+    _: User = Depends(require_action("expenses", "expenses", "create")),
 ):
     return await create_category(db, data)
 
@@ -46,7 +46,7 @@ async def create_expense_category(
 async def delete_expense_category(
     cat_id: int,
     db: AsyncSession = Depends(get_async_session),
-    _: User = Depends(get_current_user),
+    _: User = Depends(require_action("expenses", "expenses", "delete")),
 ):
     return await archive_category(db, cat_id)
 
@@ -69,7 +69,7 @@ async def get_expense_summary(db: AsyncSession = Depends(get_async_session)):
 async def add_expense(
     data: ExpenseCreate,
     db: AsyncSession = Depends(get_async_session),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_action("expenses", "expenses", "create")),
 ):
     return await create_expense_entry(db, data, current_user)
 
@@ -79,7 +79,7 @@ async def edit_expense(
     expense_id: int,
     data: ExpenseUpdate,
     db: AsyncSession = Depends(get_async_session),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_action("expenses", "expenses", "update")),
 ):
     return await update_expense_entry(db, expense_id, data, current_user)
 
@@ -88,7 +88,7 @@ async def edit_expense(
 async def remove_expense(
     expense_id: int,
     db: AsyncSession = Depends(get_async_session),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_action("expenses", "expenses", "delete")),
 ):
     return await delete_expense_entry(db, expense_id, current_user)
 

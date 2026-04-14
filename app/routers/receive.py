@@ -1,27 +1,67 @@
 from typing import Optional
 
+from datetime import date
+import io
+
 from fastapi import APIRouter, Depends
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.permissions import get_current_user, require_permission
+from app.core.permissions import require_action, require_permission
 from app.database import get_async_session
 from app.models.product import Product
 from app.models.user import User
 from app.services.receive_service import (
     BatchReceiptCreate,
     ReceiptCreate,
+    ReceiptUpdate,
     create_receipt,
     create_receipt_batch,
+    delete_receipt,
     list_receipts,
+    update_receipt,
 )
 
 router = APIRouter(
     prefix="/receive",
     tags=["Receive Products"],
-    dependencies=[Depends(require_permission("page_suppliers"))],
+    dependencies=[Depends(require_permission("page_receive_products"))],
 )
+
+
+def to_xlsx(headers, rows, sheet_name="Receive Products"):
+    import openpyxl
+    from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = sheet_name
+    hfill = PatternFill("solid", fgColor="2a7a2a")
+    hfont = Font(bold=True, color="FFFFFF", size=11)
+    thin = Side(style="thin", color="DDDDDD")
+    border = Border(left=thin, right=thin, top=thin, bottom=thin)
+    for col, header in enumerate(headers, 1):
+        cell = ws.cell(row=1, column=col, value=header)
+        cell.fill = hfill
+        cell.font = hfont
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+        cell.border = border
+    for row_idx, row in enumerate(rows, 2):
+        for col_idx, value in enumerate(row, 1):
+            cell = ws.cell(row=row_idx, column=col_idx, value=value)
+            cell.border = border
+            cell.alignment = Alignment(vertical="center")
+            if row_idx % 2 == 0:
+                cell.fill = PatternFill("solid", fgColor="F5FAF5")
+    for column in ws.columns:
+        max_len = max((len(str(cell.value or "")) for cell in column), default=10)
+        ws.column_dimensions[column[0].column_letter].width = min(max_len + 4, 40)
+    ws.row_dimensions[1].height = 20
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    return buf
 
 
 # ── API ───────────────────────────────────────────────────────────────────────
@@ -48,7 +88,7 @@ async def get_products(db: AsyncSession = Depends(get_async_session)):
 async def receive_products_batch(
     data: BatchReceiptCreate,
     db: AsyncSession = Depends(get_async_session),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_action("receive_products", "receipts", "create")),
 ):
     return await create_receipt_batch(db, data, current_user)
 
@@ -58,7 +98,7 @@ async def receive_products_batch(
 async def receive_products(
     data: ReceiptCreate,
     db: AsyncSession = Depends(get_async_session),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_action("receive_products", "receipts", "create")),
 ):
     return await create_receipt(db, data, current_user)
 
@@ -71,6 +111,71 @@ async def get_receipt_history(
     db: AsyncSession = Depends(get_async_session),
 ):
     return await list_receipts(db, skip=skip, limit=limit, product_id=product_id)
+
+
+@router.put("/api/receipt/{receipt_id}")
+async def edit_receipt(
+    receipt_id: int,
+    data: ReceiptUpdate,
+    db: AsyncSession = Depends(get_async_session),
+    current_user: User = Depends(require_action("receive_products", "receipts", "update")),
+):
+    return await update_receipt(db, receipt_id, data, current_user)
+
+
+@router.delete("/api/receipt/{receipt_id}")
+async def remove_receipt(
+    receipt_id: int,
+    db: AsyncSession = Depends(get_async_session),
+    current_user: User = Depends(require_action("receive_products", "receipts", "delete")),
+):
+    return await delete_receipt(db, receipt_id, current_user)
+
+
+@router.get("/api/export.xlsx")
+async def export_receipts_excel(
+    product_id: Optional[int] = None,
+    db: AsyncSession = Depends(get_async_session),
+    _: User = Depends(require_action("receive_products", "receipts", "export")),
+):
+    data = await list_receipts(db, skip=0, limit=10000, product_id=product_id)
+    headers = [
+        "Receipt #",
+        "Receive Date",
+        "Product",
+        "SKU",
+        "Qty",
+        "Unit Cost",
+        "Total Cost",
+        "Expense Ref",
+        "Supplier Ref",
+        "Notes",
+        "Received By",
+        "Created At",
+    ]
+    rows = [
+        [
+            item["ref_number"],
+            item["receive_date"],
+            item["product_name"],
+            item["product_sku"],
+            item["qty"],
+            item["unit_cost"],
+            item["total_cost"],
+            item["expense_ref"],
+            item["supplier_ref"],
+            item["notes"],
+            item["received_by"],
+            item["created_at"],
+        ]
+        for item in data["items"]
+    ]
+    buf = to_xlsx(headers, rows, "Receive Products")
+    return StreamingResponse(
+        buf,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f"attachment; filename=receive_products_{date.today()}.xlsx"},
+    )
 
 
 # ── UI ────────────────────────────────────────────────────────────────────────
@@ -94,6 +199,7 @@ def receive_ui():
 body.light{
   --bg:#f4f5ef;--surface:#f1f3eb;--card:#eceee6;--card2:#e4e6de;
   --border:rgba(0,0,0,0.08);--border2:rgba(0,0,0,0.14);
+  --green:#0f8a43;
   --text:#1a1e14;--sub:#4a5040;--muted:#7b816f;
 }
 body.light nav{background:rgba(244,245,239,.92);}
@@ -136,6 +242,8 @@ nav{position:sticky;top:0;z-index:200;display:flex;align-items:center;
 .section-title{font-size:11px;font-weight:600;letter-spacing:2px;text-transform:uppercase;
   color:var(--muted);margin-bottom:20px;display:flex;align-items:center;gap:12px}
 .section-title::after{content:'';flex:1;height:1px;background:linear-gradient(90deg,var(--border2),transparent)}
+.section-head{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:20px}
+.section-head .section-title{margin-bottom:0;flex:1}
 
 /* ── meta fields (date / supplier / notes) ── */
 .meta-grid{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:20px}
@@ -223,6 +331,23 @@ body.light table.hist tr:hover td{background:rgba(0,0,0,.03)}
 .badge-exp{background:rgba(0,255,157,.1);color:var(--green);border-color:rgba(0,255,157,.2)}
 .badge-none{background:rgba(68,80,102,.2);color:var(--muted);border-color:transparent}
 .empty-row{text-align:center;padding:40px;color:var(--muted)}
+.history-actions{display:flex;gap:8px;flex-wrap:wrap}
+.action-btn{background:transparent;border:1px solid var(--border2);color:var(--sub);padding:6px 10px;border-radius:8px;cursor:pointer;font-size:12px;font-family:var(--sans);transition:all .2s}
+.action-btn:hover{border-color:var(--blue);color:var(--blue)}
+.action-btn.danger:hover{border-color:var(--danger);color:var(--danger)}
+.action-btn.export{border-color:rgba(0,255,157,.25);color:var(--green)}
+.action-btn.export:hover{border-color:var(--green)}
+
+/* modal */
+.modal-wrap{position:fixed;inset:0;background:rgba(4,7,14,.72);backdrop-filter:blur(8px);display:none;align-items:center;justify-content:center;padding:24px;z-index:999}
+.modal-wrap.open{display:flex}
+.modal-card{width:min(560px,100%);background:var(--card);border:1px solid var(--border2);border-radius:18px;padding:24px;box-shadow:0 24px 50px rgba(0,0,0,.45)}
+.modal-title{font-size:18px;font-weight:800;margin-bottom:6px}
+.modal-sub{font-size:13px;color:var(--muted);margin-bottom:18px}
+.modal-actions{display:flex;justify-content:flex-end;gap:10px;margin-top:18px}
+.modal-btn{border:none;border-radius:10px;padding:10px 16px;font-family:var(--sans);font-size:13px;font-weight:700;cursor:pointer}
+.modal-btn.secondary{background:var(--card2);color:var(--sub);border:1px solid var(--border2)}
+.modal-btn.primary{background:var(--green);color:#0a0c08}
 
 /* ── toast ── */
 .toast{position:fixed;bottom:24px;right:24px;z-index:9999;
@@ -258,7 +383,7 @@ body.light table.hist tr:hover td{background:rgba(0,0,0,.03)}
   </div>
 
   <!-- ── Receive form ── -->
-  <div class="card">
+  <div class="card" id="receive-form-card">
     <div class="section-title">New Receipt</div>
 
     <form id="receive-form" onsubmit="submitBatch(event)">
@@ -296,7 +421,7 @@ body.light table.hist tr:hover td{background:rgba(0,0,0,.03)}
         </table>
       </div>
 
-      <button type="button" class="add-row-btn" onclick="addRow()">&#43; Add Product</button>
+      <button type="button" class="add-row-btn" id="add-row-btn" onclick="addRow()">&#43; Add Product</button>
 
       <div class="grand-total">
         <span class="grand-total-label">Grand Total</span>
@@ -312,14 +437,17 @@ body.light table.hist tr:hover td{background:rgba(0,0,0,.03)}
 
   <!-- ── History ── -->
   <div class="card">
-    <div class="section-title">Receipt History</div>
+    <div class="section-head">
+      <div class="section-title">Receipt History</div>
+      <button type="button" class="action-btn export" id="export-btn" onclick="exportReceipts()" style="display:none">Export Excel</button>
+    </div>
     <div class="table-wrap">
       <table class="hist">
         <thead>
           <tr>
             <th>Receipt #</th><th>Date</th><th>Product</th>
             <th>Qty</th><th>Unit Cost</th><th>Total</th>
-            <th>Expense</th><th>Supplier Ref</th><th>Notes</th><th>By</th>
+            <th>Expense</th><th>Supplier Ref</th><th>Notes</th><th>By</th><th>Actions</th>
           </tr>
         </thead>
         <tbody id="history-body">
@@ -329,6 +457,43 @@ body.light table.hist tr:hover td{background:rgba(0,0,0,.03)}
     </div>
   </div>
 
+</div>
+
+<div class="modal-wrap" id="edit-modal">
+  <div class="modal-card">
+    <div class="modal-title">Edit Receipt</div>
+    <div class="modal-sub" id="edit-modal-sub">Update this received stock entry.</div>
+    <div class="meta-grid">
+      <div class="field">
+        <label>Product</label>
+        <input type="text" id="edit-product" readonly>
+      </div>
+      <div class="field">
+        <label>Receive Date *</label>
+        <input type="date" id="edit-date" required>
+      </div>
+      <div class="field">
+        <label>Quantity *</label>
+        <input type="number" id="edit-qty" min="0.001" step="0.001" required>
+      </div>
+      <div class="field">
+        <label>Unit Cost</label>
+        <input type="number" id="edit-cost" min="0" step="0.01">
+      </div>
+      <div class="field full">
+        <label>Supplier / Reference</label>
+        <input type="text" id="edit-supplier" maxlength="150">
+      </div>
+      <div class="field full">
+        <label>Notes</label>
+        <textarea id="edit-notes" maxlength="500" rows="3"></textarea>
+      </div>
+    </div>
+    <div class="modal-actions">
+      <button type="button" class="modal-btn secondary" onclick="closeEditModal()">Cancel</button>
+      <button type="button" class="modal-btn primary" id="edit-save-btn" onclick="saveEditReceipt()">Save Changes</button>
+    </div>
+  </div>
 </div>
 
 <div class="toast" id="toast"></div>
@@ -342,6 +507,27 @@ if (!document.cookie.split(';').some(c => c.trim().startsWith('logged_in='))) {
 // ── State ───────────────────────────────────────────────────────────────────
 let _products  = [];   // [{id, sku, name, unit, cost, stock}, …]
 let _rowSeq    = 0;    // monotonic counter for unique row IDs
+let _currentUserRole = '';
+let _currentUserPermissions = new Set();
+let _historyItems = [];
+let _editingReceipt = null;
+
+function hasPermission(permission) {
+  return _currentUserRole === 'admin' || _currentUserPermissions.has(permission);
+}
+
+function applyReceivePermissions() {
+  const canCreate = hasPermission('action_receive_products_create');
+  const canExport = hasPermission('action_receive_products_export');
+  const formCard = document.getElementById('receive-form-card');
+  const addRowBtn = document.getElementById('add-row-btn');
+  const submitBtn = document.getElementById('submit-btn');
+  const exportBtn = document.getElementById('export-btn');
+  if (formCard) formCard.style.display = canCreate ? '' : 'none';
+  if (addRowBtn) addRowBtn.style.display = canCreate ? '' : 'none';
+  if (submitBtn) submitBtn.style.display = canCreate ? '' : 'none';
+  if (exportBtn) exportBtn.style.display = canExport ? '' : 'none';
+}
 
 // ── Bootstrap ───────────────────────────────────────────────────────────────
 async function init() {
@@ -360,8 +546,15 @@ async function initUser() {
     const r = await fetch('/auth/me');
     if (!r.ok) { window.location.href = '/'; return; }
     const u = await r.json();
+    _currentUserRole = u.role || '';
+    _currentUserPermissions = new Set(
+      (typeof u.permissions === 'string' ? u.permissions.split(',') : (u.permissions || []))
+        .map(v => v.trim())
+        .filter(Boolean)
+    );
     document.getElementById('user-name').innerText   = u.name;
     document.getElementById('user-avatar').innerText = u.name.charAt(0).toUpperCase();
+    applyReceivePermissions();
   } catch { window.location.href = '/'; }
 }
 
@@ -373,6 +566,7 @@ async function loadProducts() {
 
 // ── Row management ──────────────────────────────────────────────────────────
 function addRow() {
+  if (!hasPermission('action_receive_products_create')) return;
   const id  = ++_rowSeq;
   const tr  = document.createElement('tr');
   tr.className = 'data-row';
@@ -558,6 +752,10 @@ function validateSubmit() {
 // ── Submit ──────────────────────────────────────────────────────────────────
 async function submitBatch(e) {
   e.preventDefault();
+  if (!hasPermission('action_receive_products_create')) {
+    showToast('Permission denied: action_receive_products_create', 'err');
+    return;
+  }
   const btn = document.getElementById('submit-btn');
   btn.disabled = true;
   btn.textContent = 'Receiving…';
@@ -630,13 +828,17 @@ function resetForm() {
 async function loadHistory() {
   const r     = await fetch('/receive/api/history?limit=100');
   const tbody = document.getElementById('history-body');
-  if (!r.ok) { tbody.innerHTML = `<tr><td colspan="10" class="empty-row">Could not load.</td></tr>`; return; }
+  if (!r.ok) { tbody.innerHTML = `<tr><td colspan="11" class="empty-row">Could not load.</td></tr>`; return; }
   const data  = await r.json();
-  if (!data.items?.length) {
-    tbody.innerHTML = `<tr><td colspan="10" class="empty-row">No receipts yet.</td></tr>`;
+  _historyItems = data.items || [];
+  const canUpdate = hasPermission('action_receive_products_update');
+  const canDelete = hasPermission('action_receive_products_delete');
+  const canManage = canUpdate || canDelete;
+  if (!_historyItems.length) {
+    tbody.innerHTML = `<tr><td colspan="11" class="empty-row">No receipts yet.</td></tr>`;
     return;
   }
-  tbody.innerHTML = data.items.map(row => `<tr>
+  tbody.innerHTML = _historyItems.map(row => `<tr>
     <td><span class="badge">${esc(row.ref_number)}</span></td>
     <td>${esc(row.receive_date||'')}</td>
     <td>
@@ -651,10 +853,104 @@ async function loadHistory() {
     <td style="color:var(--sub);max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"
         title="${esc(row.notes||'')}">${esc(row.notes||'—')}</td>
     <td style="color:var(--muted)">${esc(row.received_by||'—')}</td>
+    <td>${canManage ? `<div class="history-actions">
+      ${canUpdate ? `<button type="button" class="action-btn" onclick="openEditModal(${row.id})">Edit</button>` : ''}
+      ${canDelete ? `<button type="button" class="action-btn danger" onclick="deleteReceipt(${row.id})">Delete</button>` : ''}
+    </div>` : '<span style="color:var(--muted)">-</span>'}</td>
   </tr>`).join('');
 }
 
 // ── Utils ───────────────────────────────────────────────────────────────────
+function openEditModal(receiptId) {
+  if (!hasPermission('action_receive_products_update')) return;
+  const receipt = _historyItems.find(item => item.id === receiptId);
+  if (!receipt) {
+    showToast('Receipt not found', 'err');
+    return;
+  }
+  _editingReceipt = receipt;
+  document.getElementById('edit-modal-sub').textContent = `Editing ${receipt.ref_number}`;
+  document.getElementById('edit-product').value = receipt.product_name || '';
+  document.getElementById('edit-date').value = receipt.receive_date || todayIso();
+  document.getElementById('edit-qty').value = parseFloat(receipt.qty || 0).toFixed(3);
+  document.getElementById('edit-cost').value = receipt.unit_cost != null ? parseFloat(receipt.unit_cost).toFixed(2) : '';
+  document.getElementById('edit-supplier').value = receipt.supplier_ref || '';
+  document.getElementById('edit-notes').value = receipt.notes || '';
+  document.getElementById('edit-modal').classList.add('open');
+}
+
+function closeEditModal() {
+  _editingReceipt = null;
+  document.getElementById('edit-modal').classList.remove('open');
+}
+
+async function saveEditReceipt() {
+  if (!_editingReceipt || !hasPermission('action_receive_products_update')) return;
+  const btn = document.getElementById('edit-save-btn');
+  btn.disabled = true;
+  btn.textContent = 'Saving...';
+  const payload = {
+    receive_date: document.getElementById('edit-date').value,
+    qty: parseFloat(document.getElementById('edit-qty').value),
+    supplier_ref: document.getElementById('edit-supplier').value.trim() || null,
+    notes: document.getElementById('edit-notes').value.trim() || null,
+  };
+  const costValue = document.getElementById('edit-cost').value.trim();
+  payload.unit_cost = costValue === '' ? null : parseFloat(costValue);
+
+  try {
+    const r = await fetch(`/receive/api/receipt/${_editingReceipt.id}`, {
+      method: 'PUT',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(payload),
+    });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) {
+      showToast(data.detail || 'Could not update receipt', 'err');
+      return;
+    }
+    closeEditModal();
+    showToast(`Receipt ${data.ref_number} updated`, 'ok');
+    await loadProducts();
+    await loadHistory();
+  } catch {
+    showToast('Network error', 'err');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Save Changes';
+  }
+}
+
+async function deleteReceipt(receiptId) {
+  if (!hasPermission('action_receive_products_delete')) return;
+  const receipt = _historyItems.find(item => item.id === receiptId);
+  if (!receipt) {
+    showToast('Receipt not found', 'err');
+    return;
+  }
+  if (!confirm(`Delete receipt ${receipt.ref_number}? This will reverse its stock receipt.`)) return;
+  try {
+    const r = await fetch(`/receive/api/receipt/${receiptId}`, {method: 'DELETE'});
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) {
+      showToast(data.detail || 'Could not delete receipt', 'err');
+      return;
+    }
+    if (_editingReceipt && _editingReceipt.id === receiptId) closeEditModal();
+    showToast(`Receipt ${receipt.ref_number} deleted`, 'ok');
+    await loadProducts();
+    await loadHistory();
+  } catch {
+    showToast('Network error', 'err');
+  }
+}
+
+function exportReceipts() {
+  if (!hasPermission('action_receive_products_export')) return;
+  showToast('Preparing Excel export...', 'ok');
+  window.location.href = '/receive/api/export.xlsx';
+}
+
 function todayIso() { return new Date().toISOString().slice(0, 10); }
 
 function esc(s) {

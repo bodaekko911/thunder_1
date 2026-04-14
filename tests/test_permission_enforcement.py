@@ -89,3 +89,129 @@ def test_b2b_delete_requires_explicit_delete_permission() -> None:
     assert response.status_code == 403
     assert response.json()["detail"] == "Permission denied: action_b2b_delete"
     assert any(log.action == "PERMISSION_DENIED" and log.ref_id == "action_b2b_delete" for log in fake_db.logged)
+
+
+def test_expense_edit_requires_explicit_update_permission() -> None:
+    user = SimpleNamespace(
+        id=10,
+        name="Expense Viewer",
+        role="viewer",
+        permissions="page_expenses",
+        is_active=True,
+    )
+    client, fake_db = _make_client(user)
+
+    response = client.put(
+        "/expenses/api/edit/12",
+        json={
+            "amount": 50,
+            "expense_date": "2026-04-14",
+            "payment_method": "cash",
+        },
+    )
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Permission denied: action_expenses_update"
+    assert any(
+        log.action == "PERMISSION_DENIED" and log.ref_id == "action_expenses_update"
+        for log in fake_db.logged
+    )
+
+
+def test_receive_products_create_requires_explicit_create_permission() -> None:
+    user = SimpleNamespace(
+        id=11,
+        name="Receive Viewer",
+        role="viewer",
+        permissions="page_receive_products",
+        is_active=True,
+    )
+    client, fake_db = _make_client(user)
+
+    response = client.post(
+        "/receive/api/receive",
+        json={
+            "product_id": 1,
+            "qty": 2,
+            "unit_cost": 5,
+            "receive_date": "2026-04-14",
+            "supplier_ref": "INV-1",
+            "notes": "test",
+        },
+    )
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Permission denied: action_receive_products_create"
+    assert any(
+        log.action == "PERMISSION_DENIED" and log.ref_id == "action_receive_products_create"
+        for log in fake_db.logged
+    )
+
+
+def test_receive_products_update_requires_explicit_update_permission() -> None:
+    user = SimpleNamespace(
+        id=12,
+        name="Receive Viewer",
+        role="viewer",
+        permissions="page_receive_products",
+        is_active=True,
+    )
+    client, fake_db = _make_client(user)
+
+    response = client.put(
+        "/receive/api/receipt/4",
+        json={
+            "qty": 2,
+            "unit_cost": 5,
+            "receive_date": "2026-04-14",
+            "supplier_ref": "INV-1",
+            "notes": "test",
+        },
+    )
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Permission denied: action_receive_products_update"
+    assert any(
+        log.action == "PERMISSION_DENIED" and log.ref_id == "action_receive_products_update"
+        for log in fake_db.logged
+    )
+
+
+def test_receive_products_delete_requires_explicit_delete_permission() -> None:
+    user = SimpleNamespace(
+        id=13,
+        name="Receive Viewer",
+        role="viewer",
+        permissions="page_receive_products",
+        is_active=True,
+    )
+    client, fake_db = _make_client(user)
+
+    response = client.delete("/receive/api/receipt/4")
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Permission denied: action_receive_products_delete"
+    assert any(
+        log.action == "PERMISSION_DENIED" and log.ref_id == "action_receive_products_delete"
+        for log in fake_db.logged
+    )
+
+
+def test_receive_products_export_requires_explicit_export_permission() -> None:
+    user = SimpleNamespace(
+        id=14,
+        name="Receive Viewer",
+        role="viewer",
+        permissions="page_receive_products",
+        is_active=True,
+    )
+    client, fake_db = _make_client(user)
+
+    response = client.get("/receive/api/export.xlsx")
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Permission denied: action_receive_products_export"
+    assert any(
+        log.action == "PERMISSION_DENIED" and log.ref_id == "action_receive_products_export"
+        for log in fake_db.logged
+    )

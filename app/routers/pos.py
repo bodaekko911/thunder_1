@@ -102,7 +102,15 @@ async def barcode_lookup(
 async def list_customers(db: AsyncSession = Depends(get_async_session)):
     _r = await db.execute(select(Customer).order_by(Customer.name))
     customers = _r.scalars().all()
-    return [{"id": c.id, "name": c.name, "phone": c.phone} for c in customers]
+    return [
+        {
+            "id": c.id,
+            "name": c.name,
+            "phone": c.phone,
+            "discount_pct": float(c.discount_pct or 0),
+        }
+        for c in customers
+    ]
 
 
 @router.post("/invoice", dependencies=[Depends(require_action("pos", "sales", "create"))])
@@ -338,6 +346,7 @@ def pos_ui():
 body.light{
     --bg:#f4f5ef;--surface:#f1f3eb;--card:#eceee6;--card2:#e4e6de;
     --border:rgba(0,0,0,0.08);--border2:rgba(0,0,0,0.14);
+    --green:#0f8a43;
     --text:#1a1e14;--sub:#4a5040;--muted:#7b816f;
 }
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0;}
@@ -566,7 +575,7 @@ body.light .toast{background:var(--card);}
     <div class="topbar-right">
         <div id="offline-indicator" style="display:none;align-items:center;gap:6px;background:rgba(255,181,71,.12);border:1px solid rgba(255,181,71,.35);color:#ffb547;font-size:12px;font-weight:700;padding:7px 12px;border-radius:9px;">📴 Offline</div>
         <div id="offline-badge" style="display:none;background:rgba(255,181,71,.12);border:1px solid rgba(255,181,71,.35);color:#ffb547;font-size:12px;font-weight:700;padding:7px 12px;border-radius:9px;cursor:pointer;" onclick="showPendingQueue()" title="Pending offline sales — click to sync"></div>
-        <a href="/refunds/" style="display:flex;align-items:center;gap:6px;background:rgba(255,77,109,.08);border:1px solid rgba(255,77,109,.25);color:#ff4d6d;font-family:var(--sans);font-size:12px;font-weight:700;padding:8px 14px;border-radius:9px;cursor:pointer;text-decoration:none;transition:all .2s;" onmouseover="this.style.background='rgba(255,77,109,.18)'" onmouseout="this.style.background='rgba(255,77,109,.08)'">↩ Refunds</a>
+        <a href="/refunds/" id="refunds-link" style="display:flex;align-items:center;gap:6px;background:rgba(255,77,109,.08);border:1px solid rgba(255,77,109,.25);color:#ff4d6d;font-family:var(--sans);font-size:12px;font-weight:700;padding:8px 14px;border-radius:9px;cursor:pointer;text-decoration:none;transition:all .2s;" onmouseover="this.style.background='rgba(255,77,109,.18)'" onmouseout="this.style.background='rgba(255,77,109,.08)'">↩ Refunds</a>
         <button class="mode-btn" id="mode-btn" onclick="toggleMode()" title="Toggle color mode">??</button>
         <div class="user-pill">
             <div class="user-avatar" id="user-avatar">A</div>
@@ -736,7 +745,13 @@ body.light .toast{background:var(--card);}
   }
   function hasPermission(permission, u){
       const role = u ? (u.role || "") : "";
-      const perms = new Set(u ? (u.permissions || []) : []);
+      const perms = new Set(
+          u
+              ? (typeof u.permissions === "string"
+                  ? u.permissions.split(",").map(v => v.trim()).filter(Boolean)
+                  : (u.permissions || []))
+              : []
+      );
       return role === "admin" || perms.has(permission);
   }
   initializeColorMode();
@@ -758,6 +773,10 @@ initUser().then(u => {
     }
     if(!hasPermission("action_pos_settle_later", u)){
         document.getElementById("settle_btn").style.display = "none";
+    }
+    if(!hasPermission("action_pos_refund", u)){
+        const refundsLink = document.getElementById("refunds-link");
+        if(refundsLink) refundsLink.style.display = "none";
     }
 });
 
@@ -857,7 +876,7 @@ window.addEventListener("offline",()=>{
 
 /* ── INIT ── */
 async function load(){
-    if(!token){ window.location.href="/"; return; }
+    if(!_hasAuthCookie()){ window.location.href="/"; return; }
     if(!navigator.onLine){
         const ind = document.getElementById("offline-indicator");
         if(ind) ind.style.display = "flex";
@@ -931,7 +950,7 @@ document.getElementById("cust_search").addEventListener("input", function(){
     dd.style.left=  rect.left+"px";
     dd.style.width= "260px";
     dd.innerHTML = f.map(c=>`
-        <div class="cust-row" onclick="selectCustomer(${c.id},'${c.name.replace(/'/g,"\\'")}')">
+        <div class="cust-row" onclick="selectCustomer(${c.id},'${c.name.replace(/'/g,"\\'")}',${c.discount_pct || 0})">
             <svg width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
                 <circle cx="12" cy="8" r="4"/><path d="M4 20c0-4 3.6-7 8-7s8 3 8 7"/>
             </svg>
@@ -940,13 +959,21 @@ document.getElementById("cust_search").addEventListener("input", function(){
     dd.style.display = "block";
 });
 
-function selectCustomer(id, name){
+function applyCustomerDiscount(discountPct){
+    const discountInput = document.getElementById("discount");
+    if(!discountInput || discountInput.disabled) return;
+    discountInput.value = Number(discountPct || 0).toFixed(1);
+    drawCart();
+}
+
+function selectCustomer(id, name, discountPct){
     selectedCustomer = id;
     document.getElementById("cust_search").value = name;
     document.getElementById("cust_dropdown").style.display = "none";
     document.getElementById("sel_name").innerText = name;
     document.getElementById("selected_badge").classList.add("show");
     document.getElementById("cust_wrap").style.display = "none";
+    applyCustomerDiscount(discountPct);
 }
 
 function clearCustomer(){
@@ -954,6 +981,7 @@ function clearCustomer(){
     document.getElementById("selected_badge").classList.remove("show");
     document.getElementById("cust_wrap").style.display = "";
     document.getElementById("cust_search").value = "";
+    applyCustomerDiscount(0);
 }
 
 document.addEventListener("click", e=>{
@@ -1114,7 +1142,7 @@ function hideToast(){ document.getElementById("toast").classList.remove("show");
 async function checkout(settleLater=false){
     if(!cart.length){ showToast("Cart is empty"); return; }
     if(settleLater && !selectedCustomer){ showToast("Select a customer to settle later"); return; }
-    if(!token){ window.location.href="/"; return; }
+    if(!_hasAuthCookie()){ window.location.href="/"; return; }
 
     let btn=document.getElementById(settleLater?"settle_btn":"checkout_btn");
     btn.disabled=true; btn.innerText="Processing…";

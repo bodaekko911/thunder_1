@@ -89,6 +89,12 @@ _SCHEMA_PATCHES = (
         "type": sa.Numeric(precision=6, scale=2),
         "nullable": True,
     },
+    {
+        "table": "customers",
+        "column": "discount_pct",
+        "type": sa.Numeric(precision=6, scale=2),
+        "nullable": True,
+    },
 )
 
 def _column_exists(inspector: sa.Inspector, table_name: str, column_name: str) -> bool:
@@ -158,6 +164,8 @@ def upgrade() -> None:
     inspector = sa.inspect(connection)
     if inspector.has_table("b2b_clients") and _column_exists(inspector, "b2b_clients", "discount_pct"):
         connection.execute(sa.text("UPDATE b2b_clients SET discount_pct = 0 WHERE discount_pct IS NULL"))
+    if inspector.has_table("customers") and _column_exists(inspector, "customers", "discount_pct"):
+        connection.execute(sa.text("UPDATE customers SET discount_pct = 0 WHERE discount_pct IS NULL"))
 
 
 def downgrade() -> None:

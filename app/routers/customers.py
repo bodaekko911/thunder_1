@@ -75,6 +75,7 @@ async def get_customers(
             "phone":       c.phone or "—",
             "email":       c.email or "—",
             "address":     c.address or "—",
+            "discount_pct": float(c.discount_pct or 0),
             "invoices":    inv_count,
             "total_spent": max(0.0, float(inv_total) - float(ref_total)),
             "ref_total":   float(ref_total),
@@ -211,6 +212,7 @@ async def customer_profile(customer_id: int, db: AsyncSession = Depends(get_asyn
             "phone":      c.phone   or "—",
             "email":      c.email   or "—",
             "address":    c.address or "—",
+            "discount_pct": float(c.discount_pct or 0),
             "created_at": c.created_at.strftime("%Y-%m-%d") if c.created_at else "—",
         },
         "stats": {
@@ -296,6 +298,7 @@ def customer_profile_ui(customer_id: int):
 body.light{{
     --bg:#f4f5ef;--card:#eceee6;--card2:#e4e6de;
     --border:rgba(0,0,0,0.07);--border2:rgba(0,0,0,0.12);
+    --green:#0f8a43; --green2:#4f9f69;
     --text:#1a1e14;--sub:#4a5040;--muted:#8a9080;
 }}
 *,*::before,*::after{{box-sizing:border-box;margin:0;padding:0}}
@@ -461,6 +464,7 @@ function render(d){{
                 ${{c.phone !== "—" ? `<span class="cust-meta-item">&#128222; ${{esc(c.phone)}}</span>` : ""}}
                 ${{c.email !== "—" ? `<span class="cust-meta-item">&#9993; ${{esc(c.email)}}</span>` : ""}}
                 ${{c.address !== "—" ? `<span class="cust-meta-item">&#128205; ${{esc(c.address)}}</span>` : ""}}
+                ${{c.discount_pct > 0 ? `<span class="cust-meta-item">&#127991;&#65039; Default discount ${{fmt(c.discount_pct)}}%</span>` : ""}}
                 <span class="cust-meta-item">&#128197; Customer since ${{esc(c.created_at)}}</span>
             </div>
         </div>
@@ -482,6 +486,11 @@ function render(d){{
                 <div class="stat-label">Avg Basket</div>
                 <div class="stat-val amber">${{fmt(s.avg_basket)}}</div>
                 <div class="stat-sub">per paid order</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">Default Discount</div>
+                <div class="stat-val amber">${{fmt(c.discount_pct)}}%</div>
+                <div class="stat-sub">auto-filled in POS</div>
             </div>
             <div class="stat-card">
                 <div class="stat-label">Last Purchase</div>
@@ -647,6 +656,7 @@ def customers_ui():
 body.light{
     --bg:#f4f5ef;--surface:#f1f3eb;--card:#eceee6;--card2:#e4e6de;
     --border:rgba(0,0,0,0.08);--border2:rgba(0,0,0,0.14);
+    --green:#0f8a43;
     --text:#1a1e14;--sub:#4a5040;--muted:#7b816f;
 }
 body.light nav{background:rgba(244,245,239,.92);}
@@ -900,6 +910,7 @@ td.phone { font-family: var(--mono); font-size: 12px; }
                     <th>Name</th>
                     <th>Phone</th>
                     <th>Email</th>
+                    <th>Discount</th>
                     <th>Address</th>
                     <th>Invoices</th>
                     <th>Total Spent</th>
@@ -907,7 +918,7 @@ td.phone { font-family: var(--mono); font-size: 12px; }
                 </tr>
             </thead>
             <tbody id="table-body">
-                <tr><td colspan="7" style="text-align:center;color:var(--muted);padding:40px">Loading…</td></tr>
+                <tr><td colspan="8" style="text-align:center;color:var(--muted);padding:40px">Loading…</td></tr>
             </tbody>
         </table>
         <div class="pagination">
@@ -939,6 +950,10 @@ td.phone { font-family: var(--mono); font-size: 12px; }
         <div class="fld">
             <label>Address</label>
             <input id="f-address" placeholder="City / Area">
+        </div>
+        <div class="fld">
+            <label>Default Discount %</label>
+            <input id="f-discount" type="number" min="0" max="100" step="0.5" placeholder="0">
         </div>
         <div class="modal-actions">
             <button class="btn-cancel" onclick="closeModal()">Cancel</button>
@@ -1033,7 +1048,7 @@ async function load(){
 
     if(!data.items.length){
         document.getElementById("table-body").innerHTML =
-            `<tr><td colspan="7" style="text-align:center;color:var(--muted);padding:40px">No customers found</td></tr>`;
+            `<tr><td colspan="8" style="text-align:center;color:var(--muted);padding:40px">No customers found</td></tr>`;
         return;
     }
 
@@ -1042,12 +1057,13 @@ async function load(){
             <td class="name">${c.name}</td>
             <td class="phone">${c.phone}</td>
             <td style="font-size:12px">${c.email}</td>
+            <td class="mono" style="color:${c.discount_pct>0 ? "var(--warn)" : "var(--muted)"}">${c.discount_pct>0 ? c.discount_pct.toFixed(1) + "%" : "—"}</td>
             <td style="font-size:12px">${c.address}</td>
             <td style="font-family:var(--mono);color:var(--blue)">${c.invoices}</td>
             <td class="mono">${c.total_spent.toFixed(2)}</td>
             <td style="display:flex;gap:6px" onclick="event.stopPropagation()">
                 <a class="action-btn" href="/customers-mgmt/profile/${c.id}" style="text-decoration:none;display:inline-flex;align-items:center">Profile</a>
-                <button class="action-btn" onclick="openEditModal(${c.id},'${c.name.replace(/'/g,"\\'")}','${c.phone}','${c.email}','${c.address}')">Edit</button>
+                <button class="action-btn" onclick="openEditModal(${c.id},'${c.name.replace(/'/g,"\\'")}','${c.phone}','${c.email}','${c.address}',${c.discount_pct})">Edit</button>
                 <button class="action-btn danger" onclick="deleteCustomer(${c.id},'${c.name.replace(/'/g,"\\'")}')">Delete</button>
             </td>
         </tr>`).join("");
@@ -1064,18 +1080,20 @@ function nextPage(){ if((currentPage+1)*pageSize<totalItems){ currentPage++; loa
 function openAddModal(){
     editingId = null;
     document.getElementById("modal-title").innerText = "Add Customer";
-    ["f-name","f-phone","f-email","f-address"].forEach(id =>
+    ["f-name","f-phone","f-email","f-address","f-discount"].forEach(id =>
         document.getElementById(id).value = "");
+    document.getElementById("f-discount").value = "0";
     document.getElementById("modal").classList.add("open");
 }
 
-function openEditModal(id, name, phone, email, address){
+function openEditModal(id, name, phone, email, address, discountPct){
     editingId = id;
     document.getElementById("modal-title").innerText = "Edit Customer";
     document.getElementById("f-name").value    = name;
     document.getElementById("f-phone").value   = phone === "—" ? "" : phone;
     document.getElementById("f-email").value   = email === "—" ? "" : email;
     document.getElementById("f-address").value = address === "—" ? "" : address;
+    document.getElementById("f-discount").value = Number(discountPct || 0).toFixed(1);
     document.getElementById("modal").classList.add("open");
 }
 
@@ -1092,6 +1110,7 @@ async function saveCustomer(){
         phone:   document.getElementById("f-phone").value.trim() || null,
         email:   document.getElementById("f-email").value.trim() || null,
         address: document.getElementById("f-address").value.trim() || null,
+        discount_pct: parseFloat(document.getElementById("f-discount").value) || 0,
     };
 
     let url    = editingId ? `/customers-mgmt/api/edit/${editingId}` : "/customers-mgmt/api/add";

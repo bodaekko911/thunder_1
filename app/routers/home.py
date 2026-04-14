@@ -42,6 +42,7 @@ body.light {
     --card2:   #e4e6de;
     --border:  rgba(0,0,0,0.07);
     --border2: rgba(0,0,0,0.12);
+    --green:   #0f8a43;
     --text:    #1a1e14;
     --sub:     #4a5040;
     --muted:   #8a9080;
@@ -131,6 +132,7 @@ body {
 }
 
 .topbar-right { display: flex; align-items: center; gap: 12px; }
+.account-menu { position: relative; }
 
 .mode-btn {
     background: var(--card);
@@ -149,7 +151,10 @@ body {
     display: flex; align-items: center; gap: 10px;
     background: var(--card); border: 1px solid var(--border);
     border-radius: 40px; padding: 7px 16px 7px 10px;
+    cursor: pointer;
+    transition: all .2s;
 }
+.user-pill:hover, .user-pill.open { border-color: var(--border2); }
 
 .user-avatar {
     width: 28px; height: 28px;
@@ -160,6 +165,35 @@ body {
 }
 
 .user-name { font-size: 13px; font-weight: 500; color: var(--sub); }
+.menu-caret { font-size: 11px; color: var(--muted); }
+
+.account-dropdown {
+    position: absolute; right: 0; top: calc(100% + 10px);
+    min-width: 220px; background: var(--card);
+    border: 1px solid var(--border2); border-radius: 14px;
+    padding: 8px; box-shadow: 0 24px 50px rgba(0,0,0,.35);
+    display: none;
+}
+.account-dropdown.open { display: block; }
+.account-head {
+    padding: 10px 12px 8px;
+    border-bottom: 1px solid var(--border);
+    margin-bottom: 6px;
+}
+.account-label {
+    font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 1px;
+}
+.account-email {
+    font-size: 12px; color: var(--sub); margin-top: 4px; word-break: break-word;
+}
+.account-item {
+    width: 100%; display: flex; align-items: center; gap: 10px;
+    padding: 10px 12px; border: none; background: transparent;
+    border-radius: 10px; color: var(--sub); font-family: var(--sans);
+    font-size: 13px; text-decoration: none; cursor: pointer; text-align: left;
+}
+.account-item:hover { background: var(--card2); color: var(--text); }
+.account-item.danger:hover { color: var(--rose); }
 
 .logout-btn {
     background: transparent; border: 1px solid var(--border);
@@ -324,11 +358,21 @@ body {
         </a>
         <div class="topbar-right">
             <button class="mode-btn" id="mode-btn" onclick="toggleMode()" title="Toggle light/dark mode">&#127769;</button>
-            <div class="user-pill">
-                <div class="user-avatar" id="user-avatar">A</div>
-                <span class="user-name" id="user-name">Admin</span>
+            <div class="account-menu">
+                <button class="user-pill" id="account-trigger" onclick="toggleAccountMenu(event)" aria-haspopup="menu" aria-expanded="false">
+                    <div class="user-avatar" id="user-avatar">A</div>
+                    <span class="user-name" id="user-name">Admin</span>
+                    <span class="menu-caret">▾</span>
+                </button>
+                <div class="account-dropdown" id="account-dropdown" role="menu">
+                    <div class="account-head">
+                        <div class="account-label">Signed in as</div>
+                        <div class="account-email" id="user-email">—</div>
+                    </div>
+                    <a href="/users/password" class="account-item" role="menuitem">Change Password</a>
+                    <button class="account-item danger" onclick="logout()" role="menuitem">Sign out</button>
+                </div>
             </div>
-            <button class="logout-btn" onclick="logout()">Sign out</button>
         </div>
     </header>
 
@@ -340,6 +384,7 @@ body {
 
     <main class="modules-wrap">
 
+        <div class="home-section" data-section="core">
         <div class="section-title">Core Operations</div>
         <div class="modules-grid">
 
@@ -354,7 +399,7 @@ body {
                     <span class="card-arrow">↗</span>
                 </div>
             </a>
-<a href="/refunds/" class="module-card c-rose" data-permission="page_pos">
+<a href="/refunds/" class="module-card c-rose" data-permission="action_pos_refund">
                 <div class="card-icon">↩</div>
                 <div class="card-body">
                     <div class="card-name">Retail Refunds</div>
@@ -403,8 +448,10 @@ body {
             </a>
 
         </div>
+        </div>
 
-        <div class="group-gap"></div>
+        <div class="group-gap home-section-gap"></div>
+        <div class="home-section" data-section="management">
         <div class="section-title">Management</div>
         <div class="modules-grid">
 
@@ -444,7 +491,7 @@ body {
                 </div>
             </a>
 
-            <a href="/receive/" class="module-card c-orange" data-permission="page_suppliers">
+            <a href="/receive/" class="module-card c-orange" data-permission="page_receive_products">
                 <div class="card-icon">📬</div>
                 <div class="card-body">
                     <div class="card-name">Receive Products</div>
@@ -497,8 +544,10 @@ body {
             </a>
 
         </div>
+        </div>
 
-        <div class="group-gap"></div>
+        <div class="group-gap home-section-gap"></div>
+        <div class="home-section" data-section="people-finance">
         <div class="section-title">People &amp; Finance</div>
         <div class="modules-grid">
 
@@ -526,7 +575,7 @@ body {
                 </div>
             </a>
 
-            <a href="/expenses/" class="module-card c-amber" data-permission="page_accounting">
+            <a href="/expenses/" class="module-card c-amber" data-permission="page_expenses">
                 <div class="card-icon">💸</div>
                 <div class="card-body">
                     <div class="card-name">Expenses</div>
@@ -563,6 +612,7 @@ body {
             </a>
 
         </div>
+        </div>
 
     </main>
 
@@ -587,11 +637,32 @@ async function initUser() {
         const u = await r.json();
         const nameEl = document.getElementById("user-name");
         const avatarEl = document.getElementById("user-avatar");
+        const emailEl = document.getElementById("user-email");
         if (nameEl) nameEl.innerText = u.name;
         if (avatarEl) avatarEl.innerText = u.name.charAt(0).toUpperCase();
+        if (emailEl) emailEl.innerText = u.email;
         return u;
     } catch(e) { window.location.href = "/"; }
 }
+
+function toggleAccountMenu(event){
+    event.stopPropagation();
+    const trigger = document.getElementById("account-trigger");
+    const dropdown = document.getElementById("account-dropdown");
+    const open = dropdown.classList.toggle("open");
+    trigger.classList.toggle("open", open);
+    trigger.setAttribute("aria-expanded", open ? "true" : "false");
+}
+
+document.addEventListener("click", e => {
+    const menu = document.getElementById("account-dropdown");
+    const trigger = document.getElementById("account-trigger");
+    if(!menu || !trigger) return;
+    if(menu.contains(e.target) || trigger.contains(e.target)) return;
+    menu.classList.remove("open");
+    trigger.classList.remove("open");
+    trigger.setAttribute("aria-expanded", "false");
+});
 
 function setGreeting(name){
     let h     = new Date().getHours();
@@ -632,7 +703,11 @@ setInterval(setDateTime, 30000);
     setGreeting(u.name);
 
     const userRole = u.role || "";
-    const userPermissions = new Set(u.permissions || []);
+    const userPermissions = new Set(
+        typeof u.permissions === "string"
+            ? u.permissions.split(",").map(v => v.trim()).filter(Boolean)
+            : (u.permissions || [])
+    );
 
     function canAccess(permission){
         return userRole === "admin" || userPermissions.has(permission);
@@ -650,6 +725,20 @@ setInterval(setDateTime, 30000);
         let a = document.getElementById("card-audit");
         if(a) a.style.display = "";
     }
+
+    document.querySelectorAll(".home-section").forEach(section => {
+        const visibleCards = [...section.querySelectorAll(".module-card")].filter(card => card.style.display !== "none");
+        if(!visibleCards.length){
+            section.style.display = "none";
+        }
+    });
+
+    document.querySelectorAll(".home-section-gap").forEach(gap => {
+        const nextSection = gap.nextElementSibling;
+        if(!nextSection || nextSection.style.display === "none"){
+            gap.style.display = "none";
+        }
+    });
 })();
 </script>
 </body>

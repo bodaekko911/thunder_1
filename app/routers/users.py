@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, Header, Request
+from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from fastapi.responses import HTMLResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
@@ -14,19 +14,30 @@ from app.core.password_policy import (
 from app.core.permission_catalog import get_permission_catalog
 from app.core.permissions import (
     require_admin as core_require_admin,
-    get_custom_permissions,
     get_effective_permissions,
+    serialize_permission_overrides,
     serialize_permissions,
 )
 from app.core.config import settings
 from app.core.rate_limit import limiter
 from app.database import get_async_session
 from app.models.user import User
-from app.core.security import hash_password, verify_password, decode_token
+from app.core.security import (
+    decode_token,
+    get_current_user,
+    get_optional_current_user,
+    hash_password,
+    verify_password,
+)
 from app.core.log import ActivityLog
 from app.schemas.user import AdminResetPassword, AdminUserCreate, ChangePasswordData, UserUpdate
 
 router = APIRouter(prefix="/users", tags=["Users"])
+
+
+async def _active_admin_count(db: AsyncSession) -> int:
+    result = await db.execute(select(User).where(User.role == "admin", User.is_active == True))
+    return len(result.scalars().all())
 
 
 # ── Schemas ─────────────────────────────────────────────
@@ -59,22 +70,13 @@ async def _extract_user(authorization: str, db: AsyncSession):
     except Exception:
         return None
 
-async def get_user_from_token(authorization: str = Header(None), db: AsyncSession = Depends(get_async_session)):
-    return await _extract_user(authorization, db)
-
-async def require_admin_header(authorization: str = Header(None), db: AsyncSession = Depends(get_async_session)):
-    user = await _extract_user(authorization, db)
-    if not user:
-        raise HTTPException(status_code=401, detail="Not authenticated")
-    if user.role != "admin":
-        raise HTTPException(status_code=403, detail="Admin access required")
-    return user
-
-
 # ── Activity Log API ─────────────────────────────────────
 @router.post("/api/log")
-async def log_action(data: LogCreate, authorization: str = Header(None), db: AsyncSession = Depends(get_async_session)):
-    user = await _extract_user(authorization, db)
+async def log_action(
+    data: LogCreate,
+    db: AsyncSession = Depends(get_async_session),
+    user: User | None = Depends(get_optional_current_user),
+):
     entry = ActivityLog(
         user_id     = user.id   if user else None,
         user_name   = user.name if user else "Unknown",
@@ -120,9 +122,10 @@ async def get_logs(
 
 # ── User CRUD API ────────────────────────────────────────
 @router.get("/api/users")
-async def get_users(db: AsyncSession = Depends(get_async_session), _=Depends(core_require_admin)):
+async def get_users(db: AsyncSession = Depends(get_async_session), admin: User = Depends(core_require_admin)):
     result = await db.execute(select(User).order_by(User.id))
     users = result.scalars().all()
+    active_admin_count = sum(1 for u in users if u.role == "admin" and u.is_active)
     return [
         {
             "id":          u.id,
@@ -132,7 +135,8 @@ async def get_users(db: AsyncSession = Depends(get_async_session), _=Depends(cor
             "is_active":   u.is_active,
             "permissions": serialize_permissions(get_effective_permissions(u.role, getattr(u, "permissions", None))),
             "custom_permissions": getattr(u, "permissions", None) or "",
-            "created_at":  u.created_at.strftime("%Y-%m-%d") if u.created_at else "—",
+            "created_at":  u.created_at.strftime("%Y-%m-%d") if u.created_at else "?",
+            "can_delete":  u.id != admin.id and not (u.role == "admin" and u.is_active and active_admin_count <= 1),
         }
         for u in users
     ]
@@ -152,9 +156,7 @@ async def create_user(data: AdminUserCreate, db: AsyncSession = Depends(get_asyn
         role=data.role, is_active=data.is_active,
     )
     if hasattr(u, "permissions"):
-        u.permissions = serialize_permissions(
-            get_custom_permissions(data.role, (data.permissions or "").split(","))
-        )
+        u.permissions = serialize_permission_overrides(data.role, (data.permissions or "").split(","))
     db.add(u); await db.commit(); await db.refresh(u)
     # log
     log = ActivityLog(user_id=admin.id, user_name=admin.name, user_role=admin.role,
@@ -182,16 +184,21 @@ async def update_user(user_id: int, data: UserUpdate, db: AsyncSession = Depends
     if password_updated:
         u.password = hash_password(data.password)
     if data.permissions is not None and hasattr(u, "permissions"):
-        u.permissions = serialize_permissions(
-            get_custom_permissions(data.role or u.role, data.permissions.split(","))
-        )
+        u.permissions = serialize_permission_overrides(data.role or u.role, data.permissions.split(","))
     await db.commit()
+    await db.refresh(u)
     log = ActivityLog(user_id=admin.id, user_name=admin.name, user_role=admin.role,
         action="UPDATE_USER", module="USERS",
         description=f"Updated user {u.name} — role: {u.role}, active: {u.is_active}",
         ref_type="user", ref_id=str(u.id))
     db.add(log); await db.commit()
-    return {"ok": True, "id": u.id, "name": u.name, "role": u.role}
+    return {
+        "ok": True,
+        "id": u.id,
+        "name": u.name,
+        "role": u.role,
+        "permissions": serialize_permissions(get_effective_permissions(u.role, getattr(u, "permissions", None))),
+    }
 
 @router.delete("/api/users/{user_id}")
 async def delete_user(user_id: int, db: AsyncSession = Depends(get_async_session), admin=Depends(core_require_admin)):
@@ -201,11 +208,14 @@ async def delete_user(user_id: int, db: AsyncSession = Depends(get_async_session
     u = result.scalar_one_or_none()
     if not u:
         raise HTTPException(status_code=404, detail="User not found")
+    if u.role == "admin" and u.is_active and await _active_admin_count(db) <= 1:
+        raise HTTPException(status_code=400, detail="Cannot delete the only active admin")
     name = u.name
-    await db.delete(u); await db.commit()
+    u.is_active = False
+    await db.commit()
     log = ActivityLog(user_id=admin.id, user_name=admin.name, user_role=admin.role,
         action="DELETE_USER", module="USERS",
-        description=f"Deleted user {name}", ref_type="user", ref_id=str(user_id))
+        description=f"Deactivated user {name}", ref_type="user", ref_id=str(user_id))
     db.add(log); await db.commit()
     return {"ok": True}
 
@@ -228,13 +238,16 @@ async def admin_reset_password(user_id: int, data: AdminResetPassword,
 
 @router.post("/api/change-password")
 @limiter.limit(settings.PASSWORD_RATE_LIMIT)
-async def change_password(data: ChangePasswordData,
-    request: Request, authorization: str = Header(None), db: AsyncSession = Depends(get_async_session)):
-    user = await _extract_user(authorization, db)
-    if not user:
-        raise HTTPException(status_code=401, detail="Not authenticated")
+async def change_password(
+    data: ChangePasswordData,
+    request: Request,
+    db: AsyncSession = Depends(get_async_session),
+    user: User = Depends(get_current_user),
+):
     if not verify_password(data.old_password, user.password):
         raise HTTPException(status_code=400, detail="Current password is incorrect")
+    if data.new_password != data.confirm_new_password:
+        raise HTTPException(status_code=400, detail="New password and confirmation do not match")
     try:
         validate_password_change(data.old_password, data.new_password)
     except ValueError as exc:
@@ -247,6 +260,242 @@ async def change_password(data: ChangePasswordData,
         ref_type="user", ref_id=str(user.id))
     db.add(log); await db.commit()
     return {"ok": True}
+
+
+@router.get("/password", response_class=HTMLResponse)
+def password_ui(_=Depends(get_current_user)):
+    return """<!DOCTYPE html>
+<html>
+<head>
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Change Password — Thunder ERP</title>
+<link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+<style>
+:root{
+    --bg:#060810;--card:#0f1424;--card2:#151c30;
+    --border:rgba(255,255,255,0.06);--border2:rgba(255,255,255,0.11);
+    --green:#00ff9d;--blue:#4d9fff;--purple:#a855f7;--danger:#ff4d6d;
+    --text:#f0f4ff;--sub:#8899bb;--muted:#445066;
+    --sans:'Outfit',sans-serif;--mono:'JetBrains Mono',monospace;--r:14px;
+}
+body.light{
+    --bg:#f4f5ef;--card:#eceee6;--card2:#e4e6de;
+    --border:rgba(0,0,0,0.08);--border2:rgba(0,0,0,0.14);
+    --green:#0f8a43;--text:#1a1e14;--sub:#4a5040;--muted:#7b816f;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:var(--sans);background:var(--bg);color:var(--text);min-height:100vh}
+nav{position:sticky;top:0;z-index:100;display:flex;align-items:center;gap:8px;padding:0 24px;height:58px;background:rgba(10,13,24,.92);backdrop-filter:blur(20px);border-bottom:1px solid var(--border)}
+body.light nav{background:rgba(244,245,239,.92)}
+.logo{font-size:17px;font-weight:900;text-decoration:none;display:flex;align-items:center;gap:8px}
+.logo-txt{background:linear-gradient(135deg,var(--green),var(--blue));-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text}
+.nav-spacer{flex:1}
+.topbar-right{display:flex;align-items:center;gap:12px}
+.mode-btn{display:flex;align-items:center;justify-content:center;width:36px;height:36px;border-radius:10px;border:1px solid var(--border);background:var(--card);color:var(--sub);font-size:16px;cursor:pointer;transition:all .2s;font-family:var(--sans)}
+.mode-btn:hover{border-color:var(--border2);transform:scale(1.06)}
+.account-menu{position:relative}
+.user-pill{display:flex;align-items:center;gap:10px;background:var(--card);border:1px solid var(--border);border-radius:40px;padding:7px 14px 7px 10px;color:var(--sub);cursor:pointer;transition:all .2s}
+.user-pill:hover,.user-pill.open{border-color:var(--border2);color:var(--text)}
+.user-avatar{width:28px;height:28px;background:linear-gradient(135deg,#7ecb6f,#d4a256);border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;color:#0a0c08}
+.user-name{font-size:13px;font-weight:500}
+.menu-caret{font-size:11px;color:var(--muted)}
+.account-dropdown{position:absolute;right:0;top:calc(100% + 10px);min-width:220px;background:var(--card);border:1px solid var(--border2);border-radius:14px;padding:8px;box-shadow:0 24px 50px rgba(0,0,0,.35);display:none}
+.account-dropdown.open{display:block}
+.account-head{padding:10px 12px 8px;border-bottom:1px solid var(--border);margin-bottom:6px}
+.account-label{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:1px}
+.account-email{font-size:12px;color:var(--sub);margin-top:4px;word-break:break-word}
+.account-item{width:100%;display:flex;align-items:center;gap:10px;padding:10px 12px;border:none;background:transparent;border-radius:10px;color:var(--sub);font-family:var(--sans);font-size:13px;text-decoration:none;cursor:pointer;text-align:left}
+.account-item:hover{background:var(--card2);color:var(--text)}
+.account-item.danger:hover{color:var(--danger)}
+.page{max-width:520px;margin:0 auto;padding:48px 24px}
+.card{background:var(--card);border:1px solid var(--border);border-radius:20px;padding:28px}
+.page-title{font-size:24px;font-weight:800;letter-spacing:-.4px}
+.page-sub{font-size:13px;color:var(--muted);margin-top:6px;margin-bottom:22px}
+.fld{display:flex;flex-direction:column;gap:6px;margin-bottom:14px}
+.fld label{font-size:11px;font-weight:700;letter-spacing:1px;text-transform:uppercase;color:var(--muted)}
+.fld input{background:var(--card2);border:1px solid var(--border2);border-radius:12px;padding:12px 14px;color:var(--text);font-family:var(--sans);font-size:14px;outline:none}
+.fld input:focus{border-color:rgba(168,85,247,.5)}
+.fld input::placeholder{color:var(--muted)}
+.pwd-strength{height:3px;border-radius:2px;margin-top:5px;transition:all .3s;width:0}
+.btn{display:flex;align-items:center;justify-content:center;gap:8px;width:100%;padding:12px 16px;border:none;border-radius:12px;background:linear-gradient(135deg,var(--green),#00d4ff);color:#021a10;font-family:var(--sans);font-size:14px;font-weight:800;cursor:pointer;transition:all .2s}
+.btn:hover{filter:brightness(1.08);transform:translateY(-1px)}
+.btn:disabled{opacity:.5;cursor:not-allowed;transform:none}
+.helper{font-size:12px;color:var(--sub);margin-top:4px}
+.toast{position:fixed;bottom:22px;left:50%;transform:translateX(-50%) translateY(16px);background:var(--card2);border:1px solid var(--border2);border-radius:var(--r);padding:12px 20px;font-size:13px;font-weight:600;color:var(--text);box-shadow:0 20px 50px rgba(0,0,0,.5);opacity:0;pointer-events:none;transition:opacity .25s,transform .25s;z-index:999}
+.toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
+</style>
+</head>
+<body>
+<nav>
+    <a href="/home" class="logo">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none"><polygon points="13,2 4,14 11,14 11,22 20,10 13,10" fill="#f59e0b"/></svg>
+        <span class="logo-txt">Thunder ERP</span>
+    </a>
+    <span class="nav-spacer"></span>
+    <div class="topbar-right">
+        <button class="mode-btn" id="mode-btn" onclick="toggleMode()" title="Toggle color mode">🌙</button>
+        <div class="account-menu">
+            <button class="user-pill" id="account-trigger" onclick="toggleAccountMenu(event)" aria-haspopup="menu" aria-expanded="false">
+                <div class="user-avatar" id="user-avatar">A</div>
+                <span class="user-name" id="user-name">Account</span>
+                <span class="menu-caret">▾</span>
+            </button>
+            <div class="account-dropdown" id="account-dropdown" role="menu">
+                <div class="account-head">
+                    <div class="account-label">Signed in as</div>
+                    <div class="account-email" id="user-email">—</div>
+                </div>
+                <a href="/users/password" class="account-item" role="menuitem">Change Password</a>
+                <button class="account-item danger" onclick="logout()" role="menuitem">Sign out</button>
+            </div>
+        </div>
+    </div>
+</nav>
+<div class="page">
+    <div class="card">
+        <div class="page-title">Change Password</div>
+        <div class="page-sub">Enter your current password first, then choose a new password that meets the existing security policy.</div>
+        <div class="fld">
+            <label>Current Password *</label>
+            <input id="cp-old" type="password" placeholder="Enter your current password">
+        </div>
+        <div class="fld">
+            <label>New Password *</label>
+            <input id="cp-new" type="password" placeholder="Minimum __PASSWORD_MIN_LENGTH__ characters" oninput="pwdStrength('cp-new','cp-bar')">
+            <div class="pwd-strength" id="cp-bar"></div>
+        </div>
+        <div class="fld">
+            <label>Confirm New Password *</label>
+            <input id="cp-confirm" type="password" placeholder="Repeat your new password">
+        </div>
+        <div class="helper">The current password is required before your password can be updated.</div>
+        <button class="btn" id="save-password-btn" onclick="changeMyPassword()">Update Password</button>
+    </div>
+</div>
+<div class="toast" id="toast"></div>
+<script>
+function setModeButton(isLight){
+    const btn = document.getElementById("mode-btn");
+    if(btn) btn.innerText = isLight ? "☀️" : "🌙";
+}
+function toggleMode(){
+    const isLight = document.body.classList.toggle("light");
+    localStorage.setItem("colorMode", isLight ? "light" : "dark");
+    setModeButton(isLight);
+}
+function initializeColorMode(){
+    const isLight = localStorage.getItem("colorMode") === "light";
+    document.body.classList.toggle("light", isLight);
+    setModeButton(isLight);
+}
+function _hasAuthCookie() {
+    return document.cookie.split(";").some(c => c.trim().startsWith("logged_in="));
+}
+if (!_hasAuthCookie()) { window.location.href = "/"; }
+
+let toastTimer = null;
+
+function showToast(msg){
+    const t = document.getElementById("toast");
+    t.innerText = msg;
+    t.classList.add("show");
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => t.classList.remove("show"), 4000);
+}
+
+function pwdStrength(inputId, barId){
+    let v = document.getElementById(inputId).value;
+    let s = 0;
+    if(v.length>=__PASSWORD_MIN_LENGTH__) s++;
+    if(v.length>=10) s++;
+    if(/[A-Z]/.test(v)) s++;
+    if(/[0-9]/.test(v)) s++;
+    if(/[^A-Za-z0-9]/.test(v)) s++;
+    let c = ["","#ff4d6d","#ffb547","#ffb547","#00ff9d","#00ff9d"][s];
+    let b = document.getElementById(barId);
+    b.style.background = c || "var(--border2)";
+    b.style.width = (s*20)+"%";
+}
+
+function toggleAccountMenu(event){
+    event.stopPropagation();
+    const trigger = document.getElementById("account-trigger");
+    const dropdown = document.getElementById("account-dropdown");
+    const open = dropdown.classList.toggle("open");
+    trigger.classList.toggle("open", open);
+    trigger.setAttribute("aria-expanded", open ? "true" : "false");
+}
+
+document.addEventListener("click", e => {
+    const menu = document.getElementById("account-dropdown");
+    const trigger = document.getElementById("account-trigger");
+    if(!menu || !trigger) return;
+    if(menu.contains(e.target) || trigger.contains(e.target)) return;
+    menu.classList.remove("open");
+    trigger.classList.remove("open");
+    trigger.setAttribute("aria-expanded", "false");
+});
+
+async function initUser(){
+    try{
+        const r = await fetch("/auth/me");
+        if(!r.ok){ window.location.href = "/"; return; }
+        const u = await r.json();
+        document.getElementById("user-name").innerText = u.name;
+        document.getElementById("user-avatar").innerText = u.name.charAt(0).toUpperCase();
+        document.getElementById("user-email").innerText = u.email;
+    } catch(e) {
+        window.location.href = "/";
+    }
+}
+
+async function logout(){
+    await fetch("/auth/logout", { method: "POST" });
+    window.location.href = "/";
+}
+
+async function changeMyPassword(){
+    const oldPassword = document.getElementById("cp-old").value;
+    const newPassword = document.getElementById("cp-new").value;
+    const confirmPassword = document.getElementById("cp-confirm").value;
+    if(!oldPassword){ showToast("Current password is required"); return; }
+    if(!newPassword || newPassword.length < __PASSWORD_MIN_LENGTH__){ showToast("__NEW_PASSWORD_POLICY_MESSAGE__"); return; }
+    if(newPassword !== confirmPassword){ showToast("New password and confirmation do not match"); return; }
+    if(oldPassword === newPassword){ showToast("__PASSWORD_MUST_CHANGE_MESSAGE__"); return; }
+
+    const btn = document.getElementById("save-password-btn");
+    btn.disabled = true;
+    try{
+        const res = await fetch("/users/api/change-password", {
+            method: "POST",
+            headers: {"Content-Type":"application/json"},
+            body: JSON.stringify({
+                old_password: oldPassword,
+                new_password: newPassword,
+                confirm_new_password: confirmPassword,
+            }),
+        });
+        const data = await res.json();
+        if(data.detail){ showToast(data.detail); return; }
+        ["cp-old","cp-new","cp-confirm"].forEach(id => document.getElementById(id).value = "");
+        document.getElementById("cp-bar").style.cssText = "width:0;background:var(--border2)";
+        showToast("Password updated successfully");
+    } catch(e) {
+        showToast("Failed to update password");
+    } finally {
+        btn.disabled = false;
+    }
+}
+
+initializeColorMode();
+initUser();
+</script>
+</body>
+</html>""".replace("__PASSWORD_MIN_LENGTH__", str(PASSWORD_MIN_LENGTH)).replace(
+        "__NEW_PASSWORD_POLICY_MESSAGE__", password_min_length_message("New password")
+    ).replace(
+        "__PASSWORD_MUST_CHANGE_MESSAGE__", password_must_change_message()
+    )
 
 
 # ── UI ────────────────────────────────────────────────────
@@ -270,6 +519,7 @@ def users_ui(_=Depends(core_require_admin)):
 body.light{
     --bg:#f4f5ef;--surface:#f1f3eb;--card:#eceee6;--card2:#e4e6de;
     --border:rgba(0,0,0,0.08);--border2:rgba(0,0,0,0.14);
+    --green:#0f8a43;
     --text:#1a1e14;--sub:#4a5040;--muted:#7b816f;
 }
 body.light nav{background:rgba(244,245,239,.92);}
@@ -362,7 +612,20 @@ td.name{color:var(--text);font-weight:600;}
 .fld input,.fld select{background:var(--card2);border:1px solid var(--border2);border-radius:10px;padding:10px 12px;color:var(--text);font-family:var(--sans);font-size:14px;outline:none;transition:border-color .2s;width:100%;}
 .fld input:focus,.fld select:focus{border-color:rgba(168,85,247,.5);}
 .fld input::placeholder{color:var(--muted);}
-.role-info{font-size:12px;color:var(--muted);padding:8px 12px;background:var(--card2);border-radius:8px;border-left:3px solid var(--purple);margin-top:6px;}
+.role-info{font-size:12px;color:var(--muted);padding:12px 14px;background:linear-gradient(180deg,color-mix(in srgb,var(--card2) 92%, white 8%),var(--card2));border-radius:10px;border:1px solid var(--border2);border-left:3px solid var(--purple);margin-top:6px;display:flex;flex-direction:column;gap:8px;}
+.role-info-title{display:flex;align-items:center;justify-content:space-between;gap:12px;}
+.role-info-name{font-size:13px;font-weight:800;color:var(--text);}
+.role-info-count{font-family:var(--mono);font-size:11px;color:var(--purple);background:rgba(168,85,247,.12);border:1px solid rgba(168,85,247,.2);padding:3px 8px;border-radius:999px;}
+.role-info-desc{line-height:1.5;color:var(--sub);}
+.role-info-points{display:flex;flex-wrap:wrap;gap:6px;}
+.role-point{font-size:11px;color:var(--text);background:var(--card);border:1px solid var(--border);padding:4px 8px;border-radius:999px;}
+.role-access-list{display:flex;flex-direction:column;gap:8px;padding-top:4px;border-top:1px solid var(--border);}
+.role-access-item{display:flex;flex-direction:column;gap:6px;background:var(--card);border:1px solid var(--border);border-radius:10px;padding:10px 12px;}
+.role-access-head{display:flex;align-items:center;justify-content:space-between;gap:10px;}
+.role-access-page{font-size:12px;font-weight:700;color:var(--text);}
+.role-access-badge{font-family:var(--mono);font-size:10px;color:var(--blue);background:rgba(77,159,255,.12);border:1px solid rgba(77,159,255,.18);padding:2px 7px;border-radius:999px;}
+.role-access-actions{display:flex;flex-wrap:wrap;gap:6px;}
+.role-access-chip{font-size:10px;color:var(--sub);background:var(--card2);border:1px solid var(--border2);padding:4px 7px;border-radius:999px;}
 .perms-grid{display:grid;grid-template-columns:1fr 1fr;gap:7px;margin-top:6px;}
 .perm-section{background:var(--card2);border:1px solid var(--border2);border-radius:10px;padding:12px 14px;}
 .perm-section-title{font-size:11px;font-weight:800;letter-spacing:.5px;color:var(--sub);margin-bottom:8px;text-transform:uppercase;}
@@ -617,6 +880,7 @@ let permissionCatalog = {pages: [], roles: []};
 let PAGE_TREE = [];
 let roleDesc = {};
 let roleDefaults = {};
+let currentRoleForPerms = null;
 const permissionIcons = {
     chart: "📊",
     reports: "📈",
@@ -639,10 +903,17 @@ const legacyRoleDesc = {
     accountant: "Accounting only: journal entries, P&L, trial balance, financial reports.",
     hr:         "HR module only: employees, attendance, payroll. No financial or sales data.",
     viewer:     "Read-only access to dashboard and reports. Cannot create, edit, or delete.",
-    admin:      "⚠️ Full system access including user management, all reports, and all operations.",
+    admin:      "?? Full system access including user management, all reports, and all operations.",
+};
+const roleHighlights = {
+    cashier: ["POS sales", "Discounts", "Settle later", "No refunds by default"],
+    manager: ["Operations control", "Refunds", "B2B", "Inventory and production"],
+    accountant: ["Financial reports", "Journal posting", "P&L review", "No stock or HR by default"],
+    hr: ["Employees", "Attendance", "Payroll runs", "No finance or sales by default"],
+    viewer: ["Read-only", "Dashboard", "Reports", "No create/edit/delete"],
+    admin: ["Full access", "User management", "Audit visibility", "Use sparingly"],
 };
 
-// ── TABS ──────────────────────────────────────────────
 function switchTab(tab){
     ["users","logs","mypass"].forEach(t=>{
         document.getElementById("section-"+t).classList.toggle("active", t===tab);
@@ -733,7 +1004,7 @@ function renderUsers(users){
             <td style="display:flex;gap:5px;flex-wrap:wrap">
                 <button class="action-btn" onclick="openEdit(${u.id})">Edit</button>
                 <button class="action-btn warn" onclick="openResetModal(${u.id},'${u.name.replace(/'/g,"\\'")}')">Reset Pwd</button>
-                <button class="action-btn danger" onclick="deleteUser(${u.id},'${u.name.replace(/'/g,"\\'")}')">Delete</button>
+                ${u.can_delete ? `<button class="action-btn danger" onclick="deleteUser(${u.id},'${u.name.replace(/'/g,"\\'")}')">Delete</button>` : ""}
             </td>
         </tr>`).join("");
 }
@@ -853,8 +1124,53 @@ function getRolePermissionString(role){
     return [...(roleDefaults[role] || new Set())].join(",");
 }
 
-function setPermsFromString(str){
+function buildRoleAccessDetails(roleKey){
+    const role = (permissionCatalog.roles || []).find(r => r.key === roleKey);
+    if(!role) return "";
+    const defaults = new Set(role.permissions || []);
+    if(defaults.has("*")){
+        return `<div class="role-access-list"><div class="role-access-item"><div class="role-access-page">All pages, tabs, and actions</div><div class="role-access-actions"><span class="role-access-chip">Full unrestricted access</span></div></div></div>`;
+    }
+
+    const pageItems = (permissionCatalog.pages || [])
+        .map(page => {
+            const pageEnabled = defaults.has(page.key);
+            const actions = (page.actions || []).filter(action => defaults.has(action.key));
+            const aliases = pageEnabled ? (page.aliases || []) : [];
+            if(!pageEnabled && !actions.length) return "";
+            return `<div class="role-access-item">
+                <div class="role-access-head">
+                    <span class="role-access-page">${page.label}</span>
+                    <span class="role-access-badge">${actions.length} extra ${actions.length === 1 ? "action" : "actions"}</span>
+                </div>
+                <div class="role-access-actions">
+                    <span class="role-access-chip">Page access</span>
+                    ${aliases.map(alias => `<span class="role-access-chip">${alias}</span>`).join("")}
+                    ${actions.map(action => `<span class="role-access-chip">${action.label}</span>`).join("")}
+                </div>
+            </div>`;
+        })
+        .filter(Boolean)
+        .join("");
+
+    return pageItems ? `<div class="role-access-list">${pageItems}</div>` : "";
+}
+
+function permissionSetFromString(str){
+    return new Set((str || "").split(",").map(s=>s.trim()).filter(Boolean));
+}
+
+function mergePermissionStrings(...values){
+    return [...new Set(values.flatMap(v => [...permissionSetFromString(v)]))].join(",");
+}
+
+function getSelectedPermsString(){
+    return [...new Set([...selectedPages, ...selectedSubs])].sort().join(",");
+}
+
+function setPermsFromString(str, roleKey = null){
     selectedPages.clear(); selectedSubs.clear();
+    currentRoleForPerms = roleKey ?? currentRoleForPerms ?? document.getElementById("u-role")?.value ?? null;
     if(!str) { renderPageChips(); return; }
     let all = str.split(",").map(s=>s.trim()).filter(Boolean);
     all.forEach(v=>{
@@ -864,12 +1180,26 @@ function setPermsFromString(str){
     renderPageChips();
 }
 
+function applyPermissionsForRole(role, permissionString = null){
+    const finalPermissions = permissionString ?? getRolePermissionString(role);
+    setPermsFromString(finalPermissions, role);
+}
+
 function getPermsString(){
-    return [...selectedPages, ...selectedSubs].join(",");
+    return getSelectedPermsString();
+}
+
+function getNormalizedPermissionString(str){
+    return [...permissionSetFromString(str)].sort().join(",");
+}
+
+function samePermissionSet(left, right){
+    return getNormalizedPermissionString(left) === getNormalizedPermissionString(right);
 }
 
 // ── MODAL ──────────────────────────────────────────────
 function openAddModal(){
+    currentRoleForPerms = null;
     editingId = null;
     document.getElementById("modal-title").innerText = "Add User";
     document.getElementById("modal-sub").innerText   = "Create a new system user";
@@ -878,7 +1208,7 @@ function openAddModal(){
     document.getElementById("u-role").value  = "cashier";
     document.getElementById("u-active").checked = true;
     document.getElementById("u-bar").style.cssText = "width:0;background:var(--border2)";
-    setPermsFromString(getRolePermissionString("cashier"));
+    applyPermissionsForRole("cashier");
     updateRoleDesc();
     document.getElementById("user-modal").classList.add("open");
     setTimeout(()=>document.getElementById("u-name").focus(),100);
@@ -887,6 +1217,7 @@ function openAddModal(){
 function openEdit(id){
     let u = allUsers.find(x=>x.id===id);
     if(!u) return;
+    currentRoleForPerms = null;
     editingId = id;
     document.getElementById("modal-title").innerText = "Edit User";
     document.getElementById("modal-sub").innerText   = `Editing: ${u.name}`;
@@ -897,18 +1228,40 @@ function openEdit(id){
     document.getElementById("u-role").value  = u.role;
     document.getElementById("u-active").checked = u.is_active;
     document.getElementById("u-bar").style.cssText = "width:0;background:var(--border2)";
-    setPermsFromString(u.permissions||"");
+    setPermsFromString(u.permissions || "", u.role);
     updateRoleDesc();
     document.getElementById("user-modal").classList.add("open");
 }
 
-function closeModal(){ document.getElementById("user-modal").classList.remove("open"); }
+function closeModal(){
+    currentRoleForPerms = null;
+    document.getElementById("user-modal").classList.remove("open");
+}
 
 function updateRoleDesc(){
     let r = document.getElementById("u-role").value;
-    document.getElementById("role-info").innerText = roleDesc[r]||"";
-    if(editingId === null && selectedPages.size === 0 && selectedSubs.size === 0){
-        setPermsFromString(getRolePermissionString(r));
+    const roleName = (permissionCatalog.roles || []).find(role => role.key === r)?.label || r;
+    const defaultCount = roleDefaults[r] ? roleDefaults[r].size : 0;
+    const desc = roleDesc[r] || legacyRoleDesc[r] || "";
+    const points = (roleHighlights[r] || []).map(point => `<span class="role-point">${point}</span>`).join("");
+    const accessDetails = buildRoleAccessDetails(r);
+    document.getElementById("role-info").innerHTML = `
+        <div class="role-info-title">
+            <span class="role-info-name">${roleName}</span>
+            <span class="role-info-count">${defaultCount} default permissions</span>
+        </div>
+        <div class="role-info-desc">${desc}</div>
+        ${points ? `<div class="role-info-points">${points}</div>` : ""}
+        ${accessDetails}
+    `;
+    if(currentRoleForPerms === null){
+        applyPermissionsForRole(r);
+        return;
+    }
+    if(currentRoleForPerms !== r){
+        const currentSelection = getSelectedPermsString();
+        const merged = mergePermissionStrings(getRolePermissionString(r), currentSelection);
+        applyPermissionsForRole(r, merged);
     }
 }
 
@@ -947,9 +1300,13 @@ async function saveUser(){
     let res    = await fetch(url, {method, headers:H, body:JSON.stringify(body)});
     let data   = await res.json();
     if(data.detail){ showToast("Error: "+data.detail); return; }
+    if(editingId && !samePermissionSet(data.permissions || "", perms)){
+        showToast("Error: saved permissions do not match the final selection");
+        return;
+    }
+    await loadUsers();
     closeModal();
     showToast(editingId ? `✓ ${data.name} updated` : `✓ ${data.name} created — role: ${data.role}`);
-    loadUsers();
 }
 
 async function deleteUser(id, name){
@@ -997,7 +1354,7 @@ async function changeMyPassword(){
     if(old === np){ showToast("__PASSWORD_MUST_CHANGE_MESSAGE__"); return; }
     let res  = await fetch("/users/api/change-password", {
         method:"POST", headers:H,
-        body:JSON.stringify({old_password:old, new_password:np}),
+        body:JSON.stringify({old_password:old, new_password:np, confirm_new_password:cnf}),
     });
     let data = await res.json();
     if(data.detail){ showToast("Error: "+data.detail); return; }

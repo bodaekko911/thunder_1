@@ -2009,6 +2009,7 @@ def b2b_ui():
 body.light{
     --bg:#f4f5ef;--surface:#f1f3eb;--card:#eceee6;--card2:#e4e6de;
     --border:rgba(0,0,0,0.08);--border2:rgba(0,0,0,0.14);
+    --green:#0f8a43;
     --text:#1a1e14;--sub:#4a5040;--muted:#7b816f;
 }
 body.light nav{background:rgba(244,245,239,.92);}
@@ -2516,12 +2517,14 @@ async function logout(){
     await fetch("/auth/logout", { method: "POST" });
     window.location.href = "/";
 }
-  function hasPermission(permission, u){
+  let currentUser = null;
+  function hasPermission(permission, u = currentUser){
       const role = u ? (u.role || "") : "";
       const perms = new Set(u ? (u.permissions || []) : []);
       return role === "admin" || perms.has(permission);
   }
   function configureB2BPermissions(u){
+      currentUser = u;
       isAdmin = u.role === "admin";
       if(!hasPermission("tab_b2b_clients", u)){
           let el = document.getElementById("tab-clients");

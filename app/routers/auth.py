@@ -222,12 +222,13 @@ def login_page():
                 ["/products/", "page_products"],
                 ["/customers-mgmt/", "page_customers"],
                 ["/suppliers/", "page_suppliers"],
+                ["/receive/", "page_receive_products"],
                 ["/import", "page_import"],
                 ["/reports/", "page_reports"],
                 ["/b2b/", "page_b2b"],
                 ["/hr/", "page_hr"],
                 ["/accounting/", "page_accounting"],
-                ["/expenses/", "page_accounting"]
+                ["/expenses/", "page_expenses"]
             ];
             const nextPage = data.role === "admin"
                 ? "/dashboard"

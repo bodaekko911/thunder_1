@@ -7,6 +7,7 @@ class CustomerCreate(BaseModel):
     phone:   Optional[str] = Field(None, max_length=50)
     email:   Optional[EmailStr] = None
     address: Optional[str] = Field(None, max_length=300)
+    discount_pct: float = Field(0, ge=0, le=100)
 
 
 class CustomerUpdate(BaseModel):
@@ -14,3 +15,4 @@ class CustomerUpdate(BaseModel):
     phone:   Optional[str] = Field(None, max_length=50)
     email:   Optional[EmailStr] = None
     address: Optional[str] = Field(None, max_length=300)
+    discount_pct: Optional[float] = Field(None, ge=0, le=100)

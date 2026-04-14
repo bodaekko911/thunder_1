@@ -69,14 +69,36 @@ def extract_bearer_token(authorization: Optional[str]) -> str:
     return token
 
 
-async def get_current_user(
-    authorization: Optional[str] = Header(None),
-    access_token: Optional[str] = Cookie(None),
-    db: AsyncSession = Depends(get_async_session),
+def resolve_auth_token(
+    authorization: Optional[str],
+    access_token: Optional[str],
+    *,
+    required: bool = True,
+) -> Optional[str]:
+    if access_token:
+        return access_token
+    if authorization:
+        return extract_bearer_token(authorization)
+    if required:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Not authenticated",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    return None
+
+
+async def _load_current_user(
+    token: Optional[str],
+    db: AsyncSession,
+    *,
+    required: bool,
 ):
+    if not token:
+        return None
+
     from app.models.user import User
 
-    token = access_token or extract_bearer_token(authorization)
     payload = decode_token(token)
     user_id = payload.get("sub")
     if not user_id:
@@ -89,17 +111,37 @@ async def get_current_user(
     result = await db.execute(select(User).where(User.id == int(user_id)))
     user = result.scalar_one_or_none()
     if not user:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="User not found",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
+        if required:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="User not found",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+        return None
     if not user.is_active:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Account is disabled",
         )
     return user
+
+
+async def get_current_user(
+    authorization: Optional[str] = Header(None),
+    access_token: Optional[str] = Cookie(None),
+    db: AsyncSession = Depends(get_async_session),
+):
+    token = resolve_auth_token(authorization, access_token, required=True)
+    return await _load_current_user(token, db, required=True)
+
+
+async def get_optional_current_user(
+    authorization: Optional[str] = Header(None),
+    access_token: Optional[str] = Cookie(None),
+    db: AsyncSession = Depends(get_async_session),
+):
+    token = resolve_auth_token(authorization, access_token, required=False)
+    return await _load_current_user(token, db, required=False)
 
 
 def require_role(*roles: str):

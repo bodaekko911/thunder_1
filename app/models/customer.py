@@ -12,6 +12,7 @@ class Customer(Base):
     phone      = Column(String(30))
     email      = Column(String(150))
     address    = Column(Text)
+    discount_pct = Column(Numeric(6, 2), default=0)
     balance    = Column(Numeric(12, 2), default=0)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 

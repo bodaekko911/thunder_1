@@ -587,6 +587,7 @@ def expenses_ui():
 body.light {
     --bg: #f2f4f8; --card: #ffffff; --card2: #f7f8fb;
     --border: rgba(0,0,0,0.07); --border2: rgba(0,0,0,0.13);
+    --green: #0f8a43;
     --text: #141820; --sub: #505870; --muted: #8090a8;
 }
 body.light nav { background: rgba(242,244,248,.93); }
@@ -857,7 +858,7 @@ nav {
             </div>
             <div class="page-sub">Track water, electricity, gas, rent and all other operating expenses.</div>
         </div>
-        <button class="add-btn" onclick="openAddModal()">
+        <button class="add-btn" id="record-expense-btn" onclick="openAddModal()">
             <svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
             Record Expense
         </button>
@@ -892,7 +893,7 @@ nav {
         <div class="sidebar">
             <div class="sidebar-head">
                 <span class="sidebar-title">Categories</span>
-                <button class="add-cat-btn" onclick="openCatModal()">+ New</button>
+                <button class="add-cat-btn" id="new-category-btn" onclick="openCatModal()">+ New</button>
             </div>
             <div class="cat-list">
                 <div class="cat-item active" id="cat-all" onclick="filterCategory(null)">
@@ -1005,7 +1006,7 @@ nav {
         </div>
         <div class="modal-actions">
             <button class="btn-cancel" onclick="closeModal('cat-modal')">Cancel</button>
-            <button class="btn-save" onclick="saveCategory()">Create</button>
+            <button class="btn-save" id="create-category-btn" onclick="saveCategory()">Create</button>
         </div>
     </div>
 </div>
@@ -1024,6 +1025,22 @@ let categories    = [];
 let activeCatId   = null;
 let editingId     = null;
 let toastTimer    = null;
+let currentUserRole = "";
+let currentUserPermissions = new Set();
+
+function hasPermission(permission) {
+    return currentUserRole === "admin" || currentUserPermissions.has(permission);
+}
+
+function applyExpensePermissions() {
+    const canCreate = hasPermission("action_expenses_create");
+    const recordBtn = document.getElementById("record-expense-btn");
+    const newCategoryBtn = document.getElementById("new-category-btn");
+    const createCategoryBtn = document.getElementById("create-category-btn");
+    if (recordBtn) recordBtn.style.display = canCreate ? "" : "none";
+    if (newCategoryBtn) newCategoryBtn.style.display = canCreate ? "" : "none";
+    if (createCategoryBtn) createCategoryBtn.style.display = canCreate ? "" : "none";
+}
 
 // ── Init ──────────────────────────────────────────────
 async function initUser() {
@@ -1031,10 +1048,17 @@ async function initUser() {
         const r = await fetch("/auth/me");
         if (!r.ok) { window.location.href = "/"; return; }
         const u = await r.json();
+        currentUserRole = u.role || "";
+        currentUserPermissions = new Set(
+            (typeof u.permissions === "string" ? u.permissions.split(",") : (u.permissions || []))
+                .map(v => v.trim())
+                .filter(Boolean)
+        );
         const nameEl = document.getElementById("user-name");
         const avatarEl = document.getElementById("user-avatar");
         if (nameEl) nameEl.innerText = u.name;
         if (avatarEl) avatarEl.innerText = u.name.charAt(0).toUpperCase();
+        applyExpensePermissions();
         return u;
     } catch(e) { window.location.href = "/"; }
 }
@@ -1051,7 +1075,6 @@ if (localStorage.getItem("expenses-theme") === "light") {
     document.body.classList.add("light");
     document.getElementById("mode-btn").innerText = "☀️";
 }
-initUser();
 
 // Set default month filter to current month
 const today = new Date();
@@ -1111,6 +1134,10 @@ function renderCategories() {
 }
 
 async function saveCategory() {
+    if (!hasPermission("action_expenses_create")) {
+        showToast("Permission denied: action_expenses_create", "err");
+        return;
+    }
     const name = document.getElementById("cm-name").value.trim();
     const desc = document.getElementById("cm-desc").value.trim();
     if (!name) { showToast("Category name is required", "err"); return; }
@@ -1132,7 +1159,13 @@ async function saveCategory() {
     }
 }
 
-function openCatModal() { openModal("cat-modal"); }
+function openCatModal() {
+    if (!hasPermission("action_expenses_create")) {
+        showToast("Permission denied: action_expenses_create", "err");
+        return;
+    }
+    openModal("cat-modal");
+}
 function filterCategory(id) {
     activeCatId = id;
     // update active state
@@ -1188,8 +1221,8 @@ async function loadExpenses() {
                 <td><span class="method-pill method-${e.payment_method}">${e.payment_method.replace("_"," ")}</span></td>
                 <td><div class="exp-amount">${e.amount.toFixed(2)}</div></td>
                 <td>
-                    <button class="action-btn" onclick="openEditModal(${JSON.stringify(e).replace(/"/g,'&quot;')})">Edit</button>
-                    <button class="action-btn del" onclick="deleteExpense(${e.id}, '${e.ref_number}')">Delete</button>
+                    ${hasPermission("action_expenses_update") ? `<button class="action-btn" onclick="openEditModal(${JSON.stringify(e).replace(/"/g,'&quot;')})">Edit</button>` : ""}
+                    ${hasPermission("action_expenses_delete") ? `<button class="action-btn del" onclick="deleteExpense(${e.id}, '${e.ref_number}')">Delete</button>` : ""}
                 </td>
             </tr>
         `).join("");
@@ -1205,6 +1238,10 @@ function clearFilter() {
 
 // ── Add / Edit ────────────────────────────────────────
 function openAddModal() {
+    if (!hasPermission("action_expenses_create")) {
+        showToast("Permission denied: action_expenses_create", "err");
+        return;
+    }
     editingId = null;
     document.getElementById("modal-title").innerText = "Record Expense";
     document.getElementById("modal-sub").innerText   = "Fill in the details below.";
@@ -1220,6 +1257,10 @@ function openAddModal() {
 }
 
 function openEditModal(e) {
+    if (!hasPermission("action_expenses_update")) {
+        showToast("Permission denied: action_expenses_update", "err");
+        return;
+    }
     editingId = e.id;
     document.getElementById("modal-title").innerText = "Edit Expense";
     document.getElementById("modal-sub").innerText   = e.ref_number;
@@ -1235,6 +1276,11 @@ function openEditModal(e) {
 }
 
 async function saveExpense() {
+    const requiredPermission = editingId ? "action_expenses_update" : "action_expenses_create";
+    if (!hasPermission(requiredPermission)) {
+        showToast(`Permission denied: ${requiredPermission}`, "err");
+        return;
+    }
     const cat    = parseInt(document.getElementById("m-category").value);
     const amount = parseFloat(document.getElementById("m-amount").value);
     const date   = document.getElementById("m-date").value;
@@ -1279,6 +1325,10 @@ async function saveExpense() {
 }
 
 async function deleteExpense(id, ref) {
+    if (!hasPermission("action_expenses_delete")) {
+        showToast("Permission denied: action_expenses_delete", "err");
+        return;
+    }
     if (!confirm(`Delete ${ref}? This will reverse the journal entry.`)) return;
     try {
         const res  = await fetch(`/expenses/api/delete/${id}`, {
@@ -1304,7 +1354,12 @@ async function loadFarmsDropdown() {
 }
 
 // ── Boot ──────────────────────────────────────────────
-Promise.all([loadCategories(), loadSummary(), loadExpenses(), loadFarmsDropdown()]);
+async function bootstrapExpensesPage() {
+    await initUser();
+    await Promise.all([loadCategories(), loadSummary(), loadExpenses(), loadFarmsDropdown()]);
+}
+
+bootstrapExpensesPage();
 </script>
 </body>
 </html>"""

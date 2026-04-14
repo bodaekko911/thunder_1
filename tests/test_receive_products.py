@@ -23,9 +23,12 @@ from app.services.receive_service import (
     BatchReceiptCreate,
     BatchReceiptItem,
     ReceiptCreate,
+    ReceiptUpdate,
     create_receipt,
     create_receipt_batch,
+    delete_receipt,
     list_receipts,
+    update_receipt,
 )
 
 
@@ -60,6 +63,7 @@ class FakeReceiveSession:
         self._responses = list(responses)
         self._call_idx  = 0
         self.added: list = []
+        self.deleted: list = []
         self.flush_count = 0
         self.committed   = False
 
@@ -89,6 +93,9 @@ class FakeReceiveSession:
 
     async def refresh(self, _obj):
         pass
+
+    async def delete(self, obj):
+        self.deleted.append(obj)
 
 
 def _make_product(**kwargs) -> Product:
@@ -415,6 +422,114 @@ def test_batch_receive_single_commit_even_with_cost():
     assert result["total_cost"] == 20.0
     assert result["receipts"][0]["expense_ref"].startswith("EXP-")
     assert db.committed is True
+
+
+def test_update_receipt_updates_stock_move_and_receipt_fields():
+    from decimal import Decimal
+
+    product = _make_product(stock=15, cost=5.00)
+    user = _make_user()
+    receipt = ProductReceipt(
+        id=4,
+        ref_number="RCV-00004",
+        product_id=product.id,
+        product=product,
+        user_id=user.id,
+        user=user,
+        receive_date=date(2026, 4, 13),
+        qty=Decimal("5.000"),
+        unit_cost=Decimal("5.00"),
+        total_cost=Decimal("25.00"),
+        supplier_ref="INV-OLD",
+        notes="old",
+        expense_id=None,
+    )
+    move = StockMove(
+        id=8,
+        product_id=product.id,
+        type="in",
+        qty=Decimal("5.000"),
+        qty_before=Decimal("10.000"),
+        qty_after=Decimal("15.000"),
+        ref_type="receipt",
+        ref_id=receipt.id,
+        note="Receipt RCV-00004",
+        user_id=user.id,
+    )
+    db = FakeReceiveSession([
+        FakeScalarResult(receipt),
+        FakeScalarResult(move),
+    ])
+
+    result = asyncio.run(
+        update_receipt(
+            db,
+            receipt.id,
+            ReceiptUpdate(
+                qty=7,
+                unit_cost=6.5,
+                receive_date=date(2026, 4, 14),
+                supplier_ref="INV-NEW",
+                notes="updated",
+            ),
+            user,
+        )
+    )
+
+    assert db.committed is True
+    assert float(product.stock) == 17.0
+    assert product.cost == Decimal("6.50")
+    assert float(receipt.qty) == 7.0
+    assert float(move.qty_before) == 10.0
+    assert float(move.qty_after) == 17.0
+    assert result["supplier_ref"] == "INV-NEW"
+    assert result["notes"] == "updated"
+
+
+def test_delete_receipt_reverses_stock_and_removes_move():
+    from decimal import Decimal
+
+    product = _make_product(stock=15, cost=5.00)
+    user = _make_user()
+    receipt = ProductReceipt(
+        id=5,
+        ref_number="RCV-00005",
+        product_id=product.id,
+        product=product,
+        user_id=user.id,
+        user=user,
+        receive_date=date(2026, 4, 13),
+        qty=Decimal("5.000"),
+        unit_cost=Decimal("5.00"),
+        total_cost=Decimal("25.00"),
+        supplier_ref="INV-DEL",
+        notes="delete me",
+        expense_id=None,
+    )
+    move = StockMove(
+        id=9,
+        product_id=product.id,
+        type="in",
+        qty=Decimal("5.000"),
+        qty_before=Decimal("10.000"),
+        qty_after=Decimal("15.000"),
+        ref_type="receipt",
+        ref_id=receipt.id,
+        note="Receipt RCV-00005",
+        user_id=user.id,
+    )
+    db = FakeReceiveSession([
+        FakeScalarResult(receipt),
+        FakeScalarResult(move),
+    ])
+
+    result = asyncio.run(delete_receipt(db, receipt.id, user))
+
+    assert result == {"ok": True, "id": 5, "ref_number": "RCV-00005"}
+    assert db.committed is True
+    assert float(product.stock) == 10.0
+    assert move in db.deleted
+    assert receipt in db.deleted
 
 
 # ── list_receipts ─────────────────────────────────────────────────────────────

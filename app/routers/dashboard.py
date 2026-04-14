@@ -17,6 +17,7 @@ from app.models.spoilage import SpoilageRecord
 from app.models.production import ProductionBatch
 from app.models.refund import RetailRefund
 from app.models.user import User
+from app.services.expense_service import get_summary as get_expense_summary
 from app.services.dashboard_assistant_service import answer_dashboard_question
 
 router = APIRouter(
@@ -103,6 +104,10 @@ async def dashboard_data(db: AsyncSession = Depends(get_async_session)):
     total_today = pos_today + b2b_today
     total_month = pos_month + b2b_month
     total_year  = pos_year  + b2b_year
+
+    expense_summary = await get_expense_summary(db)
+    expenses_month = float(expense_summary["this_month"])
+    expenses_last_month = float(expense_summary["last_month"])
 
     # ── CUSTOMERS ──────────────────────────────────────
     r = await db.execute(select(func.count(Customer.id)))
@@ -225,6 +230,8 @@ async def dashboard_data(db: AsyncSession = Depends(get_async_session)):
         "total_today":  round(total_today, 2),
         "total_month":  round(total_month, 2),
         "total_year":   round(total_year, 2),
+        "expenses_month": round(expenses_month, 2),
+        "expenses_last_month": round(expenses_last_month, 2),
         "b2b_outstanding": round(b2b_outstanding, 2),
         # Refunds
         "ref_today":   round(ref_today, 2),
@@ -288,6 +295,7 @@ def dashboard_ui():
 body.light{
     --bg:#f4f5ef;--surface:#f1f3eb;--card:#eceee6;--card2:#e4e6de;
     --border:rgba(0,0,0,0.08);--border2:rgba(0,0,0,0.14);
+    --green:#0f8a43;
     --text:#1a1e14;--sub:#4a5040;--muted:#7b816f;
 }
 body.light nav{background:rgba(244,245,239,.92);}
@@ -329,13 +337,19 @@ nav{position:sticky;top:0;z-index:100;display:flex;align-items:center;gap:10px;p
 .grid-2{display:grid;grid-template-columns:1fr 1fr;gap:14px;}
 .grid-2-1{display:grid;grid-template-columns:2fr 1fr;gap:14px;}
 .grid-1-2{display:grid;grid-template-columns:1fr 2fr;gap:14px;}
+.hero-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:14px;}
+.ops-grid{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:14px;}
 @media(max-width:1100px){.grid-4{grid-template-columns:repeat(2,1fr);}}
-@media(max-width:700px){.grid-4,.grid-3,.grid-2,.grid-2-1,.grid-1-2{grid-template-columns:1fr;}}
+@media(max-width:1200px){.ops-grid{grid-template-columns:repeat(3,minmax(0,1fr));}}
+@media(max-width:1100px){.hero-grid{grid-template-columns:repeat(2,minmax(0,1fr));}}
+@media(max-width:700px){.grid-4,.grid-3,.grid-2,.grid-2-1,.grid-1-2,.hero-grid,.ops-grid{grid-template-columns:1fr;}}
 
 /* STAT CARDS */
-.stat{background:var(--card);border:1px solid var(--border);border-radius:var(--r);padding:18px 20px;display:flex;flex-direction:column;gap:8px;position:relative;overflow:hidden;transition:border-color .2s,transform .2s;}
+.stat{background:linear-gradient(180deg,color-mix(in srgb,var(--card) 92%,white 8%),var(--card));border:1px solid var(--border);border-radius:var(--r);padding:18px 20px;display:flex;flex-direction:column;gap:8px;position:relative;overflow:hidden;transition:border-color .2s,transform .2s,box-shadow .2s;min-height:148px;}
 .stat:hover{border-color:var(--border2);transform:translateY(-2px);}
+.stat:hover{box-shadow:0 16px 36px rgba(0,0,0,.18);}
 .stat::before{content:'';position:absolute;top:0;left:0;right:0;height:2px;}
+.stat::after{content:'';position:absolute;right:-40px;bottom:-48px;width:120px;height:120px;border-radius:50%;background:radial-gradient(circle,rgba(255,255,255,.08),transparent 70%);pointer-events:none;}
 .stat.green::before {background:linear-gradient(90deg,var(--green),transparent);}
 .stat.blue::before  {background:linear-gradient(90deg,var(--blue),transparent);}
 .stat.purple::before{background:linear-gradient(90deg,var(--purple),transparent);}
@@ -356,6 +370,15 @@ nav{position:sticky;top:0;z-index:100;display:flex;align-items:center;gap:10px;p
 .stat-value.teal  {color:var(--teal);}
 .stat-value.lime  {color:var(--lime);}
 .stat-sub{font-size:11px;color:var(--muted);margin-top:2px;}
+.stat-kicker{font-family:var(--mono);font-size:10px;letter-spacing:1px;text-transform:uppercase;color:var(--muted);}
+.stat-expense{background:
+    radial-gradient(circle at top right, rgba(251,146,60,.16), transparent 42%),
+    linear-gradient(180deg, color-mix(in srgb,var(--card) 90%, var(--orange) 10%), var(--card));}
+.stat-expense .stat-sub{display:flex;justify-content:space-between;gap:10px;align-items:center;}
+.trend-pill{display:inline-flex;align-items:center;padding:3px 8px;border-radius:999px;font-family:var(--mono);font-size:10px;font-weight:700;border:1px solid transparent;white-space:nowrap;}
+.trend-up{background:rgba(255,77,109,.12);color:var(--danger);border-color:rgba(255,77,109,.2);}
+.trend-down{background:rgba(0,255,157,.12);color:var(--green);border-color:rgba(0,255,157,.2);}
+.trend-flat{background:rgba(255,255,255,.06);color:var(--sub);border-color:var(--border);}
 
 /* PANEL */
 .panel{background:var(--card);border:1px solid var(--border);border-radius:var(--r);overflow:hidden;}
@@ -488,7 +511,7 @@ tr:hover td{background:rgba(255,255,255,.02);}
     </div>
 
     <!-- ROW 1: REVENUE STATS -->
-    <div class="grid-4">
+    <div class="hero-grid">
         <div class="stat green">
             <div class="stat-icon">💰</div>
             <div class="stat-label">Revenue Today</div>
@@ -501,7 +524,7 @@ tr:hover td{background:rgba(255,255,255,.02);}
             <div class="stat-value blue" id="s-month">—</div>
             <div class="stat-sub" id="s-month-orders">POS + B2B</div>
         </div>
-        <div class="stat orange">
+        <div class="stat orange stat-expense">
             <div class="stat-icon">🤝</div>
             <div class="stat-label">B2B Outstanding</div>
             <div class="stat-value orange" id="s-b2b-out">—</div>
@@ -517,7 +540,7 @@ tr:hover td{background:rgba(255,255,255,.02);}
     </div>
 
     <!-- ROW 2: OPERATIONS STATS -->
-    <div class="grid-4">
+    <div class="ops-grid">
         <div class="stat danger">
             <div class="stat-icon">🚫</div>
             <div class="stat-label">Out of Stock</div>
@@ -529,6 +552,13 @@ tr:hover td{background:rgba(255,255,255,.02);}
             <div class="stat-label">Low Stock (≤5)</div>
             <div class="stat-value warn" id="s-low">—</div>
             <div class="stat-sub" id="s-stock-value">stock value —</div>
+        </div>
+        <div class="stat orange">
+            <div class="stat-icon">ðŸ§¾</div>
+            <div class="stat-kicker">Accounting</div>
+            <div class="stat-label">Expenses This Month</div>
+            <div class="stat-value orange" id="s-expenses">â€”</div>
+            <div class="stat-sub" id="s-expenses-sub">last month: â€”</div>
         </div>
         <div class="stat teal">
             <div class="stat-icon">🌾</div>
@@ -658,6 +688,54 @@ document.getElementById("nav-date").innerText =
 document.getElementById("date-sub").innerText =
     now.toLocaleDateString("en-GB",{weekday:"long",year:"numeric",month:"long",day:"numeric"});
 
+function setupDashboardCards(){
+    const expenseValue = document.getElementById("s-expenses");
+    const expenseSub = document.getElementById("s-expenses-sub");
+    if (!expenseValue || !expenseSub) return;
+
+    const expenseCard = expenseValue.closest(".stat");
+    if (expenseCard) expenseCard.classList.add("stat-expense");
+
+    const icon = expenseCard ? expenseCard.querySelector(".stat-icon") : null;
+    if (icon) icon.innerHTML = "&#128184;";
+
+    const kicker = expenseCard ? expenseCard.querySelector(".stat-kicker") : null;
+    if (kicker) kicker.innerText = "Accounting";
+
+    expenseValue.innerText = "0.00";
+    expenseSub.innerText = "last month: 0.00";
+
+    if (expenseSub.parentElement && expenseSub.parentElement.classList.contains("stat-sub")) {
+        expenseSub.parentElement.innerHTML =
+            '<span id="s-expenses-sub">last month: 0.00</span>' +
+            '<span class="trend-pill trend-flat" id="s-expenses-trend">vs last month</span>';
+    }
+}
+
+function renderExpenseTrend(current, previous){
+    const trendEl = document.getElementById("s-expenses-trend");
+    const subEl = document.getElementById("s-expenses-sub");
+    if (subEl) subEl.innerText = "last month: " + Number(previous || 0).toFixed(2);
+    if (!trendEl) return;
+
+    const diff = Number(current || 0) - Number(previous || 0);
+    trendEl.className = "trend-pill";
+    if (Math.abs(diff) < 0.005) {
+        trendEl.classList.add("trend-flat");
+        trendEl.innerText = "no change";
+        return;
+    }
+    if (diff > 0) {
+        trendEl.classList.add("trend-up");
+        trendEl.innerText = "+" + diff.toFixed(2);
+        return;
+    }
+    trendEl.classList.add("trend-down");
+    trendEl.innerText = diff.toFixed(2);
+}
+
+setupDashboardCards();
+
 async function load(){
     try {
         let d = await (await fetch("/dashboard/data")).json();
@@ -680,6 +758,8 @@ async function load(){
         document.getElementById("s-oos").innerText        = d.out_of_stock_count;
         document.getElementById("s-low").innerText        = d.low_stock_count;
         document.getElementById("s-stock-value").innerText= "inventory value: " + d.stock_value.toFixed(0);
+        document.getElementById("s-expenses").innerText   = d.expenses_month.toFixed(2);
+        renderExpenseTrend(d.expenses_month, d.expenses_last_month);
         document.getElementById("s-farm").innerText       = d.farm_month;
         document.getElementById("s-batches").innerText    = d.batches_month;
         document.getElementById("s-spoilage").innerText   = "spoilage this month: " + d.spoilage_month.toFixed(1);

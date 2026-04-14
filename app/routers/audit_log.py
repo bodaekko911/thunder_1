@@ -121,6 +121,7 @@ def audit_log_ui():
 body.light {
     --bg:      #f4f5ef; --card:   #eceee6; --card2:  #e4e6de;
     --border:  rgba(0,0,0,0.07); --border2: rgba(0,0,0,0.12);
+    --green:   #0f8a43;
     --text:    #1a1e14; --sub:    #4a5040; --muted:  #8a9080;
 }
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}

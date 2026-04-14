@@ -31,8 +31,23 @@ jobs:
           python -m pip install -r requirements.txt
       - name: Fresh install smoke
         run: |
-          python -m compileall app tests alembic
           python -c "from app.main import app; print(app.title)"
+
+  lint:
+    name: lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+      - name: Run syntax lint
+        run: python -m compileall app tests alembic
 
   import-checks:
     name: import
@@ -86,6 +101,20 @@ jobs:
   alembic:
     name: alembic
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: erp_ci
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d erp_ci"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -100,6 +129,10 @@ jobs:
         run: |
           python -m alembic history
           python -m alembic heads
+      - name: Apply migrations
+        run: python -m alembic upgrade head
+      - name: Verify current revision
+        run: python -m alembic current
       - name: Render upgrade SQL
         run: python -m alembic upgrade head --sql > /tmp/alembic-upgrade.sql
 

@@ -9,6 +9,16 @@ from app.core.log import logger
 from app.db.session import engine
 
 
+_RUNTIME_SCHEMA_PATCHES: tuple[dict[str, str], ...] = (
+    {
+        "table": "customers",
+        "column": "discount_pct",
+        "definition": "NUMERIC(6, 2) DEFAULT 0",
+        "backfill": "UPDATE customers SET discount_pct = 0 WHERE discount_pct IS NULL",
+    },
+)
+
+
 def _alembic_config() -> Config:
     config = Config(str(BASE_DIR / "alembic.ini"))
     config.set_main_option("script_location", str(BASE_DIR / "alembic"))
@@ -86,7 +96,39 @@ async def check_migration_status() -> dict[str, Any]:
     }
 
 
+async def ensure_runtime_schema_compatibility() -> None:
+    async with engine.begin() as conn:
+        def patch_schema(sync_conn):
+            db_inspector = inspect(sync_conn)
+            applied: list[str] = []
+            for patch in _RUNTIME_SCHEMA_PATCHES:
+                table_name = patch["table"]
+                if not db_inspector.has_table(table_name):
+                    continue
+                column_names = {column["name"] for column in db_inspector.get_columns(table_name)}
+                if patch["column"] not in column_names:
+                    sync_conn.execute(
+                        text(
+                            f"ALTER TABLE {table_name} ADD COLUMN "
+                            f"{patch['column']} {patch['definition']}"
+                        )
+                    )
+                    applied.append(f"{table_name}.{patch['column']}")
+                sync_conn.execute(text(patch["backfill"]))
+            return applied
+
+        applied = await conn.run_sync(patch_schema)
+
+    if applied:
+        logger.warning(
+            "Applied runtime schema compatibility patches",
+            extra={"schema_patches": applied},
+        )
+
+
 async def verify_migration_status() -> None:
+    await ensure_runtime_schema_compatibility()
+
     if not settings.MIGRATION_CHECK_ON_STARTUP:
         return
 
