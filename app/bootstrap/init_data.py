@@ -8,7 +8,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
-from app.core.security import hash_password
+from app.core.security import hash_password, verify_password
 from app.database import session_scope
 from app.models.accounting import Account
 from app.models.expense import ExpenseCategory
@@ -31,12 +31,14 @@ DEFAULT_EXPENSE_CATEGORIES = (
 @dataclass
 class BootstrapSummary:
     admin_created: bool = False
+    admin_password_reset: bool = False
     expense_accounts_created: int = 0
     expense_categories_created: int = 0
 
     def as_lines(self) -> list[str]:
         return [
             f"admin_created={str(self.admin_created).lower()}",
+            f"admin_password_reset={str(self.admin_password_reset).lower()}",
             f"expense_accounts_created={self.expense_accounts_created}",
             f"expense_categories_created={self.expense_categories_created}",
         ]
@@ -48,10 +50,20 @@ async def ensure_default_admin(
     name: str = settings.DEFAULT_ADMIN_NAME,
     email: str = settings.DEFAULT_ADMIN_EMAIL,
     password: str = settings.ADMIN_PASSWORD,
-) -> bool:
+    reset_password: bool = False,
+) -> tuple[bool, bool]:
     existing = await db.execute(select(User).where(User.email == email))
-    if existing.scalar_one_or_none():
-        return False
+    user = existing.scalar_one_or_none()
+    if user:
+        if reset_password:
+            try:
+                password_matches = verify_password(password, user.password)
+            except Exception:
+                password_matches = False
+            if not password_matches:
+                user.password = hash_password(password)
+                return False, True
+        return False, False
 
     db.add(
         User(
@@ -62,7 +74,7 @@ async def ensure_default_admin(
             is_active=True,
         )
     )
-    return True
+    return True, False
 
 
 async def ensure_default_expense_categories(db: AsyncSession) -> tuple[int, int]:
@@ -89,12 +101,20 @@ async def ensure_default_expense_categories(db: AsyncSession) -> tuple[int, int]
     return accounts_created, categories_created
 
 
-async def run_bootstrap(*, create_admin: bool, create_expense_categories: bool) -> BootstrapSummary:
+async def run_bootstrap(
+    *,
+    create_admin: bool,
+    create_expense_categories: bool,
+    reset_admin_password: bool,
+) -> BootstrapSummary:
     summary = BootstrapSummary()
 
     async with session_scope() as db:
         if create_admin:
-            summary.admin_created = await ensure_default_admin(db)
+            (
+                summary.admin_created,
+                summary.admin_password_reset,
+            ) = await ensure_default_admin(db, reset_password=reset_admin_password)
 
         if create_expense_categories:
             (
@@ -110,6 +130,11 @@ def build_parser() -> argparse.ArgumentParser:
         description="Initialize optional bootstrap data. This command is never run automatically.",
     )
     parser.add_argument("--admin", action="store_true", help="Create the default admin user if missing")
+    parser.add_argument(
+        "--reset-admin-password",
+        action="store_true",
+        help="Update the default admin user's password to ADMIN_PASSWORD if the user already exists",
+    )
     parser.add_argument(
         "--expense-categories",
         action="store_true",
@@ -128,11 +153,13 @@ def main() -> int:
     parser = build_parser()
     args = parser.parse_args()
 
-    create_admin = args.admin or args.all
+    create_admin = args.admin or args.all or args.reset_admin_password
     create_expense_categories = args.expense_categories or args.all
 
     if not create_admin and not create_expense_categories:
-        parser.error("select at least one action: --admin, --expense-categories, or --all")
+        parser.error(
+            "select at least one action: --admin, --reset-admin-password, --expense-categories, or --all"
+        )
 
     if settings.APP_ENV == "production" and not args.yes:
         parser.error("--yes is required when APP_ENV=production")
@@ -141,6 +168,7 @@ def main() -> int:
         run_bootstrap(
             create_admin=create_admin,
             create_expense_categories=create_expense_categories,
+            reset_admin_password=args.reset_admin_password,
         )
     )
 
