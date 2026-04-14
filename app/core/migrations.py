@@ -17,6 +17,7 @@ _RUNTIME_SCHEMA_PATCHES: tuple[dict[str, str], ...] = (
         "backfill": "UPDATE customers SET discount_pct = 0 WHERE discount_pct IS NULL",
     },
 )
+_CRITICAL_AUTH_TABLES = {"users", "refresh_tokens", "activity_logs"}
 
 
 def _alembic_config() -> Config:
@@ -35,6 +36,8 @@ def _format_migration_status(payload: dict[str, Any]) -> str:
         return "Database schema exists but is not tracked by Alembic"
     if payload["status"] == "pending":
         return "Database migrations are pending"
+    if payload["status"] == "schema_incomplete":
+        return "Database schema is missing required tables for the current Alembic revision"
     if payload["status"] == "multiple_heads":
         return "Multiple Alembic heads detected"
     return "Database migration status could not be determined"
@@ -88,6 +91,14 @@ async def check_migration_status() -> dict[str, Any]:
             "status": "pending",
             "heads": [head],
             "current_revisions": current_revisions,
+        }
+    missing_tables = sorted(_CRITICAL_AUTH_TABLES - set(user_tables))
+    if missing_tables:
+        return {
+            "status": "schema_incomplete",
+            "heads": [head],
+            "current_revisions": current_revisions,
+            "missing_tables": missing_tables,
         }
     return {
         "status": "ok",

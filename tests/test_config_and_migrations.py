@@ -53,12 +53,20 @@ def test_verify_migration_status_skips_when_disabled(monkeypatch) -> None:
         called = True
         return {"status": "ok", "heads": ["head"], "current_revisions": ["head"]}
 
+    async def fake_ensure_runtime_schema_compatibility():
+        return None
+
     monkeypatch.setattr(
         migrations,
         "settings",
         SimpleNamespace(MIGRATION_CHECK_ON_STARTUP=False, MIGRATION_CHECK_STRICT=False),
     )
     monkeypatch.setattr(migrations, "check_migration_status", fake_check_migration_status)
+    monkeypatch.setattr(
+        migrations,
+        "ensure_runtime_schema_compatibility",
+        fake_ensure_runtime_schema_compatibility,
+    )
 
     asyncio.run(migrations.verify_migration_status())
 
@@ -71,12 +79,20 @@ def test_verify_migration_status_warns_when_non_strict(monkeypatch) -> None:
     async def fake_check_migration_status():
         return {"status": "pending", "heads": ["head"], "current_revisions": []}
 
+    async def fake_ensure_runtime_schema_compatibility():
+        return None
+
     monkeypatch.setattr(
         migrations,
         "settings",
         SimpleNamespace(MIGRATION_CHECK_ON_STARTUP=True, MIGRATION_CHECK_STRICT=False),
     )
     monkeypatch.setattr(migrations, "check_migration_status", fake_check_migration_status)
+    monkeypatch.setattr(
+        migrations,
+        "ensure_runtime_schema_compatibility",
+        fake_ensure_runtime_schema_compatibility,
+    )
     monkeypatch.setattr(
         migrations.logger,
         "warning",
@@ -99,12 +115,20 @@ def test_verify_migration_status_raises_when_strict(monkeypatch) -> None:
     async def fake_check_migration_status():
         return {"status": "pending", "heads": ["head"], "current_revisions": []}
 
+    async def fake_ensure_runtime_schema_compatibility():
+        return None
+
     monkeypatch.setattr(
         migrations,
         "settings",
         SimpleNamespace(MIGRATION_CHECK_ON_STARTUP=True, MIGRATION_CHECK_STRICT=True),
     )
     monkeypatch.setattr(migrations, "check_migration_status", fake_check_migration_status)
+    monkeypatch.setattr(
+        migrations,
+        "ensure_runtime_schema_compatibility",
+        fake_ensure_runtime_schema_compatibility,
+    )
     monkeypatch.setattr(
         migrations.logger,
         "error",
@@ -120,3 +144,12 @@ def test_verify_migration_status_raises_when_strict(monkeypatch) -> None:
             {"migration_status": {"status": "pending", "heads": ["head"], "current_revisions": []}},
         )
     ]
+
+
+def test_format_migration_status_reports_schema_incomplete() -> None:
+    payload = {"status": "schema_incomplete", "heads": ["head"], "current_revisions": ["head"]}
+
+    assert (
+        migrations._format_migration_status(payload)
+        == "Database schema is missing required tables for the current Alembic revision"
+    )
