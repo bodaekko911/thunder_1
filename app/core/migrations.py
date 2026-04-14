@@ -1,6 +1,7 @@
 from typing import Any
 
 from alembic.config import Config
+from alembic.runtime.migration import MigrationContext
 from alembic.script import ScriptDirectory
 from sqlalchemy import inspect, text
 
@@ -27,6 +28,18 @@ def _alembic_config() -> Config:
     return config
 
 
+def _masked_database_url() -> str:
+    url = settings.DATABASE_URL
+    if "://" not in url or "@" not in url:
+        return url
+    prefix, rest = url.split("://", 1)
+    credentials, host_part = rest.split("@", 1)
+    if ":" not in credentials:
+        return f"{prefix}://***@{host_part}"
+    username, _password = credentials.split(":", 1)
+    return f"{prefix}://{username}:***@{host_part}"
+
+
 def _format_migration_status(payload: dict[str, Any]) -> str:
     if payload["status"] == "ok":
         return "Database migrations are up to date"
@@ -45,65 +58,78 @@ def _format_migration_status(payload: dict[str, Any]) -> str:
 
 async def check_migration_status() -> dict[str, Any]:
     script = ScriptDirectory.from_config(_alembic_config())
-    heads = script.get_heads()
+    heads = sorted(script.get_heads())
     if not heads:
         return {
             "status": "missing_versions",
             "heads": [],
             "current_revisions": [],
+            "database_url": _masked_database_url(),
         }
     if len(heads) > 1:
         return {
             "status": "multiple_heads",
-            "heads": list(heads),
+            "heads": heads,
             "current_revisions": [],
+            "database_url": _masked_database_url(),
         }
 
     async with engine.begin() as conn:
         def inspect_db(sync_conn):
             db_inspector = inspect(sync_conn)
             table_names = set(db_inspector.get_table_names())
-            current_revisions: list[str] = []
+            context = MigrationContext.configure(sync_conn)
+            current_revisions = sorted(context.get_current_heads())
+            raw_version_rows: list[str] = []
             if "alembic_version" in table_names:
                 rows = sync_conn.execute(text("SELECT version_num FROM alembic_version"))
-                current_revisions.extend(row[0] for row in rows)
+                raw_version_rows.extend(sorted(row[0] for row in rows))
             user_tables = sorted(name for name in table_names if name != "alembic_version")
-            return current_revisions, user_tables
+            return current_revisions, raw_version_rows, user_tables
 
-        current_revisions, user_tables = await conn.run_sync(inspect_db)
+        current_revisions, raw_version_rows, user_tables = await conn.run_sync(inspect_db)
 
-    head = heads[0]
     if not current_revisions:
         if user_tables:
             return {
                 "status": "legacy_schema_unversioned",
-                "heads": [head],
+                "heads": heads,
                 "current_revisions": [],
+                "raw_version_rows": raw_version_rows,
                 "table_count": len(user_tables),
+                "database_url": _masked_database_url(),
             }
         return {
             "status": "pending",
-            "heads": [head],
+            "heads": heads,
             "current_revisions": [],
+            "raw_version_rows": raw_version_rows,
+            "database_url": _masked_database_url(),
         }
-    if set(current_revisions) != {head}:
+    if current_revisions != heads:
         return {
             "status": "pending",
-            "heads": [head],
+            "heads": heads,
             "current_revisions": current_revisions,
+            "raw_version_rows": raw_version_rows,
+            "database_url": _masked_database_url(),
         }
     missing_tables = sorted(_CRITICAL_AUTH_TABLES - set(user_tables))
     if missing_tables:
         return {
             "status": "schema_incomplete",
-            "heads": [head],
+            "heads": heads,
             "current_revisions": current_revisions,
+            "raw_version_rows": raw_version_rows,
             "missing_tables": missing_tables,
+            "database_url": _masked_database_url(),
         }
     return {
         "status": "ok",
-        "heads": [head],
+        "heads": heads,
         "current_revisions": current_revisions,
+        "raw_version_rows": raw_version_rows,
+        "database_url": _masked_database_url(),
     }
 
 
