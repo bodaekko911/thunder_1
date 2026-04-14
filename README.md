@@ -52,6 +52,22 @@ python -m app.bootstrap.init_data --all --yes
 
 The bootstrap command is safe to run multiple times. Existing records are left in place, and only missing defaults are created.
 
+## Optional Demo Data
+
+To insert a small demo dataset for manual testing, run:
+
+```powershell
+python -m app.bootstrap.seed_demo_data
+```
+
+When `APP_ENV=production`, add `--yes`:
+
+```powershell
+python -m app.bootstrap.seed_demo_data --yes
+```
+
+This command is manual-only and idempotent. It creates a small sample set of customers, products, invoices, and expenses only when those demo records are missing.
+
 ## Data Diagnostics
 
 To inspect whether production is missing business data or reference data, run:
