@@ -38,7 +38,7 @@ async def _get_walk_in_customer_id(db: AsyncSession) -> int:
     return customer.id
 
 
-async def create_invoice(db: AsyncSession, data: InvoiceCreate, user_id: int) -> Invoice:
+async def create_invoice(db: AsyncSession, data: InvoiceCreate, user_id: int) -> dict:
     try:
         if not data.items:
             raise HTTPException(status_code=400, detail="Cart is empty")
@@ -127,6 +127,13 @@ async def create_invoice(db: AsyncSession, data: InvoiceCreate, user_id: int) ->
 
         await db.commit()
         await db.refresh(invoice)
+        invoice_payload = {
+            "id": invoice.id,
+            "invoice_number": invoice.invoice_number,
+            "status": invoice.status,
+            "payment_method": invoice.payment_method,
+            "total": float(invoice.total),
+        }
 
         from app.models.user import User as UserModel
         _ur = await db.execute(select(UserModel).where(UserModel.id == user_id))
@@ -144,7 +151,7 @@ async def create_invoice(db: AsyncSession, data: InvoiceCreate, user_id: int) ->
             ref_id=invoice.id,
         )
         await db.commit()
-        return invoice
+        return invoice_payload
     except Exception:
         await db.rollback()
         raise

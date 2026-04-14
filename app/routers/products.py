@@ -592,6 +592,14 @@ const ITEM_TYPE_LABELS = {
     ingredient: "Ingredient",
 };
 
+function escapeJsString(value){
+    return String(value ?? "")
+        .replace(/\\/g,"\\\\")
+        .replace(/'/g,"\\'")
+        .replace(/\r/g,"\\r")
+        .replace(/\n/g,"\\n");
+}
+
 async function init(){
     await loadCategories();
     await loadProducts();
@@ -718,8 +726,8 @@ async function loadProducts(){
         <td class="mono" style="color:${p.stock<=0?"var(--danger)":p.low?"var(--warn)":"var(--text)"};font-weight:700">${p.stock.toFixed(0)}</td>
         <td style="font-size:12px;color:var(--muted)">${p.unit}</td>
         <td style="display:flex;gap:6px">
-            <button class="action-btn" onclick="openEditModal(${p.id},'${p.sku}','${p.name.replace(/'/g,"\\'")}',${p.price},${p.cost},${p.stock},${p.min_stock},'${p.unit}','${p.category==="—"?"":p.category}','${p.item_type}')">Edit</button>
-            <button class="action-btn danger" onclick="deleteProduct(${p.id},'${p.name.replace(/'/g,"\\'")}')">Delete</button>
+            <button class="action-btn" onclick="openEditModal(${p.id},'${escapeJsString(p.sku)}','${escapeJsString(p.name)}',${p.price},${p.cost},${p.stock},${p.min_stock},'${escapeJsString(p.unit)}','${escapeJsString(p.category==="—"?"":p.category)}','${escapeJsString(p.item_type)}')">Edit</button>
+            <button class="action-btn danger" onclick="deleteProduct(${p.id},'${escapeJsString(p.name)}')">Delete</button>
         </td>
     </tr>`).join("");
     applyProductActionPermissions(currentUser);

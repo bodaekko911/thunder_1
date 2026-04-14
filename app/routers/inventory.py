@@ -16,11 +16,13 @@ from app.models.user import User
 from app.models.inventory import LocationStock, StockLocation, StockMove, StockTransfer
 from app.services.location_inventory_service import (
     create_stock_transfer,
+    ensure_default_stock_location,
     get_or_create_location_stock,
     quantize_qty,
     serialize_location,
     serialize_product_location_stock,
     serialize_transfer,
+    sync_product_stock_to_default_location,
 )
 from app.services.replenishment_service import (
     create_or_reuse_draft_purchases,
@@ -342,6 +344,17 @@ async def get_location_stock(
         for location_stock in stock_result.scalars().all():
             location_stock_map.setdefault(location_stock.product_id, []).append(location_stock)
 
+        if location_id is None:
+            unassigned_products = [
+                product for product in products
+                if product.id not in location_stock_map and quantize_qty(product.stock) > 0
+            ]
+            if unassigned_products:
+                for product in unassigned_products:
+                    _, location_stock = await sync_product_stock_to_default_location(db, product=product)
+                    location_stock_map.setdefault(product.id, []).append(location_stock)
+                await db.commit()
+
     return {
         "total": total,
         "items": [
@@ -570,7 +583,10 @@ async def adjust_stock(data: StockAdjustment, db: AsyncSession = Depends(get_asy
         location = location_result.scalar_one_or_none()
         if location is None:
             raise HTTPException(status_code=404, detail="Location not found")
+    else:
+        location = await ensure_default_stock_location(db)
 
+    if location is not None:
         location_stock = await get_or_create_location_stock(
             db,
             product_id=product.id,

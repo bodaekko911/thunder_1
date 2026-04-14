@@ -137,7 +137,7 @@ async def checkout(
         await ensure_action_permission(db, user, "pos", "sales", "approve", path="/invoice")
     user_id = user.id
     invoice = await create_invoice(db=db, data=data, user_id=user_id)
-    if not isinstance(invoice, Invoice) or invoice.id is None:
+    if not isinstance(invoice, dict) or invoice.get("id") is None:
         logger.error(
             "Checkout did not return a persisted invoice",
             extra={
@@ -148,11 +148,11 @@ async def checkout(
         )
         raise HTTPException(status_code=500, detail="Invoice creation failed")
     return {
-        "id": invoice.id,
-        "invoice_number": invoice.invoice_number,
-        "status": invoice.status,
-        "payment_method": invoice.payment_method,
-        "total": float(invoice.total),
+        "id": invoice["id"],
+        "invoice_number": invoice["invoice_number"],
+        "status": invoice["status"],
+        "payment_method": invoice["payment_method"],
+        "total": invoice["total"],
     }
 
 

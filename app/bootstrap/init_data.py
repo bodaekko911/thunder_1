@@ -12,7 +12,9 @@ from app.core.security import hash_password, verify_password
 from app.database import session_scope
 from app.models.accounting import Account
 from app.models.expense import ExpenseCategory
+from app.models.product import Product
 from app.models.user import User
+from app.services.location_inventory_service import sync_product_stock_to_default_location
 
 DEFAULT_EXPENSE_CATEGORIES = (
     ("5001", "Water"),
@@ -34,6 +36,8 @@ class BootstrapSummary:
     admin_password_reset: bool = False
     expense_accounts_created: int = 0
     expense_categories_created: int = 0
+    stock_location_created_or_reused: bool = False
+    location_stock_rows_synced: int = 0
 
     def as_lines(self) -> list[str]:
         return [
@@ -41,6 +45,8 @@ class BootstrapSummary:
             f"admin_password_reset={str(self.admin_password_reset).lower()}",
             f"expense_accounts_created={self.expense_accounts_created}",
             f"expense_categories_created={self.expense_categories_created}",
+            f"stock_location_created_or_reused={str(self.stock_location_created_or_reused).lower()}",
+            f"location_stock_rows_synced={self.location_stock_rows_synced}",
         ]
 
 
@@ -101,10 +107,21 @@ async def ensure_default_expense_categories(db: AsyncSession) -> tuple[int, int]
     return accounts_created, categories_created
 
 
+async def ensure_default_stock_location_data(db: AsyncSession) -> tuple[bool, int]:
+    result = await db.execute(select(Product))
+    products = result.scalars().all()
+    synced_rows = 0
+    for product in products:
+        await sync_product_stock_to_default_location(db, product=product)
+        synced_rows += 1
+    return True, synced_rows
+
+
 async def run_bootstrap(
     *,
     create_admin: bool,
     create_expense_categories: bool,
+    create_stock_location: bool,
     reset_admin_password: bool,
 ) -> BootstrapSummary:
     summary = BootstrapSummary()
@@ -121,6 +138,12 @@ async def run_bootstrap(
                 summary.expense_accounts_created,
                 summary.expense_categories_created,
             ) = await ensure_default_expense_categories(db)
+
+        if create_stock_location:
+            (
+                summary.stock_location_created_or_reused,
+                summary.location_stock_rows_synced,
+            ) = await ensure_default_stock_location_data(db)
 
     return summary
 
@@ -140,6 +163,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Create default expense accounts and categories if missing",
     )
+    parser.add_argument(
+        "--stock-location",
+        action="store_true",
+        help="Create or reuse the default stock location and sync product stock into it",
+    )
     parser.add_argument("--all", action="store_true", help="Run all optional bootstrap actions")
     parser.add_argument(
         "--yes",
@@ -155,10 +183,11 @@ def main() -> int:
 
     create_admin = args.admin or args.all or args.reset_admin_password
     create_expense_categories = args.expense_categories or args.all
+    create_stock_location = args.stock_location or args.all
 
-    if not create_admin and not create_expense_categories:
+    if not create_admin and not create_expense_categories and not create_stock_location:
         parser.error(
-            "select at least one action: --admin, --reset-admin-password, --expense-categories, or --all"
+            "select at least one action: --admin, --reset-admin-password, --expense-categories, --stock-location, or --all"
         )
 
     if settings.APP_ENV == "production" and not args.yes:
@@ -168,6 +197,7 @@ def main() -> int:
         run_bootstrap(
             create_admin=create_admin,
             create_expense_categories=create_expense_categories,
+            create_stock_location=create_stock_location,
             reset_admin_password=args.reset_admin_password,
         )
     )

@@ -143,6 +143,21 @@ async def ensure_default_stock_location(db: AsyncSession) -> StockLocation:
     return location
 
 
+async def sync_product_stock_to_default_location(
+    db: AsyncSession,
+    *,
+    product: Product,
+) -> tuple[StockLocation, LocationStock]:
+    location = await ensure_default_stock_location(db)
+    location_stock = await get_or_create_location_stock(
+        db,
+        product_id=product.id,
+        location_id=location.id,
+    )
+    location_stock.qty = quantize_qty(getattr(product, "stock", 0))
+    return location, location_stock
+
+
 async def create_stock_transfer(
     db: AsyncSession,
     *,

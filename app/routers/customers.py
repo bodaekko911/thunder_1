@@ -1031,6 +1031,14 @@ let totalItems  = 0;
 let searchTimer = null;
 let editingId   = null;
 
+function escapeJsString(value){
+    return String(value ?? "")
+        .replace(/\\/g,"\\\\")
+        .replace(/'/g,"\\'")
+        .replace(/\r/g,"\\r")
+        .replace(/\n/g,"\\n");
+}
+
 async function load(){
     let q   = document.getElementById("search").value.trim();
     let url = `/customers-mgmt/api/list?skip=${currentPage*pageSize}&limit=${pageSize}`;
@@ -1053,7 +1061,7 @@ async function load(){
     }
 
     document.getElementById("table-body").innerHTML = data.items.map(c => `
-        <tr onclick="openHistory(${c.id},'${c.name.replace(/'/g,"\\'")}',${c.invoices},${c.total_spent})">
+        <tr onclick="openHistory(${c.id},'${escapeJsString(c.name)}',${c.invoices},${c.total_spent})">
             <td class="name">${c.name}</td>
             <td class="phone">${c.phone}</td>
             <td style="font-size:12px">${c.email}</td>
@@ -1063,8 +1071,8 @@ async function load(){
             <td class="mono">${c.total_spent.toFixed(2)}</td>
             <td style="display:flex;gap:6px" onclick="event.stopPropagation()">
                 <a class="action-btn" href="/customers-mgmt/profile/${c.id}" style="text-decoration:none;display:inline-flex;align-items:center">Profile</a>
-                <button class="action-btn" onclick="openEditModal(${c.id},'${c.name.replace(/'/g,"\\'")}','${c.phone}','${c.email}','${c.address}',${c.discount_pct})">Edit</button>
-                <button class="action-btn danger" onclick="deleteCustomer(${c.id},'${c.name.replace(/'/g,"\\'")}')">Delete</button>
+                <button class="action-btn" onclick="openEditModal(${c.id},'${escapeJsString(c.name)}','${escapeJsString(c.phone)}','${escapeJsString(c.email)}','${escapeJsString(c.address)}',${c.discount_pct})">Edit</button>
+                <button class="action-btn danger" onclick="deleteCustomer(${c.id},'${escapeJsString(c.name)}')">Delete</button>
             </td>
         </tr>`).join("");
 }
