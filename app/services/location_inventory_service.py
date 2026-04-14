@@ -10,6 +10,8 @@ from app.models.inventory import LocationStock, StockLocation, StockTransfer
 from app.models.product import Product
 
 QTY_PRECISION = Decimal("0.001")
+DEFAULT_STOCK_LOCATION_NAME = "Main Stock"
+DEFAULT_STOCK_LOCATION_CODE = "MAIN"
 
 
 def quantize_qty(value: object | None) -> Decimal:
@@ -113,6 +115,32 @@ async def get_or_create_location_stock(
         db.add(location_stock)
         await db.flush()
     return location_stock
+
+
+async def ensure_default_stock_location(db: AsyncSession) -> StockLocation:
+    result = await db.execute(
+        select(StockLocation).where(StockLocation.code == DEFAULT_STOCK_LOCATION_CODE)
+    )
+    location = result.scalar_one_or_none()
+    if location is not None:
+        return location
+
+    result = await db.execute(
+        select(StockLocation).where(StockLocation.name == DEFAULT_STOCK_LOCATION_NAME)
+    )
+    location = result.scalar_one_or_none()
+    if location is not None:
+        return location
+
+    location = StockLocation(
+        name=DEFAULT_STOCK_LOCATION_NAME,
+        code=DEFAULT_STOCK_LOCATION_CODE,
+        location_type="warehouse",
+        is_active=True,
+    )
+    db.add(location)
+    await db.flush()
+    return location
 
 
 async def create_stock_transfer(

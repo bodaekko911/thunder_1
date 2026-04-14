@@ -1,3 +1,5 @@
+from decimal import Decimal
+
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import HTMLResponse
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -7,11 +9,17 @@ from pydantic import BaseModel
 
 from app.database import get_async_session
 from app.core.permissions import get_current_user, require_permission
+from app.models.inventory import StockMove
 from app.models.product import Product
 from app.models.supplier import Supplier
 from app.models.user import User
 from app.core.log import record
 from app.schemas.product import ProductCreate, ProductUpdate
+from app.services.location_inventory_service import (
+    ensure_default_stock_location,
+    get_or_create_location_stock,
+    quantize_qty,
+)
 
 router = APIRouter(
     prefix="/products",
@@ -131,9 +139,10 @@ async def add_product(data: ProductCreate, db: AsyncSession = Depends(get_async_
         supplier_result = await db.execute(select(Supplier).where(Supplier.id == data.preferred_supplier_id))
         if supplier_result.scalar_one_or_none() is None:
             raise HTTPException(status_code=404, detail="Preferred supplier not found")
+    initial_stock = quantize_qty(data.stock)
     p = Product(
         sku=data.sku, name=data.name, price=data.price,
-        cost=data.cost, stock=data.stock, min_stock=data.min_stock,
+        cost=data.cost, stock=initial_stock, min_stock=data.min_stock,
         reorder_level=data.reorder_level, reorder_qty=data.reorder_qty,
         preferred_supplier_id=data.preferred_supplier_id,
         unit=data.unit, is_active=True,
@@ -142,6 +151,27 @@ async def add_product(data: ProductCreate, db: AsyncSession = Depends(get_async_
     if hasattr(p, 'item_type'): p.item_type = data.item_type
     db.add(p)
     await db.flush()
+    if initial_stock > 0:
+        location = await ensure_default_stock_location(db)
+        location_stock = await get_or_create_location_stock(
+            db,
+            product_id=p.id,
+            location_id=location.id,
+        )
+        location_stock.qty = initial_stock
+        db.add(
+            StockMove(
+                product_id=p.id,
+                type="adjust",
+                qty=initial_stock,
+                qty_before=Decimal("0.000"),
+                qty_after=initial_stock,
+                ref_type="product_create",
+                ref_id=p.id,
+                note=f"Initial stock created with product at {location.name}",
+                user_id=current_user.id,
+            )
+        )
     record(db, "Products", "add_product",
            f"Added product: [{p.sku}] {p.name} — price: {float(p.price):.2f}",
            ref_type="product", ref_id=p.id)
