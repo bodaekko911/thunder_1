@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import HTMLResponse
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from typing import Optional, List
 from pydantic import BaseModel
 
@@ -54,7 +54,7 @@ async def get_categories(db: AsyncSession = Depends(get_async_session)):
         .where(
             Product.category != None,
             Product.category != "",
-            Product.is_active == True,
+            or_(Product.is_active.is_(True), Product.is_active.is_(None)),
         )
         .distinct()
         .order_by(Product.category)
@@ -73,7 +73,7 @@ async def get_products(
     limit:     int  = 50,
     db: AsyncSession = Depends(get_async_session),
 ):
-    conditions = [Product.is_active == True]
+    conditions = [or_(Product.is_active.is_(True), Product.is_active.is_(None))]
     low_stock_threshold = func.coalesce(Product.reorder_level, Product.min_stock)
     if q:
         conditions.append(
@@ -102,18 +102,20 @@ async def get_products(
                 "id":        p.id,
                 "sku":       p.sku,
                 "name":      p.name,
-                "price":     float(p.price),
-                "cost":      float(p.cost),
-                "stock":     float(p.stock),
-                "min_stock": float(p.min_stock),
+                "price":     float(p.price or 0),
+                "cost":      float(p.cost or 0),
+                "stock":     float(p.stock or 0),
+                "min_stock": float(p.min_stock or 0),
                 "reorder_level": float(p.reorder_level) if p.reorder_level is not None else None,
                 "reorder_qty": float(p.reorder_qty) if p.reorder_qty is not None else None,
                 "preferred_supplier_id": p.preferred_supplier_id,
                 "unit":      p.unit,
                 "category":  p.category or "—",
                 "item_type": p.item_type or "finished",
-                "is_active": p.is_active,
-                "low":       float(p.stock) <= float(p.reorder_level if p.reorder_level is not None else p.min_stock),
+                "is_active": True if p.is_active is None else p.is_active,
+                "low":       float(p.stock or 0) <= float(
+                    p.reorder_level if p.reorder_level is not None else (p.min_stock or 0)
+                ),
             }
             for p in items
         ],
@@ -134,7 +136,7 @@ async def add_product(data: ProductCreate, db: AsyncSession = Depends(get_async_
         cost=data.cost, stock=data.stock, min_stock=data.min_stock,
         reorder_level=data.reorder_level, reorder_qty=data.reorder_qty,
         preferred_supplier_id=data.preferred_supplier_id,
-        unit=data.unit,
+        unit=data.unit, is_active=True,
     )
     if hasattr(p, 'category'):  p.category  = data.category
     if hasattr(p, 'item_type'): p.item_type = data.item_type

@@ -25,10 +25,17 @@ router = APIRouter(
 
 @router.get("/products-cache")
 async def products_cache(db: AsyncSession = Depends(get_async_session)):
-    _r = await db.execute(select(Product).where(Product.is_active == True))
+    _r = await db.execute(
+        select(Product).where(or_(Product.is_active.is_(True), Product.is_active.is_(None)))
+    )
     products = _r.scalars().all()
     return [
-        {"sku": p.sku, "name": p.name, "price": float(p.price), "stock": float(p.stock)}
+        {
+            "sku": p.sku,
+            "name": p.name,
+            "price": float(p.price or 0),
+            "stock": float(p.stock or 0),
+        }
         for p in products
     ]
 
@@ -49,14 +56,19 @@ async def search_products(
     _r = await db.execute(
         select(Product)
         .where(
-            Product.is_active == True,
+            or_(Product.is_active.is_(True), Product.is_active.is_(None)),
             or_(Product.name.ilike(f"%{q}%"), Product.sku.ilike(f"%{q}%"))
         )
         .limit(40)
     )
     results = _r.scalars().all()
     return [
-        {"sku": p.sku, "name": p.name, "price": float(p.price), "stock": float(p.stock)}
+        {
+            "sku": p.sku,
+            "name": p.name,
+            "price": float(p.price or 0),
+            "stock": float(p.stock or 0),
+        }
         for p in results
     ]
 
@@ -124,7 +136,17 @@ async def checkout(
     if data.settle_later:
         await ensure_action_permission(db, user, "pos", "sales", "approve", path="/invoice")
     user_id = user.id
-    invoice = create_invoice(db=db, data=data, user_id=user_id)
+    invoice = await create_invoice(db=db, data=data, user_id=user_id)
+    if not isinstance(invoice, Invoice) or invoice.id is None:
+        logger.error(
+            "Checkout did not return a persisted invoice",
+            extra={
+                "path": "/invoice",
+                "user_id": user_id,
+                "invoice_type": type(invoice).__name__,
+            },
+        )
+        raise HTTPException(status_code=500, detail="Invoice creation failed")
     return {
         "id": invoice.id,
         "invoice_number": invoice.invoice_number,
