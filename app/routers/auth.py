@@ -53,31 +53,26 @@ def login_page():
     <title>ERP Login</title>
     <style>
         :root {
-            --bg: #0a0d18;
-            --card: #0f1424;
+            --card: rgba(15, 20, 36, 0.88);
             --border: rgba(255,255,255,0.08);
             --text: #ffffff;
             --sub: #8899bb;
             --muted: #445066;
             --accent: #00ff9d;
         }
-        body.light {
-            --bg: #f4f5ef;
-            --card: #eceee6;
-            --border: rgba(0,0,0,0.08);
-            --text: #1a1e14;
-            --sub: #4a5040;
-            --muted: #7b816f;
-        }
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body {
             font-family: 'Segoe UI', sans-serif;
-            background: var(--bg);
+            min-height: 100vh;
             height: 100vh;
             display: flex;
             align-items: center;
             justify-content: center;
             color: var(--text);
+            padding: 24px;
+            background:
+                linear-gradient(rgba(6, 8, 16, 0.68), rgba(6, 8, 16, 0.68)),
+                url('/static/home1.jpg.jpeg') center center / cover no-repeat;
         }
         .box {
             background: var(--card);
@@ -86,6 +81,8 @@ def login_page():
             padding: 40px;
             width: 360px;
             position: relative;
+            backdrop-filter: blur(8px);
+            box-shadow: 0 24px 60px rgba(0,0,0,0.35);
         }
         h2 {
             color: var(--accent);
@@ -117,9 +114,6 @@ def login_page():
             margin-bottom: 18px;
             outline: none;
         }
-        body.light input {
-            background: rgba(255,255,255,0.55);
-        }
         input:focus {
             border-color: rgba(0,255,157,0.4);
         }
@@ -142,27 +136,18 @@ def login_page():
             text-align: center;
             display: none;
         }
-        .mode-btn {
-            position: fixed;
-            top: 18px;
-            right: 18px;
-            width: 40px;
-            height: 40px;
-            border-radius: 10px;
-            border: 1px solid var(--border);
-            background: var(--card);
-            color: var(--sub);
-            font-size: 16px;
-            cursor: pointer;
-            transition: all .2s;
-        }
-        .mode-btn:hover {
-            transform: scale(1.06);
+        @media (max-width: 480px) {
+            body {
+                padding: 16px;
+            }
+            .box {
+                width: 100%;
+                padding: 28px 22px;
+            }
         }
     </style>
 </head>
 <body>
-    <button class="mode-btn" id="mode-btn" onclick="toggleMode()" title="Toggle color mode">🌙</button>
     <div class="box">
         <h2>Welcome Back</h2>
         <p>Sign in to your ERP system</p>
@@ -171,30 +156,13 @@ def login_page():
         <input id="email" type="email" placeholder="you@example.com">
 
         <label>Password</label>
-        <input id="password" type="password" placeholder="••••••••">
+        <input id="password" type="password" placeholder="********">
 
         <button onclick="login()">Sign In</button>
         <div id="error">Wrong email or password</div>
     </div>
 
     <script>
-        function setModeButton(isLight) {
-            const btn = document.getElementById("mode-btn");
-            if (btn) btn.innerText = isLight ? "☀️" : "🌙";
-        }
-
-        function toggleMode() {
-            const isLight = document.body.classList.toggle("light");
-            localStorage.setItem("colorMode", isLight ? "light" : "dark");
-            setModeButton(isLight);
-        }
-
-        function initializeColorMode() {
-            const isLight = localStorage.getItem("colorMode") === "light";
-            document.body.classList.toggle("light", isLight);
-            setModeButton(isLight);
-        }
-
         async function login() {
             let res = await fetch("/auth/login", {
                 method: "POST",
@@ -241,7 +209,6 @@ def login_page():
             if (e.key === "Enter") login();
         });
 
-        initializeColorMode();
     </script>
 </body>
 </html>

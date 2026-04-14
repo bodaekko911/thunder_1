@@ -51,3 +51,19 @@ python -m app.bootstrap.init_data --all --yes
 ```
 
 The bootstrap command is safe to run multiple times. Existing records are left in place, and only missing defaults are created.
+
+## Data Diagnostics
+
+To inspect whether production is missing business data or reference data, run:
+
+```powershell
+python -m app.bootstrap.diagnose_data
+```
+
+For machine-readable output:
+
+```powershell
+python -m app.bootstrap.diagnose_data --json
+```
+
+This command is read-only. It does not seed or modify the database.
