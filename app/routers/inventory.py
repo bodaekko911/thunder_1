@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import HTMLResponse, StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import selectinload
 from typing import Optional
 from pydantic import BaseModel
@@ -107,7 +107,7 @@ async def get_stock(
     db: AsyncSession = Depends(get_async_session),
 ):
     low_stock_threshold = func.coalesce(Product.reorder_level, Product.min_stock)
-    stmt = select(Product).where(Product.is_active == True)
+    stmt = select(Product).where(or_(Product.is_active.is_(True), Product.is_active.is_(None)))
     if q:
         stmt = stmt.where(
             Product.name.ilike(f"%{q}%") | Product.sku.ilike(f"%{q}%")
@@ -125,8 +125,8 @@ async def get_stock(
                 "id":        p.id,
                 "sku":       p.sku,
                 "name":      p.name,
-                "stock":     float(p.stock),
-                "min_stock": float(p.min_stock),
+                "stock":     float(p.stock or 0),
+                "min_stock": float(p.min_stock or 0),
                 "reorder_level": float(p.reorder_level) if p.reorder_level is not None else None,
                 "reorder_qty": float(p.reorder_qty) if p.reorder_qty is not None else None,
                 "preferred_supplier_id": p.preferred_supplier_id,
@@ -152,7 +152,7 @@ async def get_low_stock_products(
     stmt = (
         select(Product)
         .options(selectinload(Product.preferred_supplier))
-        .where(Product.is_active == True, Product.stock <= low_stock_threshold)
+        .where(or_(Product.is_active.is_(True), Product.is_active.is_(None)), Product.stock <= low_stock_threshold)
     )
     if q:
         stmt = stmt.where(Product.name.ilike(f"%{q}%") | Product.sku.ilike(f"%{q}%"))
@@ -182,7 +182,7 @@ async def create_low_stock_draft_purchases(
     result = await db.execute(
         select(Product)
         .options(selectinload(Product.preferred_supplier))
-        .where(Product.is_active == True, Product.id.in_(product_ids))
+        .where(or_(Product.is_active.is_(True), Product.is_active.is_(None)), Product.id.in_(product_ids))
     )
     products = result.scalars().all()
     found_ids = {product.id for product in products}
@@ -311,7 +311,7 @@ async def get_location_stock(
     limit: int = 50,
     db: AsyncSession = Depends(get_async_session),
 ):
-    stmt = select(Product).where(Product.is_active == True)
+    stmt = select(Product).where(or_(Product.is_active.is_(True), Product.is_active.is_(None)))
     if q:
         stmt = stmt.where(Product.name.ilike(f"%{q}%") | Product.sku.ilike(f"%{q}%"))
     if product_id is not None:
@@ -358,7 +358,10 @@ async def create_transfer(
     current_user: User = Depends(get_current_user),
 ):
     product_result = await db.execute(
-        select(Product).where(Product.id == data.product_id, Product.is_active == True)
+        select(Product).where(
+            Product.id == data.product_id,
+            or_(Product.is_active.is_(True), Product.is_active.is_(None)),
+        )
     )
     product = product_result.scalar_one_or_none()
     if product is None:
@@ -551,7 +554,7 @@ async def adjust_stock(data: StockAdjustment, db: AsyncSession = Depends(get_asy
     if not product:
         raise HTTPException(status_code=404, detail="Product not found")
 
-    before = float(product.stock)
+    before = float(product.stock or 0)
     after  = before + data.qty
 
     if after < 0:
@@ -630,14 +633,15 @@ async def adjust_stock(data: StockAdjustment, db: AsyncSession = Depends(get_asy
 @router.get("/api/summary")
 async def get_summary(db: AsyncSession = Depends(get_async_session)):
     low_stock_threshold = func.coalesce(Product.reorder_level, Product.min_stock)
-    r1 = await db.execute(select(func.count(Product.id)).where(Product.is_active == True))
+    active_filter = or_(Product.is_active.is_(True), Product.is_active.is_(None))
+    r1 = await db.execute(select(func.count(Product.id)).where(active_filter))
     total_products = r1.scalar() or 0
     r2 = await db.execute(select(func.count(Product.id)).where(
-        Product.is_active == True, Product.stock <= low_stock_threshold
+        active_filter, Product.stock <= low_stock_threshold
     ))
     low_stock = r2.scalar() or 0
     r3 = await db.execute(select(func.count(Product.id)).where(
-        Product.is_active == True, Product.stock <= 0
+        active_filter, Product.stock <= 0
     ))
     out_of_stock = r3.scalar() or 0
     r4 = await db.execute(select(func.count(StockMove.id)))

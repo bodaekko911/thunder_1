@@ -1,5 +1,5 @@
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from fastapi import HTTPException
 from decimal import Decimal
 
@@ -48,7 +48,9 @@ async def create_invoice(db: AsyncSession, data: InvoiceCreate, user_id: int) ->
 
         for item in data.items:
             normalized_sku = normalize_barcode_value(item.sku)
-            _r = await db.execute(select(Product).where(Product.is_active == True))
+            _r = await db.execute(
+                select(Product).where(or_(Product.is_active.is_(True), Product.is_active.is_(None)))
+            )
             products = _r.scalars().all()
             product = next(
                 (candidate for candidate in products if normalize_barcode_value(candidate.sku) == normalized_sku),

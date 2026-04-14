@@ -5,7 +5,7 @@ import io
 
 from fastapi import APIRouter, Depends
 from fastapi.responses import HTMLResponse, StreamingResponse
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.permissions import require_action, require_permission
@@ -69,7 +69,9 @@ def to_xlsx(headers, rows, sheet_name="Receive Products"):
 @router.get("/api/products")
 async def get_products(db: AsyncSession = Depends(get_async_session)):
     result = await db.execute(
-        select(Product).where(Product.is_active == True).order_by(Product.name)
+        select(Product)
+        .where(or_(Product.is_active.is_(True), Product.is_active.is_(None)))
+        .order_by(Product.name)
     )
     return [
         {
