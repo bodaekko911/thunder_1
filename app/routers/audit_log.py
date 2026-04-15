@@ -243,6 +243,7 @@ tbody td{padding:12px 14px;font-size:13px;vertical-align:top}
     .topbar{padding:0 16px}
 }
 </style>
+    <script src="/static/auth-guard.js"></script>
 </head>
 <body>
 
@@ -332,7 +333,7 @@ tbody td{padding:12px 14px;font-size:13px;vertical-align:top}
 function _hasAuthCookie() {
     return document.cookie.split(";").some(c => c.trim().startsWith("logged_in="));
 }
-if (!_hasAuthCookie()) { window.location.href = "/"; }
+if (!_hasAuthCookie()) { _redirectToLogin(); }
 
 // ── colour mode ──
 if (localStorage.getItem("colorMode") === "light") {

@@ -163,6 +163,16 @@ def login_page():
     </div>
 
     <script>
+        // Validate that a ?next= redirect target is a safe internal path.
+        // Blocks protocol-relative (//evil.com) and absolute URLs while
+        // allowing any same-origin path such as /dashboard or /inventory/?tab=1.
+        function _isSafeReturnUrl(url) {
+            return typeof url === "string" &&
+                   url.startsWith("/") &&
+                   !url.startsWith("//") &&
+                   !url.startsWith("/\\");
+        }
+
         async function login() {
             let res = await fetch("/auth/login", {
                 method: "POST",
@@ -198,10 +208,14 @@ def login_page():
                 ["/accounting/", "page_accounting"],
                 ["/expenses/", "page_expenses"]
             ];
-            const nextPage = data.role === "admin"
+            const defaultPage = data.role === "admin"
                 ? "/dashboard"
                 : (landingPages.find(([, permission]) => permissions.has(permission)) || ["/home"])[0];
-            window.location.href = nextPage;
+            // If the user was redirected here from another page (token expired),
+            // send them back there after a successful login instead of the default landing.
+            const rawNext = new URLSearchParams(window.location.search).get("next");
+            const destination = _isSafeReturnUrl(rawNext) ? rawNext : defaultPage;
+            window.location.href = destination;
         }
 
         // Press Enter to login

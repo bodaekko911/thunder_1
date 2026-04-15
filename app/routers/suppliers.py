@@ -447,6 +447,7 @@ td.mono { font-family: var(--mono); color: var(--green); }
 ::-webkit-scrollbar { width: 4px; }
 ::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 4px; }
 </style>
+    <script src="/static/auth-guard.js"></script>
 </head>
 <body>
 
@@ -615,7 +616,7 @@ td.mono { font-family: var(--mono); color: var(--green); }
   function _hasAuthCookie() {
       return document.cookie.split(";").some(c => c.trim().startsWith("logged_in="));
   }
-  if (!_hasAuthCookie()) { window.location.href = "/"; }
+  if (!_hasAuthCookie()) { _redirectToLogin(); }
 
   // Cookie is sent automatically — authHeaders just passes through any extra headers
   function authHeaders(extraHeaders = {}){ return { ...extraHeaders }; }
@@ -637,7 +638,7 @@ function initializeColorMode(){
 async function initUser() {
     try {
         const r = await fetch("/auth/me");
-        if (!r.ok) { window.location.href = "/"; return; }
+        if (!r.ok) { _redirectToLogin(); return; }
         const u = await r.json();
         const nameEl = document.getElementById("user-name");
         const avatarEl = document.getElementById("user-avatar");
@@ -651,7 +652,7 @@ async function initUser() {
         );
         configureSupplierPermissions();
         return u;
-    } catch(e) { window.location.href = "/"; }
+    } catch(e) { _redirectToLogin(); }
 }
 async function logout(){
     await fetch("/auth/logout", { method: "POST" });

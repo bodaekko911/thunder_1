@@ -224,12 +224,28 @@ nav{position:sticky;top:0;z-index:200;display:flex;align-items:center;
   border-radius:10px;border:1px solid var(--border);background:var(--card);
   color:var(--sub);font-size:16px;cursor:pointer;transition:all .2s;font-family:var(--sans)}
 .mode-btn:hover{border-color:var(--border2);transform:scale(1.06)}
+.account-menu{position:relative}
 .user-pill{display:flex;align-items:center;gap:10px;background:var(--card);
-  border:1px solid var(--border);border-radius:40px;padding:7px 16px 7px 10px}
+  border:1px solid var(--border);border-radius:40px;padding:7px 16px 7px 10px;
+  cursor:pointer;transition:all .2s}
+.user-pill:hover,.user-pill.open{border-color:var(--border2)}
 .user-avatar{width:28px;height:28px;background:linear-gradient(135deg,#7ecb6f,#d4a256);
   border-radius:50%;display:flex;align-items:center;justify-content:center;
   font-size:12px;font-weight:700;color:#0a0c08}
 .user-name{font-size:13px;font-weight:500;color:var(--sub)}
+.menu-caret{font-size:11px;color:var(--muted)}
+.account-dropdown{position:absolute;right:0;top:calc(100% + 10px);min-width:220px;
+  background:var(--card);border:1px solid var(--border2);border-radius:14px;padding:8px;
+  box-shadow:0 24px 50px rgba(0,0,0,.35);display:none;z-index:500}
+.account-dropdown.open{display:block}
+.account-head{padding:10px 12px 8px;border-bottom:1px solid var(--border);margin-bottom:6px}
+.account-label{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:1px}
+.account-email{font-size:12px;color:var(--sub);margin-top:4px;word-break:break-word}
+.account-item{width:100%;display:flex;align-items:center;gap:10px;padding:10px 12px;border:none;
+  background:transparent;border-radius:10px;color:var(--sub);font-family:var(--sans);
+  font-size:13px;text-decoration:none;cursor:pointer;text-align:left}
+.account-item:hover{background:var(--card2);color:var(--text)}
+.account-item.danger:hover{color:var(--danger)}
 .logout-btn{background:transparent;border:1px solid var(--border);color:var(--muted);
   font-family:var(--sans);font-size:12px;padding:8px 16px;border-radius:8px;
   cursor:pointer;transition:all .2s}
@@ -359,6 +375,7 @@ body.light table.hist tr:hover td{background:rgba(0,0,0,.03)}
 .toast.ok{background:#0f2918;border:1px solid var(--green);color:var(--green)}
 .toast.err{background:#240f14;border:1px solid var(--danger);color:var(--danger)}
 </style>
+    <script src="/static/auth-guard.js"></script>
 </head>
 <body>
 
@@ -369,11 +386,21 @@ body.light table.hist tr:hover td{background:rgba(0,0,0,.03)}
   </div>
   <div class="nav-right">
     <button class="mode-btn" id="mode-btn" onclick="toggleMode()">&#127769;</button>
-    <div class="user-pill">
-      <div class="user-avatar" id="user-avatar">A</div>
-      <span class="user-name" id="user-name">…</span>
+    <div class="account-menu">
+      <button class="user-pill" id="account-trigger" onclick="toggleAccountMenu(event)" aria-haspopup="menu" aria-expanded="false">
+        <div class="user-avatar" id="user-avatar">A</div>
+        <span class="user-name" id="user-name">...</span>
+        <span class="menu-caret">&#9662;</span>
+      </button>
+      <div class="account-dropdown" id="account-dropdown" role="menu">
+        <div class="account-head">
+          <div class="account-label">Signed in as</div>
+          <div class="account-email" id="user-email">&mdash;</div>
+        </div>
+        <a href="/users/password" class="account-item" role="menuitem">Change Password</a>
+        <button class="account-item danger" onclick="logout()" role="menuitem">Sign out</button>
+      </div>
     </div>
-    <button class="logout-btn" onclick="logout()">Sign out</button>
   </div>
 </nav>
 
@@ -503,7 +530,7 @@ body.light table.hist tr:hover td{background:rgba(0,0,0,.03)}
 <script>
 // ── Auth guard ──────────────────────────────────────────────────────────────
 if (!document.cookie.split(';').some(c => c.trim().startsWith('logged_in='))) {
-  window.location.href = '/';
+  _redirectToLogin();
 }
 
 // ── State ───────────────────────────────────────────────────────────────────
@@ -546,7 +573,7 @@ async function init() {
 async function initUser() {
   try {
     const r = await fetch('/auth/me');
-    if (!r.ok) { window.location.href = '/'; return; }
+    if (!r.ok) { _redirectToLogin(); return; }
     const u = await r.json();
     _currentUserRole = u.role || '';
     _currentUserPermissions = new Set(
@@ -556,9 +583,30 @@ async function initUser() {
     );
     document.getElementById('user-name').innerText   = u.name;
     document.getElementById('user-avatar').innerText = u.name.charAt(0).toUpperCase();
+    const emailEl = document.getElementById('user-email');
+    if (emailEl) emailEl.innerText = u.email;
     applyReceivePermissions();
-  } catch { window.location.href = '/'; }
+  } catch { _redirectToLogin(); }
 }
+
+function toggleAccountMenu(event){
+  event.stopPropagation();
+  const trigger = document.getElementById('account-trigger');
+  const dropdown = document.getElementById('account-dropdown');
+  const open = dropdown.classList.toggle('open');
+  trigger.classList.toggle('open', open);
+  trigger.setAttribute('aria-expanded', open ? 'true' : 'false');
+}
+
+document.addEventListener('click', e => {
+  const menu = document.getElementById('account-dropdown');
+  const trigger = document.getElementById('account-trigger');
+  if(!menu || !trigger) return;
+  if(menu.contains(e.target) || trigger.contains(e.target)) return;
+  menu.classList.remove('open');
+  trigger.classList.remove('open');
+  trigger.setAttribute('aria-expanded', 'false');
+});
 
 async function loadProducts() {
   const r = await fetch('/receive/api/products');

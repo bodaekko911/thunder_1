@@ -826,6 +826,7 @@ nav {
     .stats-row { grid-template-columns: 1fr; }
 }
 </style>
+    <script src="/static/auth-guard.js"></script>
 </head>
 <body>
 
@@ -1019,7 +1020,7 @@ nav {
 function _hasAuthCookie() {
     return document.cookie.split(";").some(c => c.trim().startsWith("logged_in="));
 }
-if (!_hasAuthCookie()) { window.location.href = "/"; }
+if (!_hasAuthCookie()) { _redirectToLogin(); }
 
 let categories    = [];
 let activeCatId   = null;
@@ -1046,7 +1047,7 @@ function applyExpensePermissions() {
 async function initUser() {
     try {
         const r = await fetch("/auth/me");
-        if (!r.ok) { window.location.href = "/"; return; }
+        if (!r.ok) { _redirectToLogin(); return; }
         const u = await r.json();
         currentUserRole = u.role || "";
         currentUserPermissions = new Set(
@@ -1060,7 +1061,7 @@ async function initUser() {
         if (avatarEl) avatarEl.innerText = u.name.charAt(0).toUpperCase();
         applyExpensePermissions();
         return u;
-    } catch(e) { window.location.href = "/"; }
+    } catch(e) { _redirectToLogin(); }
 }
 function toggleMode() {
     const light = document.body.classList.toggle("light");

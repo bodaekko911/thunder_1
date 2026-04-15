@@ -357,6 +357,7 @@ td{padding:8px 12px;border-top:1px solid var(--border);color:var(--sub);white-sp
 ::-webkit-scrollbar{width:4px;height:4px;}
 ::-webkit-scrollbar-thumb{background:var(--border2);border-radius:4px;}
 </style>
+    <script src="/static/auth-guard.js"></script>
 </head>
 <body>
 <nav>
@@ -495,7 +496,7 @@ td{padding:8px 12px;border-top:1px solid var(--border);color:var(--sub);white-sp
   function _hasAuthCookie() {
       return document.cookie.split(";").some(c => c.trim().startsWith("logged_in="));
   }
-  if (!_hasAuthCookie()) { window.location.href = "/"; }
+  if (!_hasAuthCookie()) { _redirectToLogin(); }
 
   function setModeButton(isLight){
     const btn = document.getElementById("mode-btn");
@@ -514,14 +515,14 @@ function initializeColorMode(){
 async function initUser() {
     try {
         const r = await fetch("/auth/me");
-        if (!r.ok) { window.location.href = "/"; return; }
+        if (!r.ok) { _redirectToLogin(); return; }
         const u = await r.json();
         const nameEl = document.getElementById("user-name");
         const avatarEl = document.getElementById("user-avatar");
         if (nameEl) nameEl.innerText = u.name;
         if (avatarEl) avatarEl.innerText = u.name.charAt(0).toUpperCase();
         return u;
-    } catch(e) { window.location.href = "/"; }
+    } catch(e) { _redirectToLogin(); }
 }
 async function logout(){
     await fetch("/auth/logout", { method: "POST" });

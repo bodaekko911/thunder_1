@@ -324,6 +324,7 @@ body.light nav{background:rgba(244,245,239,.92)}
 .toast{position:fixed;bottom:22px;left:50%;transform:translateX(-50%) translateY(16px);background:var(--card2);border:1px solid var(--border2);border-radius:var(--r);padding:12px 20px;font-size:13px;font-weight:600;color:var(--text);box-shadow:0 20px 50px rgba(0,0,0,.5);opacity:0;pointer-events:none;transition:opacity .25s,transform .25s;z-index:999}
 .toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
 </style>
+    <script src="/static/auth-guard.js"></script>
 </head>
 <body>
 <nav>
@@ -391,7 +392,7 @@ function initializeColorMode(){
 function _hasAuthCookie() {
     return document.cookie.split(";").some(c => c.trim().startsWith("logged_in="));
 }
-if (!_hasAuthCookie()) { window.location.href = "/"; }
+if (!_hasAuthCookie()) { _redirectToLogin(); }
 
 let toastTimer = null;
 
@@ -439,13 +440,13 @@ document.addEventListener("click", e => {
 async function initUser(){
     try{
         const r = await fetch("/auth/me");
-        if(!r.ok){ window.location.href = "/"; return; }
+        if(!r.ok){ _redirectToLogin(); return; }
         const u = await r.json();
         document.getElementById("user-name").innerText = u.name;
         document.getElementById("user-avatar").innerText = u.name.charAt(0).toUpperCase();
         document.getElementById("user-email").innerText = u.email;
     } catch(e) {
-        window.location.href = "/";
+        _redirectToLogin();
     }
 }
 
@@ -646,6 +647,7 @@ td.name{color:var(--text);font-weight:600;}
 .toast{position:fixed;bottom:22px;left:50%;transform:translateX(-50%) translateY(16px);background:var(--card2);border:1px solid var(--border2);border-radius:var(--r);padding:12px 20px;font-size:13px;font-weight:600;color:var(--text);box-shadow:0 20px 50px rgba(0,0,0,.5);opacity:0;pointer-events:none;transition:opacity .25s,transform .25s;z-index:999;}
 .toast.show{opacity:1;transform:translateX(-50%) translateY(0);}
 </style>
+    <script src="/static/auth-guard.js"></script>
 </head>
 <body>
 <nav>
@@ -851,19 +853,19 @@ function initializeColorMode(){
 function _hasAuthCookie() {
     return document.cookie.split(";").some(c => c.trim().startsWith("logged_in="));
 }
-if (!_hasAuthCookie()) { window.location.href = "/"; }
+if (!_hasAuthCookie()) { _redirectToLogin(); }
 
 async function initUser() {
     try {
         const r = await fetch("/auth/me");
-        if (!r.ok) { window.location.href = "/"; return; }
+        if (!r.ok) { _redirectToLogin(); return; }
         const u = await r.json();
         const nameEl = document.getElementById("user-name");
         const avatarEl = document.getElementById("user-avatar");
         if (nameEl) nameEl.innerText = u.name;
         if (avatarEl) avatarEl.innerText = u.name.charAt(0).toUpperCase();
         return u;
-    } catch(e) { window.location.href = "/"; }
+    } catch(e) { _redirectToLogin(); }
 }
 async function logout(){
     await fetch("/auth/logout", { method: "POST" });

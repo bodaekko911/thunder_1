@@ -282,6 +282,7 @@ body {{ font-family: monospace; background:#060810; color:white; }}
     .total {{ color:#000; }}
 }}
 </style>
+    <script src="/static/auth-guard.js"></script>
 </head>
 <body>
 <div class="r">
@@ -559,6 +560,7 @@ body.light .toast{background:var(--card);}
     #right,#left,#topbar{display:none!important;}
 }
 </style>
+    <script src="/static/auth-guard.js"></script>
 </head>
 <body>
 
@@ -758,7 +760,7 @@ body.light .toast{background:var(--card);}
   function _hasAuthCookie() {
       return document.cookie.split(";").some(c => c.trim().startsWith("logged_in="));
   }
-  if (!_hasAuthCookie()) { window.location.href = "/"; }
+  if (!_hasAuthCookie()) { _redirectToLogin(); }
 
   function setModeButton(isLight){
       const btn = document.getElementById("mode-btn");
@@ -777,7 +779,7 @@ body.light .toast{background:var(--card);}
   async function initUser() {
       try {
           const r = await fetch("/auth/me");
-          if (!r.ok) { window.location.href = "/"; return; }
+          if (!r.ok) { _redirectToLogin(); return; }
           const u = await r.json();
           const nameEl = document.getElementById("user-name");
           const avatarEl = document.getElementById("user-avatar");
@@ -786,7 +788,7 @@ body.light .toast{background:var(--card);}
           if (avatarEl) avatarEl.innerText = u.name.charAt(0).toUpperCase();
           if (emailEl) emailEl.innerText = u.email;
           return u;
-      } catch(e) { window.location.href = "/"; }
+      } catch(e) { _redirectToLogin(); }
   }
   function toggleAccountMenu(event){
       event.stopPropagation();
@@ -938,7 +940,7 @@ window.addEventListener("offline",()=>{
 
 /* ── INIT ── */
 async function load(){
-    if(!_hasAuthCookie()){ window.location.href="/"; return; }
+    if(!_hasAuthCookie()){ _redirectToLogin(); return; }
     if(!navigator.onLine){
         const ind = document.getElementById("offline-indicator");
         if(ind) ind.style.display = "flex";
@@ -1204,7 +1206,7 @@ function hideToast(){ document.getElementById("toast").classList.remove("show");
 async function checkout(settleLater=false){
     if(!cart.length){ showToast("Cart is empty"); return; }
     if(settleLater && !selectedCustomer){ showToast("Select a customer to settle later"); return; }
-    if(!_hasAuthCookie()){ window.location.href="/"; return; }
+    if(!_hasAuthCookie()){ _redirectToLogin(); return; }
 
     let btn=document.getElementById(settleLater?"settle_btn":"checkout_btn");
     btn.disabled=true; btn.innerText="Processing…";

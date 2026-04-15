@@ -337,6 +337,7 @@ body {
     .modules-grid { grid-template-columns: 1fr; }
 }
 </style>
+    <script src="/static/auth-guard.js"></script>
 </head>
 <body>
 
@@ -628,12 +629,12 @@ body {
 function _hasAuthCookie() {
     return document.cookie.split(";").some(c => c.trim().startsWith("logged_in="));
 }
-if (!_hasAuthCookie()) { window.location.href = "/"; }
+if (!_hasAuthCookie()) { _redirectToLogin(); }
 
 async function initUser() {
     try {
         const r = await fetch("/auth/me");
-        if (!r.ok) { window.location.href = "/"; return; }
+        if (!r.ok) { _redirectToLogin(); return; }
         const u = await r.json();
         const nameEl = document.getElementById("user-name");
         const avatarEl = document.getElementById("user-avatar");
@@ -642,7 +643,7 @@ async function initUser() {
         if (avatarEl) avatarEl.innerText = u.name.charAt(0).toUpperCase();
         if (emailEl) emailEl.innerText = u.email;
         return u;
-    } catch(e) { window.location.href = "/"; }
+    } catch(e) { _redirectToLogin(); }
 }
 
 function toggleAccountMenu(event){
