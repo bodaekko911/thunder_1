@@ -17,7 +17,6 @@ from app.models.spoilage import SpoilageRecord
 from app.models.production import ProductionBatch
 from app.models.refund import RetailRefund
 from app.models.user import User
-from app.routers.account_menu import ACCOUNT_MENU_CSS, ACCOUNT_MENU_HTML, ACCOUNT_MENU_SCRIPT
 from app.services.expense_service import get_summary as get_expense_summary
 from app.services.dashboard_assistant_service import answer_dashboard_question
 
@@ -310,7 +309,6 @@ body.light tr:hover td{background:rgba(0,0,0,.03);}
 .user-name{font-size:13px;font-weight:500;color:var(--sub);}
 .logout-btn{background:transparent;border:1px solid var(--border);color:var(--muted);font-family:var(--sans);font-size:12px;font-weight:500;padding:8px 16px;border-radius:8px;cursor:pointer;transition:all .2s;letter-spacing:.3px;}
 .logout-btn:hover{border-color:#c97a7a;color:#c97a7a;}
-__ACCOUNT_MENU_CSS__
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0;}
 body{font-family:var(--sans);background:var(--bg);color:var(--text);min-height:100vh;font-size:14px;}
 body::before{content:'';position:fixed;inset:0;
@@ -476,7 +474,11 @@ tr:hover td{background:rgba(255,255,255,.02);}
     <div class="topbar-right">
         <span class="nav-date" id="nav-date"></span>
         <button class="mode-btn" id="mode-btn" onclick="toggleMode()" title="Toggle color mode">??</button>
-        __ACCOUNT_MENU_HTML__
+        <div class="user-pill">
+            <div class="user-avatar" id="user-avatar">A</div>
+            <span class="user-name" id="user-name">Admin</span>
+        </div>
+        <button class="logout-btn" onclick="logout()">Sign out</button>
     </div>
 </nav>
 
@@ -667,11 +669,13 @@ async function initUser() {
         const r = await fetch("/auth/me");
         if (!r.ok) { window.location.href = "/"; return; }
         const u = await r.json();
-        populateAccountMenuUser(u);
+        const nameEl = document.getElementById("user-name");
+        const avatarEl = document.getElementById("user-avatar");
+        if (nameEl) nameEl.innerText = u.name;
+        if (avatarEl) avatarEl.innerText = u.name.charAt(0).toUpperCase();
         return u;
     } catch(e) { window.location.href = "/"; }
 }
-__ACCOUNT_MENU_SCRIPT__
 async function logout(){
     await fetch("/auth/logout", { method: "POST" });
     window.location.href = "/";
@@ -967,4 +971,4 @@ document.getElementById("assistant-question")?.addEventListener("keydown", funct
 load();
 </script>
 </body>
-</html>""".replace("__ACCOUNT_MENU_CSS__", ACCOUNT_MENU_CSS).replace("__ACCOUNT_MENU_HTML__", ACCOUNT_MENU_HTML).replace("__ACCOUNT_MENU_SCRIPT__", ACCOUNT_MENU_SCRIPT)
+</html>"""
