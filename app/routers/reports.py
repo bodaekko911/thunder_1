@@ -20,6 +20,7 @@ from app.models.production import ProductionBatch, BatchInput, BatchOutput
 from app.models.accounting import Account, Journal, JournalEntry
 from app.models.receipt import ProductReceipt
 from app.models.expense import Expense
+from app.routers.account_menu import ACCOUNT_MENU_CSS, ACCOUNT_MENU_HTML, ACCOUNT_MENU_SCRIPT
 
 router = APIRouter(
     prefix="/reports",
@@ -996,6 +997,7 @@ body.light tr:hover td{background:rgba(0,0,0,.03);}
 .user-name{font-size:13px;font-weight:500;color:var(--sub);}
 .logout-btn{background:transparent;border:1px solid var(--border);color:var(--muted);font-family:var(--sans);font-size:12px;font-weight:500;padding:8px 16px;border-radius:8px;cursor:pointer;transition:all .2s;letter-spacing:.3px;}
 .logout-btn:hover{border-color:#c97a7a;color:#c97a7a;}
+__ACCOUNT_MENU_CSS__
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0;}
 body{font-family:var(--sans);background:var(--bg);color:var(--text);min-height:100vh;font-size:14px;}
 nav{position:sticky;top:0;z-index:100;display:flex;align-items:center;gap:8px;padding:0 24px;height:58px;background:rgba(10,13,24,.92);backdrop-filter:blur(20px);border-bottom:1px solid var(--border);}
@@ -1126,11 +1128,7 @@ td.mono{font-family:var(--mono);}
     <span class="nav-spacer"></span>
     <div class="topbar-right">
         <button class="mode-btn" id="mode-btn" onclick="toggleMode()" title="Toggle color mode">??</button>
-        <div class="user-pill">
-            <div class="user-avatar" id="user-avatar">A</div>
-            <span class="user-name" id="user-name">Admin</span>
-        </div>
-        <button class="logout-btn" onclick="logout()">Sign out</button>
+        __ACCOUNT_MENU_HTML__
     </div>
 </nav>
 
@@ -1475,13 +1473,11 @@ async function initUser() {
         if (!r.ok) { window.location.href = "/"; return; }
         const u = await r.json();
         __currentUser = u;
-        const nameEl = document.getElementById("user-name");
-        const avatarEl = document.getElementById("user-avatar");
-        if (nameEl) nameEl.innerText = u.name;
-        if (avatarEl) avatarEl.innerText = u.name.charAt(0).toUpperCase();
+        populateAccountMenuUser(u);
         return u;
     } catch(e) { window.location.href = "/"; }
 }
+__ACCOUNT_MENU_SCRIPT__
 async function logout(){
     await fetch("/auth/logout", { method: "POST" });
     window.location.href = "/";
@@ -2006,4 +2002,4 @@ function togglePLDetail(id){
 loadSales();
 </script>
 </body>
-</html>"""
+</html>""".replace("__ACCOUNT_MENU_CSS__", ACCOUNT_MENU_CSS).replace("__ACCOUNT_MENU_HTML__", ACCOUNT_MENU_HTML).replace("__ACCOUNT_MENU_SCRIPT__", ACCOUNT_MENU_SCRIPT)

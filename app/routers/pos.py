@@ -13,6 +13,7 @@ from app.core.security import get_current_user
 from app.models.product import Product
 from app.models.customer import Customer
 from app.models.invoice import Invoice
+from app.routers.account_menu import ACCOUNT_MENU_CSS, ACCOUNT_MENU_HTML, ACCOUNT_MENU_SCRIPT
 from app.schemas.invoice import InvoiceCollectionRequest, InvoiceCreate
 from app.services.barcode_service import find_product_by_barcode, normalize_barcode_value
 from app.services.pos_service import create_invoice
@@ -396,6 +397,7 @@ body.light #topbar{background:rgba(244,245,239,.92);}
 .user-name{font-size:13px;font-weight:500;color:var(--sub);}
 .logout-btn{background:transparent;border:1px solid var(--border);color:var(--muted);font-family:var(--sans);font-size:12px;font-weight:500;padding:8px 16px;border-radius:8px;cursor:pointer;transition:all .2s;letter-spacing:.3px;}
 .logout-btn:hover{border-color:#c97a7a;color:#c97a7a;}
+__ACCOUNT_MENU_CSS__
 
 /* CUSTOMER */
 #cust_wrap{flex:0 0 240px;position:relative;}
@@ -599,11 +601,7 @@ body.light .toast{background:var(--card);}
         <div id="offline-badge" style="display:none;background:rgba(255,181,71,.12);border:1px solid rgba(255,181,71,.35);color:#ffb547;font-size:12px;font-weight:700;padding:7px 12px;border-radius:9px;cursor:pointer;" onclick="showPendingQueue()" title="Pending offline sales — click to sync"></div>
         <a href="/refunds/" id="refunds-link" style="display:flex;align-items:center;gap:6px;background:rgba(255,77,109,.08);border:1px solid rgba(255,77,109,.25);color:#ff4d6d;font-family:var(--sans);font-size:12px;font-weight:700;padding:8px 14px;border-radius:9px;cursor:pointer;text-decoration:none;transition:all .2s;" onmouseover="this.style.background='rgba(255,77,109,.18)'" onmouseout="this.style.background='rgba(255,77,109,.08)'">↩ Refunds</a>
         <button class="mode-btn" id="mode-btn" onclick="toggleMode()" title="Toggle color mode">??</button>
-        <div class="user-pill">
-            <div class="user-avatar" id="user-avatar">A</div>
-            <span class="user-name" id="user-name">Admin</span>
-        </div>
-        <button class="logout-btn" onclick="logout()">Sign out</button>
+        __ACCOUNT_MENU_HTML__
     </div>
 </div>
 
@@ -758,13 +756,11 @@ body.light .toast{background:var(--card);}
           const r = await fetch("/auth/me");
           if (!r.ok) { window.location.href = "/"; return; }
           const u = await r.json();
-          const nameEl = document.getElementById("user-name");
-          const avatarEl = document.getElementById("user-avatar");
-          if (nameEl) nameEl.innerText = u.name;
-          if (avatarEl) avatarEl.innerText = u.name.charAt(0).toUpperCase();
+          populateAccountMenuUser(u);
           return u;
       } catch(e) { window.location.href = "/"; }
   }
+__ACCOUNT_MENU_SCRIPT__
   function hasPermission(permission, u){
       const role = u ? (u.role || "") : "";
       const perms = new Set(
