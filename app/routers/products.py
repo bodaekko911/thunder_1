@@ -593,11 +593,16 @@ const ITEM_TYPE_LABELS = {
 };
 
 function escapeJsString(value){
-    return String(value == null ? "" : value)
-        .replace(/\\/g,"\\\\")
-        .replace(/'/g,"\\'")
-        .replace(/\r/g,"\\r")
-        .replace(/\n/g,"\\n");
+    const text = String(value == null ? "" : value);
+    const backslash = String.fromCharCode(92);
+    const quote = String.fromCharCode(39);
+    const carriageReturn = String.fromCharCode(13);
+    const newline = String.fromCharCode(10);
+    return text
+        .split(backslash).join(backslash + backslash)
+        .split(quote).join(backslash + quote)
+        .split(carriageReturn).join(backslash + "r")
+        .split(newline).join(backslash + "n");
 }
 
 async function init(){
