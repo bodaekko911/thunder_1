@@ -19,6 +19,7 @@ from app.services.location_inventory_service import (
     ensure_default_stock_location,
     get_or_create_location_stock,
     quantize_qty,
+    sync_product_stock_to_default_location,
 )
 
 router = APIRouter(
@@ -190,9 +191,34 @@ async def edit_product(product_id: int, data: ProductUpdate, db: AsyncSession = 
         supplier_result = await db.execute(select(Supplier).where(Supplier.id == data.preferred_supplier_id))
         if supplier_result.scalar_one_or_none() is None:
             raise HTTPException(status_code=404, detail="Preferred supplier not found")
-    for k, v in data.model_dump(exclude_unset=True).items():
+    changes = data.model_dump(exclude_unset=True)
+    stock_value = changes.pop("stock", None)
+    stock_before = quantize_qty(p.stock)
+    for k, v in changes.items():
         if hasattr(p, k):
             setattr(p, k, v)
+    if stock_value is not None:
+        stock_after = quantize_qty(stock_value)
+        stock_delta = quantize_qty(stock_after - stock_before)
+        if stock_delta != 0:
+            location, location_stock = await sync_product_stock_to_default_location(db, product=p)
+            location_stock.qty = stock_after
+            p.stock = stock_after
+            db.add(
+                StockMove(
+                    product_id=p.id,
+                    type="adjust",
+                    qty=stock_delta,
+                    qty_before=stock_before,
+                    qty_after=stock_after,
+                    ref_type="product_edit",
+                    ref_id=p.id,
+                    note=f"Stock updated from product edit at {location.name}",
+                    user_id=current_user.id,
+                )
+            )
+        else:
+            p.stock = stock_after
     record(db, "Products", "edit_product",
            f"Edited product: [{p.sku}] {p.name}",
            ref_type="product", ref_id=product_id)
@@ -812,7 +838,7 @@ async function saveProduct(){
     if(editingId){
         let res  = await fetch(`/products/api/edit/${editingId}`,{
             method:"PUT", headers:{"Content-Type":"application/json"},
-            body:JSON.stringify({name,price,cost,min_stock:minStock,unit,category,item_type:itemType}),
+            body:JSON.stringify({name,price,cost,stock,min_stock:minStock,unit,category,item_type:itemType}),
         });
         let data = await res.json();
         if(data.detail){ showToast("Error: "+data.detail); return; }

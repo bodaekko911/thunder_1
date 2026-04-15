@@ -21,6 +21,7 @@ class ProductUpdate(BaseModel):
     name:      Optional[str] = Field(None, min_length=1, max_length=200)
     price:     Optional[float] = Field(None, ge=0)
     cost:      Optional[float] = Field(None, ge=0)
+    stock:     Optional[float] = Field(None, ge=0)
     min_stock: Optional[float] = Field(None, ge=0)
     reorder_level: Optional[float] = Field(None, ge=0)
     reorder_qty: Optional[float] = Field(None, ge=0)
