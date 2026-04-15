@@ -390,7 +390,7 @@ tr:hover td{background:rgba(255,255,255,.02);}
             <button class="user-pill" id="account-trigger" onclick="toggleAccountMenu(event)" aria-haspopup="menu" aria-expanded="false">
                 <div class="user-avatar" id="user-avatar">A</div>
                 <span class="user-name" id="user-name">Admin</span>
-                <span class="menu-caret">â–¾</span>
+                <span class="menu-caret">&#9662;</span>
             </button>
             <div class="account-dropdown" id="account-dropdown" role="menu">
                 <div class="account-head">
