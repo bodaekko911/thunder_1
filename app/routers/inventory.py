@@ -587,11 +587,14 @@ async def adjust_stock(data: StockAdjustment, db: AsyncSession = Depends(get_asy
         location = await ensure_default_stock_location(db)
 
     if location is not None:
-        location_stock = await get_or_create_location_stock(
-            db,
-            product_id=product.id,
-            location_id=location.id,
-        )
+        if data.location_id is None:
+            _, location_stock = await sync_product_stock_to_default_location(db, product=product)
+        else:
+            location_stock = await get_or_create_location_stock(
+                db,
+                product_id=product.id,
+                location_id=location.id,
+            )
         location_before = float(location_stock.qty)
         location_after = location_before + data.qty
         if location_after < 0:

@@ -10,6 +10,7 @@ from app.models.inventory import StockMove
 from app.models.accounting import Account, Journal, JournalEntry
 from app.schemas.invoice import InvoiceCreate
 from app.services.barcode_service import normalize_barcode_value
+from app.services.location_inventory_service import sync_product_stock_to_default_location
 from app.core.log import record
 
 
@@ -101,6 +102,15 @@ async def create_invoice(db: AsyncSession, data: InvoiceCreate, user_id: int) ->
             ))
             before = float(product.stock)
             after = before - qty
+            _, location_stock = await sync_product_stock_to_default_location(db, product=product)
+            location_before = float(location_stock.qty)
+            location_after = location_before - qty
+            if location_after < 0:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Not enough stock for {product.name}. Available: {location_before}",
+                )
+            location_stock.qty = location_after
             product.stock = after
             db.add(StockMove(
                 product_id=product.id,
@@ -125,16 +135,6 @@ async def create_invoice(db: AsyncSession, data: InvoiceCreate, user_id: int) ->
                 ("4000", 0, round(total, 2)),
             ], user_id=user_id)
 
-        await db.commit()
-        await db.refresh(invoice)
-        invoice_payload = {
-            "id": invoice.id,
-            "invoice_number": invoice.invoice_number,
-            "status": invoice.status,
-            "payment_method": invoice.payment_method,
-            "total": float(invoice.total),
-        }
-
         from app.models.user import User as UserModel
         _ur = await db.execute(select(UserModel).where(UserModel.id == user_id))
         user_obj = _ur.scalar_one_or_none()
@@ -151,7 +151,14 @@ async def create_invoice(db: AsyncSession, data: InvoiceCreate, user_id: int) ->
             ref_id=invoice.id,
         )
         await db.commit()
-        return invoice_payload
+        await db.refresh(invoice)
+        return {
+            "id": invoice.id,
+            "invoice_number": invoice.invoice_number,
+            "status": invoice.status,
+            "payment_method": invoice.payment_method,
+            "total": float(invoice.total),
+        }
     except Exception:
         await db.rollback()
         raise
