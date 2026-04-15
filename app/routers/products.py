@@ -593,7 +593,7 @@ const ITEM_TYPE_LABELS = {
 };
 
 function escapeJsString(value){
-    return String(value ?? "")
+    return String(value == null ? "" : value)
         .replace(/\\/g,"\\\\")
         .replace(/'/g,"\\'")
         .replace(/\r/g,"\\r")
