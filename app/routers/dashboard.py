@@ -463,6 +463,45 @@ tr:hover td{background:rgba(255,255,255,.02);}
 #loading{position:fixed;inset:0;z-index:999;background:var(--bg);display:flex;align-items:center;justify-content:center;flex-direction:column;gap:16px;}
 .spinner{width:36px;height:36px;border:3px solid var(--border2);border-top-color:var(--green);border-radius:50%;animation:spin .7s linear infinite;}
 @keyframes spin{to{transform:rotate(360deg);}}
+
+/* CHAT WIDGET */
+.chat-btn{position:fixed;bottom:28px;right:28px;width:56px;height:56px;border-radius:50%;background:linear-gradient(135deg,var(--green),var(--blue));border:none;cursor:pointer;display:flex;align-items:center;justify-content:center;box-shadow:0 8px 32px rgba(0,255,157,.3);z-index:9000;transition:transform .2s,box-shadow .2s;}
+.chat-btn:hover{transform:scale(1.08);box-shadow:0 12px 44px rgba(0,255,157,.42);}
+.chat-badge{position:absolute;top:-2px;right:-2px;width:14px;height:14px;background:var(--danger);border-radius:50%;border:2px solid var(--bg);display:none;}
+.chat-window{position:fixed;bottom:96px;right:28px;width:380px;background:var(--card);border:1px solid var(--border2);border-radius:20px;display:flex;flex-direction:column;z-index:8999;box-shadow:0 24px 60px rgba(0,0,0,.45);transform:scale(.92) translateY(20px);opacity:0;pointer-events:none;transition:transform .22s cubic-bezier(.34,1.2,.64,1),opacity .18s ease;}
+.chat-window.open{transform:scale(1) translateY(0);opacity:1;pointer-events:all;}
+.chat-header{display:flex;align-items:center;justify-content:space-between;padding:14px 18px;border-bottom:1px solid var(--border);border-radius:20px 20px 0 0;background:var(--card2);}
+.chat-header-left{display:flex;align-items:center;gap:10px;}
+.chat-avatar{width:32px;height:32px;background:linear-gradient(135deg,var(--green),var(--blue));border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:800;color:#021a10;flex-shrink:0;}
+.chat-title{font-size:13px;font-weight:700;color:var(--text);}
+.chat-status{font-size:11px;color:var(--green);}
+.chat-close{width:28px;height:28px;background:transparent;border:1px solid var(--border);border-radius:8px;color:var(--muted);font-size:13px;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:all .15s;line-height:1;}
+.chat-close:hover{border-color:var(--border2);color:var(--text);}
+.chat-messages{overflow-y:auto;padding:16px;display:flex;flex-direction:column;gap:12px;min-height:0;max-height:340px;scrollbar-width:thin;scrollbar-color:var(--border2) transparent;}
+.chat-messages::-webkit-scrollbar{width:4px;}
+.chat-messages::-webkit-scrollbar-thumb{background:var(--border2);border-radius:4px;}
+.msg{display:flex;flex-direction:column;max-width:85%;}
+.msg.user{align-self:flex-end;align-items:flex-end;}
+.msg.assistant{align-self:flex-start;align-items:flex-start;}
+.msg-bubble{padding:10px 14px;font-size:13px;line-height:1.55;}
+.msg.user .msg-bubble{background:linear-gradient(135deg,rgba(0,255,157,.18),rgba(77,159,255,.15));border:1px solid rgba(0,255,157,.25);color:var(--text);border-radius:14px 14px 4px 14px;}
+.msg.assistant .msg-bubble{background:var(--card2);border:1px solid var(--border);color:var(--sub);border-radius:14px 14px 14px 4px;}
+.msg-time{font-size:10px;color:var(--muted);margin-top:4px;font-family:var(--mono);}
+.typing-indicator{display:flex;gap:4px;padding:12px 14px;background:var(--card2);border:1px solid var(--border);border-radius:14px 14px 14px 4px;align-items:center;width:fit-content;}
+.typing-dot{width:6px;height:6px;background:var(--muted);border-radius:50%;animation:typeBounce 1.2s infinite;}
+.typing-dot:nth-child(2){animation-delay:.2s;}
+.typing-dot:nth-child(3){animation-delay:.4s;}
+@keyframes typeBounce{0%,60%,100%{transform:translateY(0);opacity:.4;}30%{transform:translateY(-5px);opacity:1;}}
+.chat-hints{display:flex;gap:6px;flex-wrap:wrap;padding:8px 16px 4px;}
+.chat-chip{padding:4px 10px;border-radius:999px;border:1px solid var(--border2);background:transparent;color:var(--sub);font-size:11px;cursor:pointer;font-family:var(--sans);transition:all .15s;}
+.chat-chip:hover{background:var(--card2);color:var(--text);}
+.chat-input-row{display:flex;gap:8px;padding:12px 16px;border-top:1px solid var(--border);}
+.chat-input{flex:1;background:var(--card2);border:1px solid var(--border2);border-radius:12px;padding:10px 14px;color:var(--text);font-family:var(--sans);font-size:13px;outline:none;min-width:0;}
+.chat-input:focus{border-color:rgba(0,255,157,.4);}
+.chat-send{width:38px;height:38px;background:linear-gradient(135deg,var(--green),var(--blue));border:none;border-radius:12px;color:#021a10;font-size:16px;cursor:pointer;display:flex;align-items:center;justify-content:center;flex-shrink:0;transition:filter .15s;}
+.chat-send:hover{filter:brightness(1.1);}
+.chat-send:disabled{opacity:.45;cursor:not-allowed;}
+@media(max-width:480px){.chat-window{width:calc(100vw - 32px);right:16px;bottom:88px;}.chat-btn{bottom:20px;right:20px;}}
 </style>
     <script src="/static/auth-guard.js"></script>
 </head>
@@ -512,27 +551,6 @@ tr:hover td{background:rgba(255,255,255,.02);}
     <div>
         <div class="page-title">Dashboard</div>
         <div class="page-sub" id="date-sub"></div>
-    </div>
-
-    <div class="assistant-panel">
-        <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap">
-            <div>
-                <div class="panel-title">Dashboard Assistant</div>
-                <div class="page-sub" style="margin-top:4px">Ask a supported business question using current dashboard data.</div>
-            </div>
-        </div>
-        <div class="assistant-row">
-            <input id="assistant-question" class="assistant-input" placeholder="Try: today's sales, top products, low-stock items, expenses this month, unpaid invoices">
-            <button class="assistant-btn" onclick="askAssistant()">Ask</button>
-        </div>
-        <div class="assistant-hints">
-            <button class="assistant-chip" onclick="askPresetQuestion(`today's sales`)">Today's sales</button>
-            <button class="assistant-chip" onclick="askPresetQuestion('top products')">Top products</button>
-            <button class="assistant-chip" onclick="askPresetQuestion('low-stock items')">Low-stock items</button>
-            <button class="assistant-chip" onclick="askPresetQuestion('expenses this month')">Expenses this month</button>
-            <button class="assistant-chip" onclick="askPresetQuestion('unpaid invoices')">Unpaid invoices</button>
-        </div>
-        <div id="assistant-result" class="assistant-result">Supported questions: today's sales, top products, low-stock items, expenses this month, unpaid invoices.</div>
     </div>
 
     <!-- ROW 1: REVENUE STATS -->
@@ -666,6 +684,42 @@ tr:hover td{background:rgba(255,255,255,.02);}
         </table>
     </div>
 
+</div>
+
+<!-- FLOATING CHAT BUTTON -->
+<button class="chat-btn" id="chat-btn" onclick="toggleChat()" title="Ask the Dashboard Assistant">
+    <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#021a10" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
+    </svg>
+    <span class="chat-badge" id="chat-badge"></span>
+</button>
+
+<!-- CHAT WINDOW -->
+<div class="chat-window" id="chat-window">
+    <div class="chat-header">
+        <div class="chat-header-left">
+            <div class="chat-avatar">AI</div>
+            <div>
+                <div class="chat-title">Dashboard Assistant</div>
+                <div class="chat-status">&#9679; Online</div>
+            </div>
+        </div>
+        <button class="chat-close" onclick="toggleChat()">&#x2715;</button>
+    </div>
+    <div class="chat-messages" id="chat-messages"></div>
+    <div class="chat-hints" id="chat-hints">
+        <button class="chat-chip" onclick="chatPreset(`today's sales`)">Today's sales</button>
+        <button class="chat-chip" onclick="chatPreset('top products')">Top products</button>
+        <button class="chat-chip" onclick="chatPreset('low-stock items')">Low stock</button>
+        <button class="chat-chip" onclick="chatPreset('expenses this month')">Expenses</button>
+        <button class="chat-chip" onclick="chatPreset('unpaid invoices')">Unpaid invoices</button>
+    </div>
+    <div class="chat-input-row">
+        <input id="chat-input" class="chat-input" placeholder="Ask about your business&#8230;" autocomplete="off">
+        <button class="chat-send" id="chat-send" onclick="sendChatMessage()">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="#021a10"><path d="M2 21l21-9L2 3v7l15 2-15 2z"/></svg>
+        </button>
+    </div>
 </div>
 
 <script>
@@ -909,107 +963,92 @@ async function load(){
     }
 }
 
-function renderAssistantResult(data){
-    const resultEl = document.getElementById("assistant-result");
-    if (!resultEl) return;
+// ── CHAT WIDGET ──────────────────────────────────────────────────────────────
+let _chatOpen = false;
+let _chatHistory = [];
+let _chatBusy = false;
 
-    const params = data.parameters && Object.keys(data.parameters).length
-        ? `<div class="assistant-meta">Intent: ${data.intent || "unsupported"} · Parameters: ${JSON.stringify(data.parameters)}</div>`
-        : `<div class="assistant-meta">Intent: ${data.intent || "unsupported"}</div>`;
-
-    if (!data.supported || !data.result) {
-        resultEl.innerHTML = `${params}<div>${data.message || "That question is not supported yet."}</div>`;
-        return;
+function toggleChat() {
+    _chatOpen = !_chatOpen;
+    const win = document.getElementById("chat-window");
+    const badge = document.getElementById("chat-badge");
+    if (_chatOpen) {
+        win.classList.add("open");
+        setTimeout(() => document.getElementById("chat-input")?.focus(), 60);
+        badge.style.display = "none";
+        if (_chatHistory.length === 0) {
+            _addMsg("assistant", "Hi! I can answer questions about your sales, inventory, expenses, and invoices. What would you like to know?");
+        }
+    } else {
+        win.classList.remove("open");
     }
-
-    if (data.intent === "sales_today") {
-        resultEl.innerHTML = `${params}
-            <div><strong>${data.message}</strong></div>
-            <div>Total: ${Number(data.result.total_sales || 0).toFixed(2)} · POS: ${Number(data.result.pos_sales || 0).toFixed(2)} · B2B: ${Number(data.result.b2b_sales || 0).toFixed(2)} · Refunds: ${Number(data.result.refunds || 0).toFixed(2)}</div>`;
-        return;
-    }
-
-    if (data.intent === "top_products") {
-        const items = (data.result.items || []).slice(0, 5);
-        resultEl.innerHTML = `${params}
-            <div><strong>${data.message}</strong></div>
-            ${items.length
-                ? `<div>${items.map(item => `${item.name} (${Number(item.qty || 0).toFixed(2)} units, ${Number(item.revenue || 0).toFixed(2)})`).join("<br>")}</div>`
-                : `<div>No top-product data is available yet.</div>`}`;
-        return;
-    }
-
-    if (data.intent === "low_stock") {
-        const items = (data.result.items || []).slice(0, 5);
-        resultEl.innerHTML = `${params}
-            <div><strong>${data.message}</strong></div>
-            ${items.length
-                ? `<div>${items.map(item => `${item.name} (${item.sku}) · stock ${Number(item.stock || 0).toFixed(2)}`).join("<br>")}</div>`
-                : `<div>No low-stock items right now.</div>`}`;
-        return;
-    }
-
-    if (data.intent === "expenses_month") {
-        const breakdown = (data.result.breakdown || []).slice(0, 5);
-        resultEl.innerHTML = `${params}
-            <div><strong>${data.message}</strong></div>
-            <div>This month: ${Number(data.result.this_month || 0).toFixed(2)} · Last month: ${Number(data.result.last_month || 0).toFixed(2)}</div>
-            ${breakdown.length
-                ? `<div style="margin-top:8px">${breakdown.map(item => `${item.name || item.category}: ${Number(item.total || 0).toFixed(2)}`).join("<br>")}</div>`
-                : ""}`;
-        return;
-    }
-
-    if (data.intent === "unpaid_invoices") {
-        resultEl.innerHTML = `${params}
-            <div><strong>${data.message}</strong></div>
-            <div>POS unpaid: ${data.result.pos_unpaid_count || 0} · B2B unpaid/partial: ${data.result.b2b_unpaid_count || 0} · B2B outstanding: ${Number(data.result.b2b_outstanding_amount || 0).toFixed(2)}</div>`;
-        return;
-    }
-
-    resultEl.innerHTML = `${params}<div>${data.message || "Answer ready."}</div>`;
 }
 
-async function askAssistant(){
-    const input = document.getElementById("assistant-question");
-    const resultEl = document.getElementById("assistant-result");
-    const question = (input?.value || "").trim();
-    if (!question) {
-        resultEl.innerHTML = `<div class="assistant-meta">Intent: unsupported</div><div>Please enter a dashboard question first.</div>`;
-        return;
-    }
+function _now() {
+    return new Date().toLocaleTimeString("en-GB", {hour:"2-digit", minute:"2-digit"});
+}
 
-    resultEl.innerHTML = `<div class="assistant-meta">Checking question...</div><div>Looking up the latest dashboard answer.</div>`;
+function _addMsg(role, text) {
+    _chatHistory.push({role, text, time: _now()});
+    _renderChat();
+}
+
+function _renderChat() {
+    const c = document.getElementById("chat-messages");
+    if (!c) return;
+    c.innerHTML = _chatHistory.map(m =>
+        `<div class="msg ${m.role}">
+            <div class="msg-bubble">${m.text}</div>
+            <div class="msg-time">${m.time}</div>
+        </div>`
+    ).join("");
+    if (_chatBusy) {
+        c.innerHTML += `<div class="msg assistant"><div class="typing-indicator"><div class="typing-dot"></div><div class="typing-dot"></div><div class="typing-dot"></div></div></div>`;
+    }
+    c.scrollTop = c.scrollHeight;
+}
+
+async function sendChatMessage() {
+    const input = document.getElementById("chat-input");
+    const sendBtn = document.getElementById("chat-send");
+    const q = (input?.value || "").trim();
+    if (!q || _chatBusy) return;
+
+    input.value = "";
+    _addMsg("user", q);
+
+    const hints = document.getElementById("chat-hints");
+    if (hints) hints.style.display = "none";
+
+    _chatBusy = true;
+    sendBtn.disabled = true;
+    _renderChat();
 
     try {
-        const response = await fetch("/dashboard/assistant", {
+        const res = await fetch("/dashboard/assistant", {
             method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ question }),
+            headers: {"Content-Type": "application/json"},
+            body: JSON.stringify({question: q}),
         });
-        const data = await response.json();
-        if (!response.ok) {
-            resultEl.innerHTML = `<div class="assistant-meta">Request failed</div><div>${data.detail || "The assistant could not answer that question right now."}</div>`;
-            return;
-        }
-        renderAssistantResult(data);
-    } catch (error) {
-        console.error(error);
-        resultEl.innerHTML = `<div class="assistant-meta">Request failed</div><div>The assistant is temporarily unavailable. Please try again.</div>`;
+        const data = await res.json();
+        _chatBusy = false;
+        sendBtn.disabled = false;
+        _addMsg("assistant", data.message || (res.ok ? "Done." : (data.detail || "Something went wrong.")));
+    } catch(e) {
+        _chatBusy = false;
+        sendBtn.disabled = false;
+        _addMsg("assistant", "I\u2019m temporarily unavailable \u2014 please try again.");
     }
 }
 
-function askPresetQuestion(question){
-    const input = document.getElementById("assistant-question");
-    if (input) input.value = question;
-    askAssistant();
+function chatPreset(q) {
+    const input = document.getElementById("chat-input");
+    if (input) input.value = q;
+    sendChatMessage();
 }
 
-document.getElementById("assistant-question")?.addEventListener("keydown", function(event){
-    if (event.key === "Enter") {
-        event.preventDefault();
-        askAssistant();
-    }
+document.getElementById("chat-input")?.addEventListener("keydown", e => {
+    if (e.key === "Enter") { e.preventDefault(); sendChatMessage(); }
 });
 
 load();
