@@ -173,8 +173,8 @@ def login_page():
                    url.startsWith("/") &&
                    !url.startsWith("//") &&
                    url.indexOf(backslash) === -1 &&
-                   url.indexOf("\r") === -1 &&
-                   url.indexOf("\n") === -1;
+                   url.indexOf("\\r") === -1 &&
+                   url.indexOf("\\n") === -1;
         }
 
         async function login() {
