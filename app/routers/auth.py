@@ -50,6 +50,7 @@ def login_page():
 <!DOCTYPE html>
 <html>
 <head>
+    <meta charset="UTF-8">
     <title>ERP Login</title>
     <style>
         :root {
@@ -167,10 +168,13 @@ def login_page():
         // Blocks protocol-relative (//evil.com) and absolute URLs while
         // allowing any same-origin path such as /dashboard or /inventory/?tab=1.
         function _isSafeReturnUrl(url) {
+            const backslash = String.fromCharCode(92);
             return typeof url === "string" &&
                    url.startsWith("/") &&
                    !url.startsWith("//") &&
-                   !url.startsWith("/\\");
+                   url.indexOf(backslash) === -1 &&
+                   url.indexOf("\r") === -1 &&
+                   url.indexOf("\n") === -1;
         }
 
         async function login() {
@@ -189,7 +193,7 @@ def login_page():
                 document.getElementById("error").style.display = "block";
                 return;
             }
-            // Token is stored in an httpOnly cookie set by the server — no localStorage.
+            // Token is stored in an httpOnly cookie set by the server - no localStorage.
             const permissions = new Set((data.permissions || "").split(",").map(v => v.trim()).filter(Boolean));
             const landingPages = [
                 ["/dashboard", "page_dashboard"],

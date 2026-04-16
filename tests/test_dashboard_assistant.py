@@ -223,6 +223,116 @@ def test_dashboard_assistant_endpoint_is_csrf_exempt_for_session_cookie(monkeypa
     assert response.json()["intent"] == "sales_today"
 
 
+def test_answer_dashboard_question_fallback_includes_not_configured_message() -> None:
+    """When ANTHROPIC_API_KEY is absent, unsupported questions surface 'AI assistant is not configured'."""
+    user = SimpleNamespace(id=1, name="Admin", role="admin", permissions="", is_active=True)
+
+    result = asyncio.run(
+        answer_dashboard_question(
+            FakePermissionSession(),
+            question="how many deliveries were made this quarter?",
+            current_user=user,
+        )
+    )
+
+    assert result["supported"] is False
+    assert "AI assistant is not configured" in result["message"]
+
+
+def test_answer_dashboard_question_ai_happy_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    """When API key is configured, the Claude tool-use loop runs and returns a structured answer."""
+    import app.services.dashboard_assistant_service as das
+
+    # Patch settings so the AI path is taken
+    fake_settings = SimpleNamespace(
+        ANTHROPIC_API_KEY="test-key-abc",
+        ANTHROPIC_MODEL="claude-test",
+    )
+    monkeypatch.setattr(das, "settings", fake_settings)
+
+    # Stub tool execution so no real DB queries run
+    async def fake_execute_tool(db, current_user, name, input_data):
+        return {"total": 1500.0, "pos_sales": 900.0, "b2b_sales": 600.0, "refunds": 0.0, "net_pos": 900.0, "date_from": "2026-04-15", "date_to": "2026-04-15"}
+
+    monkeypatch.setattr(das, "_execute_tool", fake_execute_tool)
+
+    # Build minimal mock of AsyncAnthropic client
+    tool_block = SimpleNamespace(
+        type="tool_use",
+        id="tu_1",
+        name="get_sales_summary",
+        input={"date_from": "2026-04-15", "date_to": "2026-04-15"},
+    )
+    text_block = SimpleNamespace(type="text", text="Today's total sales are 1500.00.")
+
+    call_count = 0
+
+    async def mock_create(**kwargs):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            return SimpleNamespace(stop_reason="tool_use", content=[tool_block])
+        return SimpleNamespace(stop_reason="end_turn", content=[text_block])
+
+    mock_client = SimpleNamespace(messages=SimpleNamespace(create=mock_create))
+
+    def mock_async_anthropic(api_key):
+        return mock_client
+
+    import anthropic
+    monkeypatch.setattr(anthropic, "AsyncAnthropic", mock_async_anthropic)
+
+    user = SimpleNamespace(id=1, name="Admin", role="admin", permissions="", is_active=True)
+
+    result = asyncio.run(
+        answer_dashboard_question(
+            FakePermissionSession(),
+            question="today's sales",
+            current_user=user,
+        )
+    )
+
+    assert result["supported"] is True
+    assert result["intent"] == "get_sales_summary"
+    assert "1500" in result["message"]
+    assert call_count == 2
+
+
+def test_answer_dashboard_question_ai_no_tool_call_returns_unsupported(monkeypatch: pytest.MonkeyPatch) -> None:
+    """When Claude answers directly without calling a tool, supported is False."""
+    import app.services.dashboard_assistant_service as das
+
+    fake_settings = SimpleNamespace(
+        ANTHROPIC_API_KEY="test-key-abc",
+        ANTHROPIC_MODEL="claude-test",
+    )
+    monkeypatch.setattr(das, "settings", fake_settings)
+
+    text_block = SimpleNamespace(type="text", text="I don't know the answer to that question.")
+
+    async def mock_create(**kwargs):
+        return SimpleNamespace(stop_reason="end_turn", content=[text_block])
+
+    mock_client = SimpleNamespace(messages=SimpleNamespace(create=mock_create))
+
+    import anthropic
+    monkeypatch.setattr(anthropic, "AsyncAnthropic", lambda api_key: mock_client)
+
+    user = SimpleNamespace(id=1, name="Admin", role="admin", permissions="", is_active=True)
+
+    result = asyncio.run(
+        answer_dashboard_question(
+            FakePermissionSession(),
+            question="what is the meaning of life?",
+            current_user=user,
+        )
+    )
+
+    assert result["supported"] is False
+    assert result["intent"] is None
+    assert "don't know" in result["message"]
+
+
 def test_dashboard_data_includes_monthly_expenses(monkeypatch: pytest.MonkeyPatch) -> None:
     async def fake_expense_summary(_db):
         return {

@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
 from fastapi.responses import HTMLResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import func, select
@@ -6,6 +6,7 @@ from datetime import date, datetime, timedelta
 from pydantic import BaseModel
 
 from app.core.permissions import require_permission
+from app.core.rate_limit import limiter
 from app.core.security import get_current_user
 from app.database import get_async_session
 from app.models.invoice import Invoice, InvoiceItem
@@ -263,7 +264,9 @@ async def dashboard_data(db: AsyncSession = Depends(get_async_session)):
 
 
 @router.post("/dashboard/assistant")
+@limiter.limit("20/minute")
 async def dashboard_assistant(
+    request: Request,
     data: DashboardAssistantQuestion,
     db: AsyncSession = Depends(get_async_session),
     current_user: User = Depends(get_current_user),
