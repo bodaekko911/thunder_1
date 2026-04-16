@@ -78,8 +78,7 @@ class BaseAppSettings(BaseSettings):
     REDIS_SOCKET_CONNECT_TIMEOUT: float = 0.25
     REDIS_SOCKET_TIMEOUT: float = 0.25
 
-    ANTHROPIC_API_KEY: str | None = None
-    ANTHROPIC_MODEL: str = "claude-sonnet-4-5"
+    ASSISTANT_MEMORY_CHANNEL: str = "dashboard"
 
     SENTRY_DSN: str | None = None
     SENTRY_ENVIRONMENT: str | None = None
