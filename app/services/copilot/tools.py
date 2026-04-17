@@ -141,6 +141,15 @@ TOOL_DEFINITIONS = [
         },
     },
     {
+        "name": "get_stock_value_summary",
+        "description": (
+            "Get the total inventory value (stock × cost) for all active products, "
+            "with a breakdown by top-5 categories. "
+            "Requires page_inventory or page_products permission."
+        ),
+        "input_schema": {"type": "object", "properties": {}},
+    },
+    {
         "name": "get_sales_by_period",
         "description": "Get POS sales aggregated by day, week, or month for a date range.",
         "input_schema": {
@@ -173,6 +182,7 @@ async def execute_tool(db, *, current_user, name: str, input_data: dict) -> dict
         get_sales_by_period as _get_sales_by_period,
         get_sales_summary as _get_sales_summary,
         get_stock_levels as _get_stock_levels,
+        get_stock_value_summary as _get_stock_value_summary,
         get_top_products as _get_top_products,
         get_unpaid_invoices_summary as _get_unpaid_invoices_summary,
     )
@@ -265,5 +275,10 @@ async def execute_tool(db, *, current_user, name: str, input_data: dict) -> dict
             date_from=input_data.get("date_from"),
             date_to=input_data.get("date_to"),
         )
+
+    if name == "get_stock_value_summary":
+        if not (has_permission(current_user, "page_inventory") or has_permission(current_user, "page_products")):
+            return {"error": "Permission denied: page_inventory or page_products is required to view stock value."}
+        return await _get_stock_value_summary(db)
 
     return {"error": f"Unknown tool: {name}"}

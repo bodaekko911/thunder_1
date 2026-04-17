@@ -1,8 +1,47 @@
+"""Response composer for the dashboard assistant."""
 from __future__ import annotations
 
 
+SUPPORTED_QUESTIONS_BY_CATEGORY: dict[str, list[str]] = {
+    "Sales": [
+        "today's sales",
+        "sales this week",
+        "sales last month",
+        "how much did we make last week",
+        "top products",
+        "sales by period",
+    ],
+    "Inventory": [
+        "low-stock items",
+        "stock levels",
+        "product details for <name>",
+        "stock value",
+    ],
+    "Customers": [
+        "overdue customers",
+        "customer balance for <name>",
+        "who owes me the most",
+    ],
+    "Expenses": [
+        "expenses this month",
+        "expense breakdown",
+        "expenses last month",
+    ],
+    "Profit": [
+        "profit and loss",
+        "profit last month",
+        "margin this month",
+    ],
+}
+
+
 class ResponseComposer:
-    def unsupported(self, *, supported_hints: list[str]) -> dict:
+    def unsupported(
+        self,
+        *,
+        supported_hints: list[str],
+        close_matches: list[str] | None = None,
+    ) -> dict:
         return {
             "supported": False,
             "intent": None,
@@ -13,6 +52,10 @@ class ResponseComposer:
                 + ", ".join(supported_hints)
                 + "."
             ),
+            "confidence": 0.0,
+            "suggestions": close_matches or [],
+            "highlights": [],
+            "table": None,
         }
 
     def insufficient_followup(self) -> dict:
@@ -25,6 +68,10 @@ class ResponseComposer:
                 "I do not have enough recent assistant context to resolve that follow-up. "
                 "Please restate the business question with the metric, customer, product, or date range."
             ),
+            "confidence": 0.0,
+            "suggestions": [],
+            "highlights": [],
+            "table": None,
         }
 
     def compose(
@@ -35,6 +82,10 @@ class ResponseComposer:
         parameters: dict,
         result: dict | None,
         message: str,
+        confidence: float = 0.0,
+        suggestions: list | None = None,
+        highlights: list | None = None,
+        table: dict | None = None,
     ) -> dict:
         return {
             "supported": supported,
@@ -42,4 +93,8 @@ class ResponseComposer:
             "parameters": parameters,
             "result": result,
             "message": message.strip(),
+            "confidence": round(confidence, 3),
+            "suggestions": suggestions if suggestions is not None else [],
+            "highlights": highlights if highlights is not None else [],
+            "table": table,
         }

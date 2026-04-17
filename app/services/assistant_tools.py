@@ -426,6 +426,38 @@ async def get_expense_breakdown(
     return {"month": f"{year:04d}-{month_number:02d}", "breakdown": breakdown, "total": total}
 
 
+async def get_stock_value_summary(db: AsyncSession) -> dict:
+    """Total inventory value (SUM stock * cost) for active products, grouped by top-5 categories."""
+    r = await db.execute(
+        select(
+            Product.category,
+            func.coalesce(func.sum(Product.stock * Product.cost), 0).label("value"),
+            func.count(Product.id).label("count"),
+        )
+        .where(Product.is_active == True)
+        .group_by(Product.category)
+        .order_by(func.sum(Product.stock * Product.cost).desc())
+        .limit(5)
+    )
+    by_category = [
+        {"category": row.category or "Uncategorised", "value": round(float(row.value or 0), 2), "count": int(row.count or 0)}
+        for row in r.all()
+    ]
+
+    r2 = await db.execute(
+        select(
+            func.coalesce(func.sum(Product.stock * Product.cost), 0),
+            func.count(Product.id),
+        ).where(Product.is_active == True)
+    )
+    row2 = r2.one()
+    return {
+        "total_value": round(float(row2[0] or 0), 2),
+        "item_count": int(row2[1] or 0),
+        "by_category": by_category,
+    }
+
+
 async def get_profit_loss_summary(
     db: AsyncSession,
     *,

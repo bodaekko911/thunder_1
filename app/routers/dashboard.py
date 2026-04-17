@@ -502,6 +502,28 @@ tr:hover td{background:rgba(255,255,255,.02);}
 .chat-send:hover{filter:brightness(1.1);}
 .chat-send:disabled{opacity:.45;cursor:not-allowed;}
 @media(max-width:480px){.chat-window{width:calc(100vw - 32px);right:16px;bottom:88px;}.chat-btn{bottom:20px;right:20px;}}
+/* CHAT: RICH PAYLOAD LAYOUT */
+.msg.assistant.rich{max-width:100%;width:100%;}
+/* CHAT: HIGHLIGHTS */
+.chat-highlights{display:grid;grid-template-columns:repeat(auto-fit,minmax(90px,1fr));gap:6px;margin:6px 0 4px;}
+.chat-highlight{background:var(--card2);border:1px solid var(--border);border-radius:10px;padding:8px 10px;display:flex;flex-direction:column;gap:2px;}
+.chat-highlight-label{font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;}
+.chat-highlight-value{font-family:var(--mono);font-size:13px;font-weight:700;color:var(--text);}
+.chat-highlight.good .chat-highlight-value{color:var(--green);}
+.chat-highlight.bad  .chat-highlight-value{color:var(--danger);}
+/* CHAT: TABLE */
+.chat-table-wrap{max-height:180px;overflow:auto;overflow-x:auto;border:1px solid var(--border);border-radius:10px;margin:6px 0 4px;}
+.chat-table{width:100%;border-collapse:collapse;font-size:12px;}
+.chat-table th,.chat-table td{padding:6px 8px;text-align:left;border-bottom:1px solid var(--border);}
+.chat-table th{position:sticky;top:0;background:var(--card2);color:var(--sub);font-weight:600;font-size:11px;text-transform:uppercase;letter-spacing:.04em;}
+.chat-table td.right,.chat-table th.right{text-align:right;font-family:var(--mono);}
+.chat-table-truncated{padding:6px 8px;font-size:11px;color:var(--muted);text-align:center;}
+/* CHAT: SUGGESTIONS */
+.chat-suggestions{display:flex;gap:6px;flex-wrap:wrap;padding:4px 0 2px;}
+.chat-suggestion{padding:5px 10px;border-radius:999px;border:1px solid var(--border2);background:var(--card2);color:var(--sub);font-size:11px;cursor:pointer;font-family:var(--sans);transition:all .15s;}
+.chat-suggestion:hover{border-color:var(--green);color:var(--text);}
+/* CHAT: CONFIDENCE HINT */
+.chat-confidence-hint{font-size:10px;color:var(--muted);font-style:italic;margin-bottom:4px;}
 </style>
     <script src="/static/auth-guard.js"></script>
 </head>
@@ -964,6 +986,14 @@ async function load(){
 }
 
 // ── CHAT WIDGET ──────────────────────────────────────────────────────────────
+// XSS-safe escaper — used on every dynamic value interpolated into innerHTML
+function _esc(s) {
+    if (s == null) return "";
+    return String(s).replace(/[&<>"']/g, c => (
+        {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]
+    ));
+}
+
 let _chatOpen = false;
 let _chatHistory = [];
 let _chatBusy = false;
@@ -988,20 +1018,100 @@ function _now() {
     return new Date().toLocaleTimeString("en-GB", {hour:"2-digit", minute:"2-digit"});
 }
 
-function _addMsg(role, text) {
-    _chatHistory.push({role, text, time: _now()});
+function _addMsg(role, text, payload = null) {
+    _chatHistory.push({role, text, time: _now(), payload});
     _renderChat();
 }
 
 function _renderChat() {
     const c = document.getElementById("chat-messages");
     if (!c) return;
-    c.innerHTML = _chatHistory.map(m =>
-        `<div class="msg ${m.role}">
-            <div class="msg-bubble">${m.text}</div>
-            <div class="msg-time">${m.time}</div>
-        </div>`
-    ).join("");
+
+    c.innerHTML = _chatHistory.map(m => {
+        // ── User bubble ───────────────────────────────────────────────────────
+        if (m.role === "user") {
+            return `<div class="msg user">
+                <div class="msg-bubble">${_esc(m.text)}</div>
+                <div class="msg-time">${_esc(m.time)}</div>
+            </div>`;
+        }
+
+        // ── Assistant: no payload (greeting / network error) ──────────────────
+        const p = m.payload;
+        if (!p) {
+            return `<div class="msg assistant">
+                <div class="msg-bubble">${_esc(m.text)}</div>
+                <div class="msg-time">${_esc(m.time)}</div>
+            </div>`;
+        }
+
+        // ── Assistant: rich payload ───────────────────────────────────────────
+        const hasHighlights = p.highlights && p.highlights.length > 0;
+        const hasTable      = !!p.table;
+        const hasSuggestions= p.suggestions && p.suggestions.length > 0;
+        const isRich        = hasHighlights || hasTable || hasSuggestions;
+
+        let inner = "";
+
+        // 1. Low-confidence hint (only when supported + uncertain + has chips)
+        if (p.supported === true && p.confidence != null && p.confidence < 0.6 && hasSuggestions) {
+            inner += `<div class="chat-confidence-hint">Did you mean one of these?</div>`;
+        }
+
+        // 2. Message text
+        inner += `<div class="msg-bubble">${_esc(m.text)}</div>`;
+
+        // 3. Highlights grid
+        if (hasHighlights) {
+            const cards = p.highlights.map(h => {
+                const toneClass = (h.tone === "good" || h.tone === "bad") ? ` ${_esc(h.tone)}` : "";
+                return `<div class="chat-highlight${toneClass}" aria-label="${_esc(h.label)}">
+                    <span class="chat-highlight-label">${_esc(h.label)}</span>
+                    <span class="chat-highlight-value">${_esc(h.value)}</span>
+                </div>`;
+            }).join("");
+            inner += `<div class="chat-highlights">${cards}</div>`;
+        }
+
+        // 4. Table
+        if (hasTable) {
+            const cols  = p.table.columns || [];
+            const rows  = p.table.rows    || [];
+            const thead = cols.map(col =>
+                `<th class="${col.align === "right" ? "right" : ""}">${_esc(col.label)}</th>`
+            ).join("");
+            const tbody = rows.map(row => {
+                const cells = cols.map(col =>
+                    `<td class="${col.align === "right" ? "right" : ""}">${_esc(row[col.key] != null ? row[col.key] : "")}</td>`
+                ).join("");
+                return `<tr>${cells}</tr>`;
+            }).join("");
+            let tfooter = "";
+            if (p.table.truncated) {
+                const shown = rows.length;
+                const total = p.table.total_count || "more";
+                tfooter = `<tr><td colspan="${cols.length}" class="chat-table-truncated">Showing ${_esc(shown)} of ${_esc(total)} — ask for details on a specific item to see more.</td></tr>`;
+            }
+            inner += `<div class="chat-table-wrap"><table class="chat-table">
+                <thead><tr>${thead}</tr></thead>
+                <tbody>${tbody}${tfooter}</tbody>
+            </table></div>`;
+        }
+
+        // 5. Suggestion chips
+        if (hasSuggestions) {
+            const chips = p.suggestions.map(s =>
+                `<button class="chat-suggestion" role="listitem" data-q="${_esc(s)}">${_esc(s)}</button>`
+            ).join("");
+            inner += `<div class="chat-suggestions" role="list">${chips}</div>`;
+        }
+
+        // 6. Timestamp
+        inner += `<div class="msg-time">${_esc(m.time)}</div>`;
+
+        return `<div class="msg assistant${isRich ? " rich" : ""}">${inner}</div>`;
+    }).join("");
+
     if (_chatBusy) {
         c.innerHTML += `<div class="msg assistant"><div class="typing-indicator"><div class="typing-dot"></div><div class="typing-dot"></div><div class="typing-dot"></div></div></div>`;
     }
@@ -1033,7 +1143,8 @@ async function sendChatMessage() {
         const data = await res.json();
         _chatBusy = false;
         sendBtn.disabled = false;
-        _addMsg("assistant", data.message || (res.ok ? "Done." : (data.detail || "Something went wrong.")));
+        const text = data.message || (res.ok ? "Done." : (data.detail || "Something went wrong."));
+        _addMsg("assistant", text, res.ok ? data : null);
     } catch(e) {
         _chatBusy = false;
         sendBtn.disabled = false;
@@ -1049,6 +1160,17 @@ function chatPreset(q) {
 
 document.getElementById("chat-input")?.addEventListener("keydown", e => {
     if (e.key === "Enter") { e.preventDefault(); sendChatMessage(); }
+});
+
+// Suggestion chip clicks — delegated so it survives innerHTML re-renders
+document.getElementById("chat-messages")?.addEventListener("click", e => {
+    const btn = e.target.closest(".chat-suggestion");
+    if (!btn) return;
+    const q = btn.dataset.q;
+    if (!q) return;
+    const input = document.getElementById("chat-input");
+    if (input) input.value = q;
+    sendChatMessage();
 });
 
 load();

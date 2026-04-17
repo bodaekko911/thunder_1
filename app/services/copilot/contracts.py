@@ -9,6 +9,7 @@ class ParsedDashboardIntent:
     parameters: dict = field(default_factory=dict)
     entity_ids: list[int] = field(default_factory=list)
     comparison_baseline: str | None = None
+    confidence: float = 0.0
 
 
 @dataclass(frozen=True)

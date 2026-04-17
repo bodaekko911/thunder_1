@@ -14,6 +14,10 @@ from app.services.copilot.contracts import ParsedDashboardIntent
 def _parse_iso_date(value: Any) -> date | None:
     if not value:
         return None
+    try:
+        return date.fromisoformat(str(value))
+    except (ValueError, TypeError):
+        return None
 
 
 def _month_range_from_value(value: Any) -> tuple[date, date] | None:
@@ -25,10 +29,6 @@ def _month_range_from_value(value: Any) -> tuple[date, date] | None:
         return None
     last_day = calendar.monthrange(year, month_number)[1]
     return date(year, month_number, 1), date(year, month_number, last_day)
-    try:
-        return date.fromisoformat(str(value))
-    except ValueError:
-        return None
 
 
 async def _load_latest_session(db, *, user_id: int, channel: str) -> AssistantSession | None:
