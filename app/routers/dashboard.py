@@ -178,13 +178,25 @@ async def dashboard_data(db: AsyncSession = Depends(get_async_session)):
 
     # ── RECENT TRANSACTIONS (sales + refunds mixed, sorted by time) ──────────
     inv_result = await db.execute(
-        select(Invoice).where(Invoice.status == "paid").order_by(Invoice.created_at.desc()).limit(12)
+        select(
+            Invoice.invoice_number,
+            Invoice.customer_id,
+            Invoice.total,
+            Invoice.payment_method,
+            Invoice.created_at,
+        ).where(Invoice.status == "paid").order_by(Invoice.created_at.desc()).limit(12)
     )
-    recent_invoices = inv_result.scalars().all()
+    recent_invoices = inv_result.all()
     ref_result = await db.execute(
-        select(RetailRefund).order_by(RetailRefund.created_at.desc()).limit(6)
+        select(
+            RetailRefund.refund_number,
+            RetailRefund.customer_id,
+            RetailRefund.total,
+            RetailRefund.refund_method,
+            RetailRefund.created_at,
+        ).order_by(RetailRefund.created_at.desc()).limit(6)
     )
-    recent_refunds = ref_result.scalars().all()
+    recent_refunds = ref_result.all()
 
     recent_sales = []
     for i in recent_invoices:
