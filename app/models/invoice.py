@@ -18,6 +18,7 @@ class Invoice(Base):
     total          = Column(Numeric(12, 2), default=0)
     notes          = Column(Text)
     created_at     = Column(DateTime(timezone=True), server_default=func.now())
+    import_batch_id = Column(String(64), nullable=True, index=True)
 
     customer = relationship("Customer", back_populates="invoices")
     user     = relationship("User")

@@ -1,14 +1,18 @@
-from fastapi import APIRouter, UploadFile, File, Depends
-from fastapi.responses import HTMLResponse
+from fastapi import APIRouter, Form, UploadFile, File, Depends
+from fastapi.responses import HTMLResponse, StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import delete, select
 import openpyxl, io
 
 from app.core.permissions import require_permission
+from app.core.security import get_current_user
 from app.database import get_async_session
+from app.models.invoice import Invoice
+from app.models.accounting import Journal
+from app.models.inventory import StockMove
 from app.models.product import Product
 from app.models.customer import Customer
-from app.models.inventory import StockMove
+from app.services.sales_import_service import import_sales
 
 router = APIRouter(
     prefix="/import",
@@ -270,6 +274,200 @@ async def import_customers(file: UploadFile = File(...), db: AsyncSession = Depe
             "message": f"Done: {created} imported, {skipped} skipped"}
 
 
+# ── SALES IMPORT ───────────────────────────────────────
+
+@router.post("/api/sales")
+async def import_sales_endpoint(
+    file: UploadFile = File(...),
+    dry_run: bool = Form(True),
+    mode: str = Form("history_only"),
+    force: bool = Form(False),
+    db: AsyncSession = Depends(get_async_session),
+    current_user=Depends(get_current_user),
+):
+    """Import historical retail sales from an Excel file.
+
+    dry_run=True (default): validate and preview without writing anything.
+    mode: history_only | with_journals | with_stock_and_journals
+    force=True: skip duplicate detection and re-import even if records exist.
+    """
+    contents = await file.read()
+    return await import_sales(
+        db=db,
+        workbook_bytes=contents,
+        filename=file.filename or "upload.xlsx",
+        current_user_id=current_user.id,
+        dry_run=dry_run,
+        mode=mode,
+        force=force,
+    )
+
+
+@router.get("/api/sales/template")
+async def download_sales_template(_=Depends(get_current_user)):
+    """Return a pre-filled Excel template for the historical sales import."""
+    from openpyxl.styles import Font, PatternFill, Alignment
+    from openpyxl.utils import get_column_letter
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Sales"
+
+    headers = ["SKU", "Item", "QTY", "Price", "Customer", "Date"]
+    hdr_font = Font(bold=True, color="00FF9D")
+    hdr_fill = PatternFill("solid", fgColor="0F1424")
+    for col, h in enumerate(headers, 1):
+        c = ws.cell(1, col, h)
+        c.font = hdr_font
+        c.fill = hdr_fill
+        c.alignment = Alignment(horizontal="center")
+    for col, w in enumerate([14, 28, 8, 10, 22, 14], 1):
+        ws.column_dimensions[get_column_letter(col)].width = w
+    ws.append(["SKU-001", "Olive Oil 500ml",  3,  15.50, "Ahmed Al-Rashid", "2026-01-15"])
+    ws.append(["SKU-002", "Tahini 250g",      10,  8.00, "Ahmed Al-Rashid", "2026-01-15"])
+    ws.append(["SKU-001", "Olive Oil 500ml",  1,  15.50, "Sara Khalil",     "2026-01-20"])
+
+    readme = wb.create_sheet("README")
+    readme.column_dimensions["A"].width = 20
+    readme.column_dimensions["B"].width = 70
+    readme.append(["Column", "Rules"])
+    readme["A1"].font = Font(bold=True)
+    readme["B1"].font = Font(bold=True)
+    rules = [
+        ("SKU",      "Required. Must match a product SKU in the ERP (whitespace stripped). Numeric-looking SKUs are normalised (e.g. 12345.0 → 12345)."),
+        ("Item",     "Optional. Product description — used only in error messages when the SKU is not found. Not stored on the invoice."),
+        ("QTY",      "Required. Numeric, must be > 0. Decimals accepted."),
+        ("Price",    "Required. Unit price at the time of sale. May differ from the current product price. Must be >= 0."),
+        ("Customer", "Optional. Customer name. Leave blank for Walk-in Customer. If the name does not already exist, a new Customer record is created automatically."),
+        ("Date",     "Required. Must be >= 2026-01-01. Accepted formats: YYYY-MM-DD, DD/MM/YYYY, MM/DD/YYYY. Excel date cells are also accepted."),
+        ("", ""),
+        ("Grouping", "Multiple rows with the same Customer + Date are combined into a single invoice. Leave Customer blank and they go to the Walk-in invoice for that date."),
+        ("Dry run",  "Always preview with Dry run checked first. Uncheck Dry run only for the final confirmed import."),
+    ]
+    for key, val in rules:
+        readme.append([key, val])
+        if key:
+            readme.cell(readme.max_row, 1).font = Font(bold=True)
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    return StreamingResponse(
+        buf,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": "attachment; filename=sales_import_template.xlsx"},
+    )
+
+
+@router.get("/api/sales/batches")
+async def list_import_batches(
+    db: AsyncSession = Depends(get_async_session),
+    _=Depends(get_current_user),
+):
+    """Return a summary of recent historical-import batches."""
+    _r = await db.execute(
+        select(
+            Invoice.import_batch_id,
+            Invoice.notes,
+        )
+        .where(Invoice.import_batch_id.isnot(None))
+        .distinct()
+    )
+    batch_rows = _r.all()
+
+    batches = []
+    for (batch_id, notes) in batch_rows:
+        _stats = await db.execute(
+            select(Invoice).where(Invoice.import_batch_id == batch_id)
+        )
+        invs = _stats.scalars().all()
+        total = sum(float(i.total) for i in invs)
+        earliest = min((i.created_at for i in invs), default=None)
+        batches.append({
+            "batch_id":     batch_id,
+            "filename":     _extract_filename(notes),
+            "ran_on":       earliest.date().isoformat() if earliest else None,
+            "invoice_count": len(invs),
+            "total_value":  round(total, 2),
+        })
+
+    # Newest first
+    batches.sort(key=lambda b: b["ran_on"] or "", reverse=True)
+    return {"batches": batches}
+
+
+def _extract_filename(notes: str | None) -> str:
+    """Pull the filename out of 'Imported from <filename> on <date>'."""
+    if not notes:
+        return ""
+    try:
+        return notes.split("Imported from ")[1].split(" on ")[0]
+    except (IndexError, AttributeError):
+        return notes[:40] if notes else ""
+
+
+@router.delete("/api/sales/batch/{batch_id}")
+async def delete_import_batch(
+    batch_id: str,
+    db: AsyncSession = Depends(get_async_session),
+    _=Depends(get_current_user),
+):
+    """Revert a historical-sales import batch.
+
+    Deletes all invoices in the batch (cascades to invoice_items), removes any
+    StockMoves and Journals that reference those invoice IDs, and (for
+    with_stock_and_journals imports) restores product.stock.
+    """
+    _r = await db.execute(
+        select(Invoice).where(Invoice.import_batch_id == batch_id)
+    )
+    invoices = _r.scalars().all()
+    if not invoices:
+        return {"ok": True, "deleted_invoices": 0}
+
+    invoice_ids = [inv.id for inv in invoices]
+
+    # 1. Restore stock for any stock moves that were written by this batch
+    _sm = await db.execute(
+        select(StockMove).where(
+            StockMove.ref_type == "invoice",
+            StockMove.ref_id.in_(invoice_ids),
+        )
+    )
+    for move in _sm.scalars().all():
+        _pr = await db.execute(
+            select(Product).where(Product.id == move.product_id)
+        )
+        product = _pr.scalar_one_or_none()
+        if product and move.qty is not None:
+            product.stock = float(product.stock) - float(move.qty)
+
+    # 2. Delete stock moves
+    await db.execute(
+        delete(StockMove).where(
+            StockMove.ref_type == "invoice",
+            StockMove.ref_id.in_(invoice_ids),
+        )
+    )
+
+    # 3. Delete journals (cascade removes journal_entries)
+    _jr = await db.execute(
+        select(Journal).where(
+            Journal.ref_type == "invoice",
+            Journal.ref_id.in_(invoice_ids),
+        )
+    )
+    for journal in _jr.scalars().all():
+        await db.delete(journal)
+
+    # 4. Delete invoices (cascade removes invoice_items)
+    for inv in invoices:
+        await db.delete(inv)
+
+    await db.commit()
+    return {"ok": True, "deleted_invoices": len(invoices)}
+
+
 # ── UI ─────────────────────────────────────────────────
 @router.get("/", response_class=HTMLResponse)
 def import_ui():
@@ -489,6 +687,82 @@ td{padding:8px 12px;border-top:1px solid var(--border);color:var(--sub);white-sp
         </div>
 
     </div>
+
+    <div class="section-label">Historical Sales</div>
+    <div class="import-grid" style="grid-template-columns:minmax(340px,680px)">
+
+        <!-- HISTORICAL SALES -->
+        <div class="import-card">
+            <div class="import-card-header">
+                <div class="import-card-icon" style="background:rgba(251,146,60,.1)">🧾</div>
+                <div>
+                    <div class="import-card-title">Historical Sales</div>
+                    <div class="import-card-sub">Import past retail sales from Excel — one-time backfill</div>
+                </div>
+            </div>
+            <div class="import-card-body">
+                <div class="col-map">
+                    <div class="col-map-title">Expected Excel Columns</div>
+                    <div class="col-row"><span class="col-excel">SKU</span><span class="col-arrow">→</span><span class="col-field">Must match existing product</span><span style="color:var(--danger);font-size:10px;margin-left:4px">required</span></div>
+                    <div class="col-row"><span class="col-excel">Item</span><span class="col-arrow">→</span><span class="col-field">Product name (informational)</span><span class="col-opt">optional</span></div>
+                    <div class="col-row"><span class="col-excel">QTY</span><span class="col-arrow">→</span><span class="col-field">Quantity sold (&gt; 0)</span><span style="color:var(--danger);font-size:10px;margin-left:4px">required</span></div>
+                    <div class="col-row"><span class="col-excel">Price</span><span class="col-arrow">→</span><span class="col-field">Unit price at time of sale</span><span style="color:var(--danger);font-size:10px;margin-left:4px">required</span></div>
+                    <div class="col-row"><span class="col-excel">Customer</span><span class="col-arrow">→</span><span class="col-field">Customer name (blank = Walk-in)</span><span class="col-opt">optional</span></div>
+                    <div class="col-row"><span class="col-excel">Date</span><span class="col-arrow">→</span><span class="col-field">Sale date ≥ 2026-01-01</span><span style="color:var(--danger);font-size:10px;margin-left:4px">required</span></div>
+                    <div style="margin-top:8px">
+                        <a href="/import/api/sales/template" download style="font-size:11px;color:var(--blue);text-decoration:none">⬇ Download template</a>
+                    </div>
+                </div>
+
+                <!-- Mode radios -->
+                <div style="background:var(--card2);border:1px solid var(--border);border-radius:10px;padding:12px 14px;">
+                    <div class="col-map-title" style="margin-bottom:10px">Import Mode</div>
+                    <label style="display:flex;align-items:flex-start;gap:8px;margin-bottom:10px;cursor:pointer;font-size:13px;color:var(--sub)">
+                        <input type="radio" name="sales-mode" value="history_only" checked style="margin-top:2px;accent-color:var(--green)">
+                        <span><b style="color:var(--text)">Reports only</b> — recommended<br><span style="font-size:11px;color:var(--muted)">Creates Invoice records only. No stock adjustment. No accounting entries.</span></span>
+                    </label>
+                    <label style="display:flex;align-items:flex-start;gap:8px;margin-bottom:10px;cursor:pointer;font-size:13px;color:var(--sub)">
+                        <input type="radio" name="sales-mode" value="with_journals" style="margin-top:2px;accent-color:var(--blue)">
+                        <span><b style="color:var(--text)">Also post to accounting</b><br><span style="font-size:11px;color:var(--muted)">Posts 1000/4000 journal entries dated to the historical sale date.</span></span>
+                    </label>
+                    <label style="display:flex;align-items:flex-start;gap:8px;cursor:pointer;font-size:13px;color:var(--sub)">
+                        <input type="radio" name="sales-mode" value="with_stock_and_journals" style="margin-top:2px;accent-color:var(--danger)">
+                        <span><b style="color:var(--danger)">Also adjust stock — use with extreme caution</b><br><span style="font-size:11px;color:var(--muted)">Full live-sale behaviour: decrements stock, writes StockMoves, posts journals. Almost never appropriate for backfills.</span></span>
+                    </label>
+                </div>
+
+                <!-- Options -->
+                <div style="display:flex;flex-direction:column;gap:8px;">
+                    <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:13px;color:var(--sub)">
+                        <input type="checkbox" id="chk-dryrun" checked style="accent-color:var(--green)">
+                        <span><b style="color:var(--text)">Dry run</b> — preview without saving (recommended first step)</span>
+                    </label>
+                    <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:13px;color:var(--sub)">
+                        <input type="checkbox" id="chk-force" style="accent-color:var(--warn)">
+                        <span>Force import even if duplicates detected</span>
+                    </label>
+                </div>
+
+                <div class="drop-zone" id="drop-sales" ondragover="onDrag(event,'sales')" ondragleave="offDrag('sales')" ondrop="onDrop(event,'sales')">
+                    <input type="file" accept=".xlsx,.xls" onchange="onFile(this,'sales')">
+                    <div class="drop-icon">🧾</div>
+                    <div class="drop-text">Click or drag sales.xlsx here</div>
+                    <div class="drop-hint" id="hint-sales">Rows with same Customer + Date become one invoice</div>
+                </div>
+                <div class="progress-wrap" id="prog-sales"><div class="progress-fill" id="progfill-sales" style="width:0%"></div></div>
+                <div id="preview-sales"></div>
+                <div class="result-box" id="res-sales"></div>
+                <button class="import-btn" style="background:linear-gradient(135deg,var(--orange),var(--warn));color:#1a0a00" id="btn-sales" onclick="doImportSales()" disabled>⬆ Import Sales</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Recent Batches -->
+    <div class="section-label">Recent Sales Import Batches</div>
+    <div id="batches-panel" style="background:var(--card);border:1px solid var(--border);border-radius:12px;padding:18px 20px;">
+        <div style="color:var(--muted);font-size:13px">Loading…</div>
+    </div>
+
 </div>
 
 <script>
@@ -530,7 +804,7 @@ async function logout(){
 }
   initializeColorMode();
   initUser();
-  const files = {products:null, stock:null, customers:null};
+  const files = {products:null, stock:null, customers:null, sales:null};
 
 function onDrag(e,t){ e.preventDefault(); document.getElementById('drop-'+t).classList.add('drag-over'); }
 function offDrag(t){ document.getElementById('drop-'+t).classList.remove('drag-over'); }
@@ -608,6 +882,145 @@ async function doImport(type){
     }
     showResult(type, msg, kind);
 }
+
+// ── Historical Sales ────────────────────────────────────────────────────────
+
+async function doImportSales() {
+    const f = files['sales'];
+    if (!f) { showResult('sales', 'Please select a file first', 'err'); return; }
+    const btn = document.getElementById('btn-sales');
+    btn.disabled = true; btn.innerHTML = '⏳ Processing…';
+    showProg('sales', 40); showResult('sales', '', '');
+
+    const mode    = document.querySelector('input[name="sales-mode"]:checked').value;
+    const dryRun  = document.getElementById('chk-dryrun').checked;
+    const force   = document.getElementById('chk-force').checked;
+
+    const fd = new FormData();
+    fd.append('file',    f);
+    fd.append('dry_run', dryRun ? 'true' : 'false');
+    fd.append('mode',    mode);
+    fd.append('force',   force ? 'true' : 'false');
+
+    const res  = await fetch('/import/api/sales', { method: 'POST', body: fd });
+    const data = await res.json();
+    showProg('sales', 100);
+    btn.disabled = false;
+    btn.innerHTML = '⬆ Import Sales';
+
+    if (data.error) { showResult('sales', '✗ ' + data.error, 'err'); return; }
+
+    renderSalesResult(data, dryRun);
+    loadBatches();
+}
+
+function renderSalesResult(data, wasDryRun) {
+    const s = data.summary || {};
+    const isDry = data.dry_run;
+    const created = isDry ? s.invoices_would_create : s.invoices_created;
+    const label   = isDry ? 'would create' : 'created';
+
+    let html = `<div style="font-size:13px">
+        ${isDry ? '<span style="color:var(--warn)">⚠ DRY RUN — nothing was saved</span><br>' : ''}
+        <b>${s.rows_read}</b> rows read &nbsp;·&nbsp;
+        <b>${created}</b> invoices ${label} &nbsp;·&nbsp;
+        <b>${s.line_items}</b> line items &nbsp;·&nbsp;
+        <b>${s.rows_skipped}</b> skipped<br>
+        <span style="color:var(--sub);font-size:12px">
+            Customers auto-created: <b>${s.customers_auto_created}</b> &nbsp;·&nbsp;
+            Date range: ${s.earliest_date||'–'} → ${s.latest_date||'–'} &nbsp;·&nbsp;
+            Total value: <b>${(s.total_value||0).toFixed(2)}</b>
+        </span>`;
+
+    if (data.batch_id) {
+        html += `<br><span style="color:var(--muted);font-size:11px">Batch ID: ${data.batch_id}</span>`;
+    }
+
+    if (data.errors && data.errors.length) {
+        html += `<br><br><b style="color:var(--danger)">${data.errors.length} error(s):</b>
+        <div style="max-height:180px;overflow-y:auto;margin-top:6px">
+        <table style="font-size:11px;width:100%">
+            <thead><tr><th>Row</th><th>SKU</th><th>Customer</th><th>Date</th><th>Reason</th></tr></thead>
+            <tbody>${data.errors.map(e=>`<tr>
+                <td>${e.row}</td><td style="font-family:var(--mono)">${e.sku}</td>
+                <td>${e.customer}</td><td>${e.date}</td>
+                <td style="color:var(--danger)">${e.reason}</td>
+            </tr>`).join('')}</tbody>
+        </table></div>`;
+    }
+
+    // If dry_run + no errors → show "Run real import" button
+    if (isDry && (!data.errors || data.errors.length === 0)) {
+        html += `<br><br>
+        <button onclick="runRealImport()" style="width:100%;padding:10px;border-radius:8px;
+            background:linear-gradient(135deg,var(--green),var(--lime));color:#0a1a00;
+            font-weight:800;font-size:13px;border:none;cursor:pointer;">
+            ✓ Run real import
+        </button>`;
+    }
+
+    html += '</div>';
+    const kind = data.errors && data.errors.length ? 'warn' : 'ok';
+    showResult('sales', html, kind);
+}
+
+async function runRealImport() {
+    const f = files['sales'];
+    if (!f) { return; }
+    document.getElementById('chk-dryrun').checked = false;
+    await doImportSales();
+}
+
+// ── Recent batches ──────────────────────────────────────────────────────────
+
+async function loadBatches() {
+    const panel = document.getElementById('batches-panel');
+    try {
+        const r = await fetch('/import/api/sales/batches');
+        const d = await r.json();
+        const batches = d.batches || [];
+        if (!batches.length) {
+            panel.innerHTML = '<div style="color:var(--muted);font-size:12px">No import batches found.</div>';
+            return;
+        }
+        panel.innerHTML = `<table style="width:100%;font-size:12px">
+            <thead><tr>
+                <th>Batch ID</th><th>File</th><th>Date</th>
+                <th>Invoices</th><th>Total Value</th><th></th>
+            </tr></thead>
+            <tbody>${batches.map(b=>`<tr>
+                <td style="font-family:var(--mono);font-size:10px">${b.batch_id.slice(0,12)}…</td>
+                <td>${b.filename}</td>
+                <td>${b.ran_on||'–'}</td>
+                <td>${b.invoice_count}</td>
+                <td>${b.total_value.toFixed(2)}</td>
+                <td><button onclick="revertBatch('${b.batch_id}')"
+                    style="padding:4px 10px;border-radius:6px;border:1px solid var(--danger);
+                    background:rgba(255,77,109,.08);color:var(--danger);
+                    font-size:11px;cursor:pointer;font-family:var(--sans)">
+                    Revert
+                </button></td>
+            </tr>`).join('')}
+            </tbody></table>`;
+    } catch(e) {
+        panel.innerHTML = '<div style="color:var(--muted);font-size:12px">Could not load batches.</div>';
+    }
+}
+
+async function revertBatch(batchId) {
+    if (!confirm('Delete all invoices in batch ' + batchId.slice(0,8) + '…? This cannot be undone.')) return;
+    const r = await fetch('/import/api/sales/batch/' + batchId, { method: 'DELETE' });
+    const d = await r.json();
+    if (d.ok) {
+        showResult('sales', '✓ Batch reverted — ' + d.deleted_invoices + ' invoices deleted.', 'ok');
+    } else {
+        showResult('sales', '✗ Revert failed', 'err');
+    }
+    loadBatches();
+}
+
+// Load batches on page load
+loadBatches();
 </script>
 </body>
 </html>"""

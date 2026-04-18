@@ -14,8 +14,23 @@ from app.services.location_inventory_service import sync_product_stock_to_defaul
 from app.core.log import record
 
 
-async def _post_journal(db: AsyncSession, description: str, entries: list, user_id=None):
-    journal = Journal(ref_type="invoice", description=description, user_id=user_id)
+async def post_journal(
+    db: AsyncSession,
+    description: str,
+    entries: list,
+    user_id=None,
+    created_at=None,
+):
+    """Post a double-entry journal.
+
+    ``created_at`` is optional; when supplied (e.g. for historical imports) the
+    journal is stamped with that datetime rather than the DB server default.
+    When omitted the server default (now()) applies.
+    """
+    kwargs = dict(ref_type="invoice", description=description, user_id=user_id)
+    if created_at is not None:
+        kwargs["created_at"] = created_at
+    journal = Journal(**kwargs)
     db.add(journal)
     await db.flush()
     for code, debit, credit in entries:
@@ -29,7 +44,7 @@ async def _post_journal(db: AsyncSession, description: str, entries: list, user_
             acc.balance += Decimal(str(debit)) - Decimal(str(credit))
 
 
-async def _get_walk_in_customer_id(db: AsyncSession) -> int:
+async def get_walk_in_customer_id(db: AsyncSession) -> int:
     _r = await db.execute(select(Customer).where(Customer.name == "Walk-in Customer"))
     customer = _r.scalar_one_or_none()
     if not customer:
@@ -74,7 +89,7 @@ async def create_invoice(db: AsyncSession, data: InvoiceCreate, user_id: int) ->
         is_settle_later = getattr(data, "settle_later", False)
         payment_method = getattr(data, "payment_method", "cash") or "cash"
         status = "unpaid" if is_settle_later else "paid"
-        customer_id = data.customer_id or await _get_walk_in_customer_id(db)
+        customer_id = data.customer_id or await get_walk_in_customer_id(db)
 
         invoice = Invoice(
             customer_id=customer_id,
@@ -125,12 +140,12 @@ async def create_invoice(db: AsyncSession, data: InvoiceCreate, user_id: int) ->
 
         if not is_settle_later:
             acc_code = "1000"
-            await _post_journal(db, f"Sale - {invoice.invoice_number}", [
+            await post_journal(db, f"Sale - {invoice.invoice_number}", [
                 (acc_code, round(total, 2), 0),
                 ("4000", 0, round(total, 2)),
             ], user_id=user_id)
         else:
-            await _post_journal(db, f"Unpaid Sale - {invoice.invoice_number}", [
+            await post_journal(db, f"Unpaid Sale - {invoice.invoice_number}", [
                 ("1100", round(total, 2), 0),
                 ("4000", 0, round(total, 2)),
             ], user_id=user_id)
