@@ -2573,12 +2573,18 @@ let searchTimer      = null;
 let isAdmin = false; // set by initUser() via configureB2BPermissions(u)
 
 async function init(){
-    // Seed deferred revenue account
-    await fetch("/b2b/api/seed-accounts", {method:"POST"});
-    allProducts = await (await fetch("/b2b/api/products-list")).json();
-    buildB2BProductDatalist();
-    await loadStats();
-    await loadClients();
+    try {
+        // Seed deferred revenue account
+        await fetch("/b2b/api/seed-accounts", {method:"POST"});
+        const prodRes = await fetch("/b2b/api/products-list");
+        allProducts = await prodRes.json();
+        buildB2BProductDatalist();
+        await loadStats();
+        await loadClients();
+    } catch (err) {
+        console.error("Initialization failed:", err);
+        showToast("Failed to initialize B2B data. Check connection or permissions.");
+    }
 }
 
 async function loadStats(){
@@ -2615,17 +2621,21 @@ function switchTab(tab){
 function onClientSearch(){ clearTimeout(searchTimer); searchTimer=setTimeout(loadClients,300); }
 
 async function loadClients(){
-    let q = document.getElementById("client-search").value.trim();
-    allClients = await (await fetch(`/b2b/api/clients${q?"?q="+encodeURIComponent(q):""}`)).json();
-    if(!allClients.length){
-        document.getElementById("clients-body").innerHTML=`<tr><td colspan="7" style="text-align:center;color:var(--muted);padding:40px">No clients yet.</td></tr>`;
-        return;
-    }
-    const termsLabel={cash:"💵 Cash",full_payment:"📋 Full Payment",consignment:"🔄 Consignment"};
-    document.getElementById("clients-body").innerHTML = allClients.map(c=>`
-        <tr>
-            <td class="name">${c.name}</td>
-            <td style="font-size:12px">${c.contact_person}</td>
+    try {
+        let q = document.getElementById("client-search").value.trim();
+        const res = await fetch(`/b2b/api/clients${q?"?q="+encodeURIComponent(q):""}`);
+        if (!res.ok) throw new Error(`API Error: ${res.status}`);
+        allClients = await res.json();
+        
+        if(!allClients.length){
+            document.getElementById("clients-body").innerHTML=`<tr><td colspan="7" style="text-align:center;color:var(--muted);padding:40px">No clients yet.</td></tr>`;
+            return;
+        }
+        const termsLabel={cash:"💵 Cash",full_payment:"📋 Full Payment",consignment:"🔄 Consignment"};
+        document.getElementById("clients-body").innerHTML = allClients.map(c=>`
+            <tr>
+                <td class="name">${c.name}</td>
+                <td style="font-size:12px">${c.contact_person}</td>
             <td style="font-family:var(--mono);font-size:12px">${c.phone}</td>
             <td><span class="badge badge-${c.payment_terms}">${termsLabel[c.payment_terms]||c.payment_terms}</span></td>
             <td style="font-family:var(--mono);color:var(--blue)">${c.credit_limit>0?c.credit_limit.toFixed(1)+"%":"—"}</td>
@@ -2639,6 +2649,10 @@ async function loadClients(){
                 ${hasPermission("action_b2b_delete")?`<button class="action-btn danger" onclick="deleteClient(${c.id},'${c.name.replace(/'/g,"\\'")}')">Remove</button>`:""}
             </td>
         </tr>`).join("");
+    } catch (err) {
+        console.error(err);
+        document.getElementById("clients-body").innerHTML = `<tr><td colspan="7" style="text-align:center;color:var(--danger);padding:40px">Error loading clients.</td></tr>`;
+    }
 }
 
 function openClientModal(){
@@ -3203,9 +3217,15 @@ async function deleteInvoice(id,number){
 
 /* ── INVOICES TABLE ── */
 async function loadInvoices(){
-    let data=await (await fetch("/b2b/api/invoices?limit=200")).json();
-    allInvoices=data.invoices;
-    renderInvoices(allInvoices);
+    try {
+        const res = await fetch("/b2b/api/invoices?limit=200");
+        if (!res.ok) throw new Error(`API Error: ${res.status}`);
+        let data = await res.json();
+        allInvoices = data.invoices;
+        renderInvoices(allInvoices);
+    } catch (err) {
+        document.getElementById("invoices-body").innerHTML = `<tr><td colspan="9" style="text-align:center;color:var(--danger);padding:40px">Error loading invoices.</td></tr>`;
+    }
 }
 
 function filterInvoices(){
