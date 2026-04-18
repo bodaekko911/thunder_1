@@ -1,9 +1,11 @@
 from contextlib import asynccontextmanager
 from pathlib import Path
 
+from urllib.parse import quote
+
 from fastapi import Depends, FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -23,6 +25,53 @@ from app.core.rate_limit import limiter
 from app.database import get_async_session
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
+
+# ── HTML shown when an unhandled 500 occurs during an HTML page navigation ─
+_ERROR_HTML_PAGE = """<!DOCTYPE html>
+<html><head>
+<meta charset="UTF-8">
+<title>Something went wrong</title>
+<style>
+  :root{--card:rgba(15,20,36,0.88);--border:rgba(255,255,255,0.08);--text:#fff;--sub:#8899bb}
+  *{margin:0;padding:0;box-sizing:border-box}
+  body{font-family:'Segoe UI',sans-serif;min-height:100vh;display:flex;align-items:center;
+       justify-content:center;color:var(--text);padding:24px;
+       background:linear-gradient(rgba(6,8,16,.68),rgba(6,8,16,.68)),
+                 url('/static/home1.jpg.jpeg') center/cover no-repeat}
+  .box{background:var(--card);border:1px solid var(--border);border-radius:16px;padding:40px;
+       width:360px;backdrop-filter:blur(8px);box-shadow:0 24px 60px rgba(0,0,0,.35);text-align:center}
+  h2{color:#ff4d6d;font-size:22px;margin-bottom:12px}
+  p{color:var(--sub);font-size:14px;margin-bottom:28px}
+  a{display:inline-block;padding:12px 28px;background:linear-gradient(135deg,#00ff9d,#00d4ff);
+    border-radius:10px;color:#021a10;font-weight:800;font-size:14px;text-decoration:none}
+  a:hover{filter:brightness(1.1)}
+</style>
+</head><body>
+<div class="box">
+  <h2>Something went wrong</h2>
+  <p>An unexpected error occurred. Please try again or go back.</p>
+  <a href="javascript:history.back()">Go back</a>
+</div>
+</body></html>"""
+
+
+async def _try_silent_refresh(refresh_token_value: str):
+    """
+    Open a fresh DB session and attempt to mint a new access token from the
+    given raw refresh-token value.  Returns the new token string on success,
+    or None on any failure, so callers can safely fall through to a login
+    redirect without raising.
+
+    Defined at module level (not inside create_app) so tests can monkeypatch
+    ``app.app_factory._try_silent_refresh`` without a real DB connection.
+    """
+    from app.db.session import AsyncSessionLocal
+    from app.core import security
+    try:
+        async with AsyncSessionLocal() as db:
+            return await security.try_refresh_access_token(db, refresh_token_value)
+    except Exception:
+        return None
 
 
 @asynccontextmanager
@@ -86,10 +135,82 @@ def create_app() -> FastAPI:
                 "query": str(request.url.query) or None,
             },
         )
+        # Return a styled HTML page for browser navigations so users never see
+        # raw JSON from an unhandled 500.  API callers (JSON Accept) still get
+        # the machine-readable JSON body.
+        if (
+            request.method == "GET"
+            and "text/html" in request.headers.get("accept", "")
+        ):
+            return HTMLResponse(content=_ERROR_HTML_PAGE, status_code=500)
         return JSONResponse(
             status_code=500,
             content={"detail": "An internal server error occurred."},
         )
+
+    # ── Session-expiry middleware ────────────────────────────────────────────
+    # Intercepts 401 responses on HTML GET navigations (e.g. the browser
+    # requests /dashboard after the access token has expired):
+    #
+    #  • If a refresh_token cookie is present → attempt a silent refresh and
+    #    307-redirect back to the same URL with the new access_token cookie so
+    #    the browser retries with a fresh token.
+    #  • Otherwise → 307-redirect to /?next=<path>&reason=expired so the login
+    #    page can show a friendly "session expired" message and bounce the user
+    #    back after sign-in.
+    #
+    # Only HTML GETs are rewritten.  JSON/API callers and POST/PUT/DELETE
+    # requests keep receiving the plain 401 JSON so auth-guard.js keeps
+    # working and API clients are unaffected.
+    # /auth/* and /health* are explicitly excluded.
+    @app.middleware("http")
+    async def _session_expiry(request: Request, call_next):
+        response = await call_next(request)
+
+        if (
+            response.status_code == 401
+            and request.method == "GET"
+            and "text/html" in request.headers.get("accept", "")
+            and not request.url.path.startswith("/auth/")
+            and not request.url.path.startswith("/health")
+        ):
+            # Reconstruct the original path + query so ?next= roundtrips.
+            path = request.url.path
+            if request.url.query:
+                path += "?" + request.url.query
+
+            refresh_token_value = request.cookies.get("refresh_token")
+            if refresh_token_value:
+                new_token = await _try_silent_refresh(refresh_token_value)
+                if new_token:
+                    # Redirect to the same URL; the new cookie rides along so
+                    # the retry succeeds without another round-trip.
+                    redirect = RedirectResponse(url=path, status_code=307)
+                    redirect.set_cookie(
+                        key="access_token",
+                        value=new_token,
+                        httponly=True,
+                        samesite="lax",
+                        secure=settings.COOKIE_SECURE,
+                        path="/",
+                        max_age=settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60,
+                    )
+                    redirect.set_cookie(
+                        key="logged_in",
+                        value="true",
+                        httponly=False,
+                        samesite="lax",
+                        secure=settings.COOKIE_SECURE,
+                        path="/",
+                        max_age=settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60,
+                    )
+                    return redirect
+
+            # No valid refresh token — send to login with context.
+            login_url = "/?next=" + quote(path, safe="") + "&reason=expired"
+            return RedirectResponse(url=login_url, status_code=307)
+
+        return response
 
     for router in ROUTERS:
         app.include_router(router)

@@ -21,6 +21,7 @@ from app.core.security import (
     get_current_user,
     hash_password,
     password_needs_rehash,
+    try_refresh_access_token,
     verify_password,
 )
 from app.database import get_async_session
@@ -137,6 +138,16 @@ def login_page():
             text-align: center;
             display: none;
         }
+        #session-msg {
+            color: var(--sub);
+            font-size: 13px;
+            margin-bottom: 18px;
+            padding: 10px 12px;
+            background: rgba(136, 153, 187, 0.1);
+            border: 1px solid rgba(136, 153, 187, 0.2);
+            border-radius: 8px;
+            display: none;
+        }
         @media (max-width: 480px) {
             body {
                 padding: 16px;
@@ -152,6 +163,8 @@ def login_page():
     <div class="box">
         <h2>Welcome Back</h2>
         <p>Sign in to your ERP system</p>
+
+        <div id="session-msg"></div>
 
         <label>Email</label>
         <input id="email" type="email" placeholder="you@example.com">
@@ -176,6 +189,17 @@ def login_page():
                    url.indexOf("\\r") === -1 &&
                    url.indexOf("\\n") === -1;
         }
+
+        // Show a friendly notice when the server redirected here because the
+        // session expired (?reason=expired), so users know why they landed here.
+        (function () {
+            var reason = new URLSearchParams(window.location.search).get('reason');
+            if (reason === 'expired') {
+                var el = document.getElementById('session-msg');
+                el.textContent = 'Your session expired \u2014 please sign in again to continue.';
+                el.style.display = 'block';
+            }
+        })();
 
         async function login() {
             let res = await fetch("/auth/login", {
@@ -416,21 +440,10 @@ async def refresh(
     if not refresh_token:
         raise HTTPException(status_code=401, detail="No refresh token")
 
-    token_hash = hashlib.sha256(refresh_token.encode()).hexdigest()
-    _r = await db.execute(select(RefreshToken).where(RefreshToken.token_hash == token_hash))
-    rt = _r.scalar_one_or_none()
-
-    now = datetime.now(timezone.utc)
-    if not rt or rt.expires_at.replace(tzinfo=timezone.utc) < now:
+    new_token = await try_refresh_access_token(db, refresh_token)
+    if not new_token:
         raise HTTPException(status_code=401, detail="Refresh token expired or invalid")
 
-    _u = await db.execute(select(User).where(User.id == rt.user_id))
-    user = _u.scalar_one_or_none()
-    if not user or not user.is_active:
-        raise HTTPException(status_code=401, detail="User not found or inactive")
-
-    permissions = serialize_permissions(get_effective_permissions(user.role, user.permissions))
-    new_token = create_access_token({"sub": user.id, "role": user.role, "permissions": permissions})
     response.set_cookie(
         key="access_token",
         value=new_token,

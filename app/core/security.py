@@ -154,3 +154,37 @@ def require_role(*roles: str):
         return current_user
 
     return checker
+
+
+async def try_refresh_access_token(db: AsyncSession, refresh_token_value: str) -> Optional[str]:
+    """
+    Validate a raw refresh-token value and, if valid, mint a new access token.
+    Returns the new token string, or None on any failure (bad/expired token,
+    user not found, user inactive).
+
+    Uses deferred imports to avoid a circular dependency with app.core.permissions,
+    which imports get_current_user from this module.
+
+    Called by both ``POST /auth/refresh`` and the session-expiry middleware in
+    app_factory.py so the DB + token logic lives in exactly one place.
+    """
+    import hashlib
+    from app.models.refresh_token import RefreshToken
+
+    token_hash = hashlib.sha256(refresh_token_value.encode()).hexdigest()
+    result = await db.execute(select(RefreshToken).where(RefreshToken.token_hash == token_hash))
+    rt = result.scalar_one_or_none()
+
+    now = datetime.now(timezone.utc)
+    if not rt or rt.expires_at.replace(tzinfo=timezone.utc) < now:
+        return None
+
+    from app.models.user import User as _User
+    u_result = await db.execute(select(_User).where(_User.id == rt.user_id))
+    user = u_result.scalar_one_or_none()
+    if not user or not user.is_active:
+        return None
+
+    from app.core.permissions import get_effective_permissions, serialize_permissions
+    permissions = serialize_permissions(get_effective_permissions(user.role, user.permissions))
+    return create_access_token({"sub": user.id, "role": user.role, "permissions": permissions})
