@@ -121,7 +121,7 @@ async def run_bootstrap(
     *,
     create_admin: bool,
     create_expense_categories: bool,
-    create_stock_location: bool,
+    create_stock_location: bool = False,
     reset_admin_password: bool,
 ) -> BootstrapSummary:
     summary = BootstrapSummary()

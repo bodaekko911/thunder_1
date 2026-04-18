@@ -161,11 +161,11 @@ def _score_intent(text: str, tokens: list[str], intent_kws: dict) -> float:
 
 
 def _keyword_matches(keyword: str, text: str, tokens: list[str]) -> bool:
-    """Exact substring first; single-word keywords also try token-level fuzzy (cutoff=0.75)."""
+    """Exact substring first; single-word keywords also try conservative token-level fuzzy."""
     if keyword in text:
         return True
     if " " not in keyword:
-        return bool(difflib.get_close_matches(keyword, tokens, n=1, cutoff=0.75))
+        return bool(difflib.get_close_matches(keyword, tokens, n=1, cutoff=0.85))
     return False
 
 

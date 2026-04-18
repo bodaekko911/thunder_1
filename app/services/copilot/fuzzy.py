@@ -4,13 +4,16 @@ from __future__ import annotations
 import difflib
 import re
 
-# Arabic-Indic digits ٠١٢٣٤٥٦٧٨٩ → 0-9
-_ARABIC_INDIC_TABLE = str.maketrans("٠١٢٣٤٥٦٧٨٩", "0123456789")
+_ARABIC_INDIC_TABLE = str.maketrans(
+    "\u0660\u0661\u0662\u0663\u0664\u0665\u0666\u0667\u0668\u0669"
+    "\u06F0\u06F1\u06F2\u06F3\u06F4\u06F5\u06F6\u06F7\u06F8\u06F9",
+    "0123456789" * 2,
+)
 
 
 def normalize(text: str) -> str:
     """Lowercase, strip punctuation (keeps apostrophes/hyphens), collapse whitespace,
-    and convert Arabic-Indic digits (٠-٩ → 0-9)."""
+    and convert Arabic-Indic digits to ASCII digits."""
     text = text.translate(_ARABIC_INDIC_TABLE)
     text = text.lower()
     # keep word chars (\w includes Unicode letters), spaces, apostrophes, hyphens

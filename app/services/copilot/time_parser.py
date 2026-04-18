@@ -5,6 +5,8 @@ import calendar
 import re
 from datetime import date, timedelta
 
+from app.services.copilot import fuzzy
+
 
 def parse_time_expression(text: str, today: date | None = None) -> tuple[date, date] | None:
     """Search `text` for a recognisable time expression and return (date_from, date_to).
@@ -15,7 +17,7 @@ def parse_time_expression(text: str, today: date | None = None) -> tuple[date, d
     if today is None:
         today = date.today()
 
-    t = text.strip()
+    t = fuzzy.normalize(text or "")
 
     # ── variable-length windows ────────────────────────────────────────────────
     # "last N days"  (1-365)

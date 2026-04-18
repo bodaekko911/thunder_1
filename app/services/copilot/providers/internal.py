@@ -16,19 +16,20 @@ class InternalCopilotProvider:
         self.composer = ResponseComposer()
 
     async def answer(self, db, *, question: str, current_user) -> dict:
-        parsed = parse_dashboard_question(question)
+        normalized_question = fuzzy.normalize(question or "")
+        parsed = parse_dashboard_question(normalized_question)
         session = None
         if parsed.intent is None or _requires_followup_context(parsed):
             session = await get_latest_session(db, user_id=current_user.id)
-            contextual = _resolve_contextual_reference(question, parsed, session)
+            contextual = _resolve_contextual_reference(normalized_question, parsed, session)
             if contextual is not None:
                 parsed = contextual
         if parsed.intent is None:
             if session is None:
                 session = await get_latest_session(db, user_id=current_user.id)
-            parsed = _resolve_followup(question, session)
+            parsed = _resolve_followup(normalized_question, session)
         if parsed is None or _requires_followup_context(parsed):
-            if _looks_like_followup(question):
+            if _looks_like_followup(normalized_question):
                 response = self.composer.insufficient_followup()
             else:
                 close_matches = fuzzy.closest_matches(question, SUPPORTED_QUESTION_HINTS, limit=3)
