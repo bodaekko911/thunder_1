@@ -17,6 +17,24 @@ _RUNTIME_SCHEMA_PATCHES: tuple[dict[str, str], ...] = (
         "definition": "NUMERIC(6, 2) DEFAULT 0",
         "backfill": "UPDATE customers SET discount_pct = 0 WHERE discount_pct IS NULL",
     },
+    {
+        "table": "invoices",
+        "column": "import_batch_id",
+        "definition": "VARCHAR(64)",
+        "backfill": "SELECT 1",
+    },
+    {
+        "table": "b2b_invoices",
+        "column": "import_batch_id",
+        "definition": "VARCHAR(64)",
+        "backfill": "SELECT 1",
+    },
+    {
+        "table": "consignments",
+        "column": "import_batch_id",
+        "definition": "VARCHAR(64)",
+        "backfill": "SELECT 1",
+    },
 )
 _CRITICAL_AUTH_TABLES = {"users", "refresh_tokens", "activity_logs"}
 
