@@ -2573,18 +2573,22 @@ let searchTimer      = null;
 let isAdmin = false; // set by initUser() via configureB2BPermissions(u)
 
 async function init(){
+    // Run seeding and data loading independently
+    fetch("/b2b/api/seed-accounts", {method:"POST"}).catch(e => console.warn("Seeding failed", e));
+    
     try {
-        // Seed deferred revenue account
-        await fetch("/b2b/api/seed-accounts", {method:"POST"});
-        const prodRes = await fetch("/b2b/api/products-list");
-        allProducts = await prodRes.json();
-        buildB2BProductDatalist();
-        await loadStats();
-        await loadClients();
-    } catch (err) {
-        console.error("Initialization failed:", err);
-        showToast("Failed to initialize B2B data. Check connection or permissions.");
-    }
+        const res = await fetch("/b2b/api/products-list");
+        if(res.ok) {
+            allProducts = await res.json();
+            buildB2BProductDatalist();
+        }
+    } catch(e) { console.error("Products load failed", e); }
+
+    loadStats().catch(e => console.error("Stats load failed", e));
+    loadClients().catch(e => {
+        console.error("Clients load failed", e);
+        document.getElementById("clients-body").innerHTML = `<tr><td colspan="7" style="text-align:center;color:var(--danger);padding:40px">Error loading clients. Check permissions or database.</td></tr>`;
+    });
 }
 
 async function loadStats(){
