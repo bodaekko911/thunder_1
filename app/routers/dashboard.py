@@ -1,10 +1,13 @@
-from fastapi import APIRouter, Depends, Request
-from fastapi.responses import HTMLResponse
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import func, select
 from datetime import date, datetime, timedelta
+from typing import Optional
+
+from fastapi import APIRouter, Depends, Query, Request
+from fastapi.responses import HTMLResponse
+from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import AsyncSession
 from pydantic import BaseModel
 
+from app.core.config import settings
 from app.core.permissions import require_permission
 from app.core.rate_limit import limiter
 from app.core.security import get_current_user
@@ -31,12 +34,15 @@ class DashboardAssistantQuestion(BaseModel):
     question: str
 
 
+# ── legacy data endpoint (kept intact for backward compat) ─────────────
+
 @router.get("/dashboard/data")
 async def dashboard_data(db: AsyncSession = Depends(get_async_session)):
-    today    = date.today()
-    now      = datetime.utcnow()
-    month_s  = today.replace(day=1)
-    year_s   = today.replace(month=1, day=1)
+    from zoneinfo import ZoneInfo
+    tz    = ZoneInfo(settings.APP_TIMEZONE)
+    today = datetime.now(tz).date()           # timezone-correct "today"
+    month_s = today.replace(day=1)
+    year_s  = today.replace(month=1, day=1)
 
     # ── POS SALES ──────────────────────────────────────
     r = await db.execute(select(func.sum(Invoice.total)).where(func.date(Invoice.created_at) == today, Invoice.status == "paid"))
@@ -101,7 +107,6 @@ async def dashboard_data(db: AsyncSession = Depends(get_async_session)):
     r = await db.execute(select(func.count(B2BClient.id)).where(B2BClient.is_active == True))
     b2b_clients = r.scalar() or 0
 
-    # ── COMBINED REVENUE ───────────────────────────────
     total_today = pos_today + b2b_today
     total_month = pos_month + b2b_month
     total_year  = pos_year  + b2b_year
@@ -110,7 +115,6 @@ async def dashboard_data(db: AsyncSession = Depends(get_async_session)):
     expenses_month = float(expense_summary["this_month"])
     expenses_last_month = float(expense_summary["last_month"])
 
-    # ── CUSTOMERS ──────────────────────────────────────
     r = await db.execute(select(func.count(Customer.id)))
     total_customers = r.scalar() or 0
     if hasattr(Customer, 'created_at'):
@@ -119,7 +123,6 @@ async def dashboard_data(db: AsyncSession = Depends(get_async_session)):
     else:
         new_customers_month = 0
 
-    # ── INVENTORY ──────────────────────────────────────
     r = await db.execute(select(Product).where(Product.is_active == True))
     all_products   = r.scalars().all()
     out_of_stock   = [p for p in all_products if float(p.stock) <= 0]
@@ -127,15 +130,12 @@ async def dashboard_data(db: AsyncSession = Depends(get_async_session)):
     total_products = len(all_products)
     stock_value    = sum(float(p.stock) * float(p.price) for p in all_products)
 
-    # ── FARM ───────────────────────────────────────────
     r = await db.execute(select(func.count(FarmDelivery.id)).where(FarmDelivery.delivery_date >= month_s))
     farm_month = r.scalar() or 0
 
-    # ── SPOILAGE ───────────────────────────────────────
     r = await db.execute(select(func.sum(SpoilageRecord.qty)).where(SpoilageRecord.spoilage_date >= month_s))
     spoilage_month = float(r.scalar() or 0)
 
-    # ── PRODUCTION ─────────────────────────────────────
     r = await db.execute(select(func.count(ProductionBatch.id)).where(func.date(ProductionBatch.created_at) >= month_s))
     batches_month = r.scalar() or 0
 
@@ -153,7 +153,6 @@ async def dashboard_data(db: AsyncSession = Depends(get_async_session)):
         b2b = await journal_revenue(d_start, d_end)
         last7.append({"date": str(d), "pos": round(pos,2), "b2b": round(b2b,2), "refunds": round(ref,2), "total": round(pos+b2b,2)})
 
-    # ── TOP 10 PRODUCTS THIS MONTH ────────────────────
     top_result = await db.execute(
         select(InvoiceItem.name,
                func.sum(InvoiceItem.qty).label("qty_sold"),
@@ -166,7 +165,6 @@ async def dashboard_data(db: AsyncSession = Depends(get_async_session)):
     )
     top_products = top_result.all()
 
-    # ── PAYMENT METHODS THIS MONTH ────────────────────
     pay_result = await db.execute(
         select(Invoice.payment_method,
                func.count(Invoice.id).label("count"),
@@ -176,7 +174,6 @@ async def dashboard_data(db: AsyncSession = Depends(get_async_session)):
     )
     pay_methods = pay_result.all()
 
-    # ── RECENT TRANSACTIONS (sales + refunds mixed, sorted by time) ──────────
     inv_result = await db.execute(
         select(
             Invoice.invoice_number,
@@ -223,7 +220,6 @@ async def dashboard_data(db: AsyncSession = Depends(get_async_session)):
             "time":           ref.created_at.strftime("%H:%M") if ref.created_at else "—",
             "date":           ref.created_at.strftime("%Y-%m-%d") if ref.created_at else "",
         })
-    # Sort combined list by date+time descending, take top 10
     recent_sales.sort(key=lambda x: x["date"] + x["time"], reverse=True)
     recent_sales = recent_sales[:10]
 
@@ -233,7 +229,6 @@ async def dashboard_data(db: AsyncSession = Depends(get_async_session)):
     ref_count_month = r.scalar() or 0
 
     return {
-        # Revenue
         "pos_today":    round(pos_today, 2),
         "pos_month":    round(pos_month, 2),
         "pos_year":     round(pos_year, 2),
@@ -246,34 +241,31 @@ async def dashboard_data(db: AsyncSession = Depends(get_async_session)):
         "expenses_month": round(expenses_month, 2),
         "expenses_last_month": round(expenses_last_month, 2),
         "b2b_outstanding": round(b2b_outstanding, 2),
-        # Refunds
         "ref_today":   round(ref_today, 2),
         "ref_month":   round(ref_month, 2),
         "ref_count_today": ref_count_today,
         "ref_count_month": ref_count_month,
-        # Counts
         "invoices_today":   invoices_today,
         "invoices_month":   invoices_month,
         "total_customers":  total_customers,
         "b2b_clients":      b2b_clients,
-        # Inventory
         "total_products":   total_products,
         "out_of_stock_count": len(out_of_stock),
         "low_stock_count":    len(low_stock),
         "stock_value":        round(stock_value, 2),
         "out_of_stock": [{"sku": p.sku, "name": p.name, "stock": float(p.stock)} for p in out_of_stock[:20]],
         "low_stock":    [{"sku": p.sku, "name": p.name, "stock": float(p.stock)} for p in low_stock[:20]],
-        # Operations
         "farm_month":     farm_month,
         "spoilage_month": round(spoilage_month, 2),
         "batches_month":  batches_month,
-        # Charts
         "last7": last7,
         "top_products": [{"name":r.name,"qty":float(r.qty_sold),"revenue":float(r.revenue)} for r in top_products],
         "pay_methods":  [{"method":r.payment_method or "cash","count":r.count,"total":float(r.total)} for r in pay_methods],
         "recent_sales": recent_sales,
     }
 
+
+# ── assistant endpoint ─────────────────────────────────────────────────
 
 @router.post("/dashboard/assistant")
 @limiter.limit("20/minute")
@@ -290,391 +282,280 @@ async def dashboard_assistant(
     )
 
 
+# ── new: /dashboard/summary ────────────────────────────────────────────
+
+@router.get("/dashboard/summary")
+async def dashboard_summary(
+    range: str = Query("today", regex="^(today|7d|30d|mtd|qtd|custom)$"),
+    start: Optional[str] = Query(None),
+    end:   Optional[str] = Query(None),
+    db:    AsyncSession  = Depends(get_async_session),
+    current_user: User   = Depends(get_current_user),
+):
+    import json
+    try:
+        import redis.asyncio as aioredis
+        redis_client = aioredis.from_url(
+            settings.REDIS_URL,
+            socket_connect_timeout=settings.REDIS_SOCKET_CONNECT_TIMEOUT,
+            socket_timeout=settings.REDIS_SOCKET_TIMEOUT,
+            decode_responses=True,
+        )
+        cache_key = f"dash_summary:{current_user.id}:{range}:{start}:{end}"
+        cached = await redis_client.get(cache_key)
+        if cached:
+            await redis_client.aclose()
+            return json.loads(cached)
+    except Exception:
+        redis_client = None
+        cache_key    = None
+
+    from app.services.dashboard_summary_service import get_summary
+    data = await get_summary(db, range, start, end, current_user)
+
+    if redis_client and cache_key:
+        try:
+            await redis_client.setex(cache_key, 60, json.dumps(data, default=str))
+            await redis_client.aclose()
+        except Exception:
+            pass
+
+    return data
+
+
+# ── new: /dashboard/insights ───────────────────────────────────────────
+
+@router.get("/dashboard/insights")
+async def dashboard_insights(db: AsyncSession = Depends(get_async_session)):
+    from app.services.dashboard_insights_service import get_insights
+    return await get_insights(db)
+
+
+# ── UI ─────────────────────────────────────────────────────────────────
+
 @router.get("/dashboard", response_class=HTMLResponse)
 def dashboard_ui():
-    return """<!DOCTYPE html>
-<html lang="en">
+    locale_dir = getattr(settings, "APP_LOCALE_DIR", "ltr")
+    return f"""<!DOCTYPE html>
+<html lang="en" dir="{locale_dir}">
 <head>
+<meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Operations Dashboard — Thunder ERP</title>
+<title>Dashboard — Thunder ERP</title>
 <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
-<style>
-:root{
-    --bg: #090b14;
-    --surface: #0f121f;
-    --card: #141829;
-    --card-hover: #1a1f33;
-    --border: rgba(255,255,255,0.08);
-    --border-strong: rgba(255,255,255,0.15);
-    --accent: #4d9fff;
-    --success: #10b981;
-    --warning: #f59e0b;
-    --error: #ef4444;
-    --text: #f1f5f9;
-    --text-sub: #94a3b8;
-    --text-muted: #64748b;
-    --sans: 'Outfit', sans-serif;
-    --mono: 'JetBrains Mono', monospace;
-    --r: 8px;
-}
-body.light{
-    --bg: #f8fafc; --surface: #ffffff; --card: #ffffff; --card-hover: #f1f5f9;
-    --border: #e2e8f0; --border-strong: #cbd5e1;
-    --accent: #2563eb; --success: #059669; --warning: #d97706; --error: #dc2626;
-    --text: #0f172a; --text-sub: #475569; --text-muted: #64748b;
-}
-*,*::before,*::after{box-sizing:border-box;margin:0;padding:0;}
-body{font-family:var(--sans);background:var(--bg);color:var(--text);min-height:100vh;overflow-y:scroll;line-height:1.5;}
-
-nav{position:sticky;top:0;z-index:100;display:flex;align-items:center;padding:0 24px;height:56px;background:var(--surface);border-bottom:1px solid var(--border);}
-.logo{font-size:16px;font-weight:800;color:var(--accent);text-decoration:none;display:flex;align-items:center;gap:8px;margin-right:24px;}
-.nav-link{padding:6px 12px;border-radius:var(--r);color:var(--text-sub);font-size:13px;font-weight:500;text-decoration:none;transition:all .15s;}
-.nav-link:hover{background:var(--card-hover);color:var(--text);}
-.nav-link.active{background:rgba(77,159,255,0.1);color:var(--accent);}
-.nav-spacer{flex:1;}
-
-.content{max-width:1400px;margin:0 auto;padding:24px;display:flex;flex-direction:column;gap:24px;}
-.header-row{display:flex;justify-content:space-between;align-items:flex-end;margin-bottom:8px;}
-.page-title{font-size:22px;font-weight:700;letter-spacing:-0.5px;}
-.page-sub{color:var(--text-muted);font-size:13px;}
-
-.top-stats{display:grid;grid-template-columns:repeat(4, 1fr);gap:16px;}
-.mini-stat{background:var(--card);border:1px solid var(--border);border-radius:var(--r);padding:16px;display:flex;flex-direction:column;gap:4px;}
-.ms-label{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:1px;color:var(--text-muted);}
-.ms-value{font-family:var(--mono);font-size:20px;font-weight:700;}
-
-.main-grid{display:grid;grid-template-columns:1.8fr 1fr;gap:24px;}
-@media(max-width:1000px){.main-grid{grid-template-columns:1fr;}}
-
-.panel{background:var(--card);border:1px solid var(--border);border-radius:var(--r);display:flex;flex-direction:column;overflow:hidden;}
-.panel-h{padding:14px 18px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center;background:rgba(255,255,255,0.02);}
-.panel-t{font-size:13px;font-weight:700;color:var(--text-sub);}
-.panel-b{padding:18px;}
-
-.card-group{display:grid;grid-template-columns:repeat(auto-fit, minmax(140px, 1fr));gap:12px;margin-bottom:20px;}
-.kpi-box{padding:12px;border-radius:var(--r);border:1px solid var(--border);background:rgba(255,255,255,0.01);}
-.kpi-l{font-size:10px;font-weight:700;color:var(--text-muted);text-transform:uppercase;margin-bottom:4px;}
-.kpi-v{font-family:var(--mono);font-size:16px;font-weight:700;}
-
-.chart-container{height:180px;display:flex;align-items:flex-end;gap:8px;padding-top:20px;border-bottom:1px solid var(--border);}
-.chart-bar-wrap{flex:1;display:flex;flex-direction:column;justify-content:flex-end;height:100%;position:relative;}
-.chart-bar{width:100%;background:var(--accent);border-radius:3px 3px 0 0;min-height:2px;transition:height 0.4s ease;}
-.chart-label{font-size:10px;color:var(--text-muted);text-align:center;margin-top:8px;font-weight:600;}
-.chart-hover-val{position:absolute;top:-20px;left:50%;transform:translateX(-50%);font-family:var(--mono);font-size:9px;color:var(--accent);font-weight:700;}
-
-table{width:100%;border-collapse:collapse;}
-th{text-align:left;font-size:10px;font-weight:700;color:var(--text-muted);text-transform:uppercase;padding:10px 12px;border-bottom:1px solid var(--border);}
-td{padding:10px 12px;font-size:13px;border-bottom:1px solid var(--border);color:var(--text-sub);}
-tr:last-child td{border-bottom:none;}
-.bold{color:var(--text);font-weight:600;}
-.mono{font-family:var(--mono);}
-
-.alert-item{display:flex;justify-content:space-between;align-items:center;padding:12px;border-radius:var(--r);background:rgba(239,68,68,0.05);border:1px solid rgba(239,68,68,0.1);margin-bottom:8px;}
-.alert-item.warn{background:rgba(245,158,11,0.05);border:1px solid rgba(245,158,11,0.1);}
-.alert-info{display:flex;flex-direction:column;gap:2px;}
-.alert-label{font-size:12px;font-weight:600;color:var(--text);}
-.alert-sub{font-size:11px;color:var(--text-muted);}
-.alert-val{font-family:var(--mono);font-weight:700;color:var(--error);}
-.alert-item.warn .alert-val{color:var(--warning);}
-
-.action-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;}
-.action-btn{display:flex;align-items:center;gap:10px;padding:12px;background:var(--surface);border:1px solid var(--border);border-radius:var(--r);text-decoration:none;color:var(--text-sub);transition:all 0.15s;}
-.action-btn:hover{border-color:var(--accent);color:var(--accent);background:rgba(77,159,255,0.03);}
-.action-btn span{font-size:12px;font-weight:600;}
-
-.top-prod-row{display:flex;justify-content:space-between;padding:8px 0;border-bottom:1px solid var(--border);}
-.top-prod-name{font-size:12px;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:160px;}
-.top-prod-rev{font-family:var(--mono);font-size:12px;font-weight:600;color:var(--success);}
-
-.badge{padding:2px 6px;border-radius:4px;font-size:10px;font-weight:700;text-transform:uppercase;}
-.badge-pos{background:rgba(16,185,129,0.1);color:var(--success);}
-.badge-b2b{background:rgba(77,159,255,0.1);color:var(--accent);}
-.badge-refund{background:rgba(239,68,68,0.1);color:var(--error);}
-
-.account-menu{position:relative;}
-.user-pill{display:flex;align-items:center;gap:8px;background:var(--surface);border:1px solid var(--border);border-radius:20px;padding:4px 12px 4px 4px;cursor:pointer;}
-.user-avatar{width:24px;height:24px;background:var(--accent);border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:700;color:white;}
-.user-name{font-size:12px;font-weight:600;color:var(--text-sub);}
-.account-dropdown{position:absolute;right:0;top:100%;margin-top:8px;width:180px;background:var(--surface);border:1px solid var(--border-strong);border-radius:var(--r);display:none;flex-direction:column;overflow:hidden;box-shadow:0 10px 25px rgba(0,0,0,0.1);}
-.account-dropdown.open{display:flex;}
-.account-item{padding:10px 14px;font-size:12px;color:var(--text-sub);text-decoration:none;transition:background 0.1s;}
-.account-item:hover{background:var(--card-hover);color:var(--text);}
-.mode-btn{background:none;border:none;color:var(--text-muted);cursor:pointer;font-size:16px;margin-right:8px;display:flex;align-items:center;justify-content:center;}
-
-#loading{position:fixed;inset:0;background:var(--bg);display:flex;align-items:center;justify-content:center;z-index:1000;}
-.spinner{width:24px;height:24px;border:2px solid var(--border-strong);border-top-color:var(--accent);border-radius:50%;animation:spin 0.8s linear infinite;}
-@keyframes spin{to{transform:rotate(360deg);}}
-</style>
+<link rel="stylesheet" href="/static/dashboard.css">
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
 <script src="/static/auth-guard.js"></script>
 </head>
 <body>
 
-<div id="loading">
-    <div class="spinner"></div>
-</div>
+<div id="loading"><div class="spinner"></div></div>
 
+<!-- ── Nav ──────────────────────────────────────────────────────────── -->
 <nav>
-    <a href="/home" class="logo">Thunder ERP</a>
-    <a href="/dashboard"  class="nav-link active">Dashboard</a>
-    <a href="/pos"        class="nav-link">POS</a>
-    <a href="/b2b/"       class="nav-link">B2B</a>
-    <a href="/reports/"   class="nav-link">Reports</a>
-    <a href="/inventory/" class="nav-link">Inventory</a>
-    <span class="nav-spacer"></span>
-    <button class="mode-btn" id="mode-btn" onclick="toggleMode()">🌙</button>
-    <div class="account-menu">
-        <div class="user-pill" onclick="toggleAccountMenu(event)">
-            <div class="user-avatar" id="user-avatar">A</div>
-            <span class="user-name" id="user-name">Admin</span>
-        </div>
-        <div class="account-dropdown" id="account-dropdown">
-            <a href="/users/password" class="account-item">Security Settings</a>
-            <a href="#" class="account-item" onclick="logout()">Sign Out</a>
-        </div>
+  <a href="/home" class="logo">Thunder ERP</a>
+  <a href="/dashboard"  class="nav-link active">Dashboard</a>
+  <a href="/pos"        class="nav-link">POS</a>
+  <a href="/b2b/"       class="nav-link">B2B</a>
+  <a href="/reports/"   class="nav-link">Reports</a>
+  <a href="/inventory/" class="nav-link">Inventory</a>
+  <span class="nav-spacer"></span>
+  <button class="mode-btn" id="mode-btn" onclick="toggleMode()" aria-label="Toggle color mode">🌙</button>
+  <div class="account-menu">
+    <div class="user-pill" onclick="toggleAccountMenu(event)">
+      <div class="user-avatar" id="user-avatar">A</div>
+      <span class="user-name" id="user-name">Admin</span>
     </div>
+    <div class="account-dropdown" id="account-dropdown">
+      <a href="/users/password" class="account-item">Security Settings</a>
+      <a href="#" class="account-item" onclick="logout()">Sign Out</a>
+    </div>
+  </div>
 </nav>
 
+<!-- ── Main content ───────────────────────────────────────────────── -->
 <div class="content">
-    <div class="header-row">
-        <div>
-            <div class="page-title">Operations Overview</div>
-            <div class="page-sub" id="date-display"></div>
+
+  <!-- 1. Header strip -->
+  <div class="header-strip">
+    <div class="header-left">
+      <span class="greeting" id="greeting">Good morning</span>
+      <div class="header-meta">
+        <span class="date-display" id="date-display"></span>
+        <span class="last-updated-pill" id="last-updated">Loading…</span>
+      </div>
+    </div>
+    <div style="display:flex;flex-direction:column;align-items:flex-end;gap:6px">
+      <div class="range-picker">
+        <button class="range-btn active" data-range="today">Today</button>
+        <button class="range-btn" data-range="7d">7 days</button>
+        <button class="range-btn" data-range="30d">30 days</button>
+        <button class="range-btn" data-range="mtd">This month</button>
+        <button class="range-btn" data-range="qtd">This quarter</button>
+        <button class="range-btn" data-range="custom">Custom…</button>
+      </div>
+      <span id="range-label" class="text-muted" style="font-size:12px"></span>
+    </div>
+  </div>
+
+  <!-- 2. Insights strip -->
+  <section aria-label="What changed">
+    <div id="insights-strip" class="insights-strip">
+      <div class="skeleton" style="width:260px;height:100px"></div>
+      <div class="skeleton" style="width:260px;height:100px"></div>
+      <div class="skeleton" style="width:260px;height:100px"></div>
+    </div>
+  </section>
+
+  <!-- 3. Hero row (4 cards) -->
+  <section aria-label="Key metrics" class="hero-row">
+    <!-- Hero cards rendered by JS; placeholders here for layout -->
+    <div class="hero-card" id="hero-0" role="region" aria-label="Primary metric">
+      <span class="hero-label">—</span>
+      <div class="hero-value skeleton" style="height:32px;width:120px"></div>
+      <span class="hero-chip chip chip-flat">—</span>
+      <span class="hero-subtitle"></span>
+      <div class="hero-sparkline"><canvas></canvas></div>
+    </div>
+    <div class="hero-card" id="hero-1" role="region" aria-label="Metric 2">
+      <span class="hero-label">—</span>
+      <div class="hero-value skeleton" style="height:32px;width:120px"></div>
+      <span class="hero-chip chip chip-flat">—</span>
+      <span class="hero-subtitle"></span>
+      <div class="hero-sparkline"><canvas></canvas></div>
+    </div>
+    <div class="hero-card" id="hero-2" role="region" aria-label="Metric 3">
+      <span class="hero-label">—</span>
+      <div class="hero-value skeleton" style="height:32px;width:120px"></div>
+      <span class="hero-chip chip chip-flat">—</span>
+      <span class="hero-subtitle"></span>
+      <div class="hero-sparkline"></div>
+    </div>
+    <div class="hero-card" id="hero-3" role="region" aria-label="Metric 4">
+      <span class="hero-label">—</span>
+      <div class="hero-value skeleton" style="height:32px;width:120px"></div>
+      <span class="hero-chip chip chip-flat">—</span>
+      <span class="hero-subtitle"></span>
+      <div class="hero-sparkline"></div>
+    </div>
+  </section>
+
+  <!-- 4. Primary chart -->
+  <div class="chart-panel">
+    <div class="panel-header">
+      <span class="panel-title">Revenue Trend</span>
+    </div>
+    <div class="chart-wrap">
+      <canvas id="main-chart" aria-label="Revenue trend chart"></canvas>
+    </div>
+    <!-- Accessibility fallback -->
+    <table class="sr-only" aria-label="Revenue trend data table" id="chart-table"></table>
+  </div>
+
+  <!-- 5. Secondary grid (4 panels) -->
+  <div class="secondary-grid">
+
+    <!-- Panel A: Top Products -->
+    <div class="panel" role="region" aria-label="Top products">
+      <div class="panel-header"><span class="panel-title">Top Products</span></div>
+      <div class="tab-bar">
+        <button class="tab-btn active" data-pane="top-by-revenue-pane">By Revenue</button>
+        <button class="tab-btn"        data-pane="top-by-qty-pane">By Qty</button>
+        <button class="tab-btn"        data-pane="top-by-margin-pane">By Margin</button>
+      </div>
+      <div class="panel-body">
+        <div class="tab-pane active" id="top-by-revenue-pane">
+          <table><thead></thead><tbody id="top-by-revenue"></tbody></table>
         </div>
+        <div class="tab-pane" id="top-by-qty-pane">
+          <table><thead></thead><tbody id="top-by-qty"></tbody></table>
+        </div>
+        <div class="tab-pane" id="top-by-margin-pane">
+          <table><thead></thead><tbody id="top-by-margin"></tbody></table>
+        </div>
+      </div>
     </div>
 
-    <div class="top-stats">
-        <div class="mini-stat">
-            <span class="ms-label">Revenue This Month</span>
-            <span class="ms-value" id="ms-revenue">—</span>
+    <!-- Panel B: Receivables -->
+    <div class="panel" role="region" aria-label="Receivables">
+      <div class="panel-header"><span class="panel-title">Who Owes Us</span></div>
+      <div class="tab-bar">
+        <button class="tab-btn active" data-pane="recv-b2b-pane">B2B</button>
+        <button class="tab-btn"        data-pane="recv-retail-pane">Retail Credit</button>
+      </div>
+      <div class="panel-body">
+        <div class="tab-pane active" id="recv-b2b-pane">
+          <table><thead></thead><tbody id="recv-b2b"></tbody></table>
         </div>
-        <div class="mini-stat">
-            <span class="ms-label">Expenses This Month</span>
-            <span class="ms-value" id="ms-expenses">—</span>
+        <div class="tab-pane" id="recv-retail-pane">
+          <table><thead></thead><tbody id="recv-retail"></tbody></table>
         </div>
-        <div class="mini-stat">
-            <span class="ms-label">Outstanding Receivables</span>
-            <span class="ms-value" id="ms-receivables">—</span>
-        </div>
-        <div class="mini-stat">
-            <span class="ms-label">Low Stock Alerts</span>
-            <span class="ms-value" id="ms-lowstock">—</span>
-        </div>
+      </div>
     </div>
 
-    <div class="main-grid">
-        <!-- LEFT COLUMN -->
-        <div style="display:flex;flex-direction:column;gap:24px;">
-            <div class="panel">
-                <div class="panel-h"><span class="panel-t">Business Performance</span></div>
-                <div class="panel-b">
-                    <div class="card-group">
-                        <div class="kpi-box">
-                            <div class="kpi-l">Today's Revenue</div>
-                            <div class="kpi-v" id="kpi-today-rev">—</div>
-                        </div>
-                        <div class="kpi-box">
-                            <div class="kpi-l">Retail Refunds</div>
-                            <div class="kpi-v" style="color:var(--error)" id="kpi-refunds">—</div>
-                        </div>
-                        <div class="kpi-box">
-                            <div class="kpi-l">Farm Intake</div>
-                            <div class="kpi-v" id="kpi-farm">—</div>
-                        </div>
-                    </div>
-                    <div style="font-size:11px;font-weight:700;color:var(--text-muted);text-transform:uppercase;margin-bottom:12px;">7-Day Revenue Trend</div>
-                    <div class="chart-container" id="revenue-chart"></div>
-                </div>
-            </div>
-
-            <div class="panel">
-                <div class="panel-h"><span class="panel-t">Recent Transactions</span></div>
-                <div class="panel-b" style="padding:0">
-                    <table>
-                        <thead><tr><th>Invoice</th><th>Customer</th><th>Total</th><th>Method</th><th>Time</th></tr></thead>
-                        <tbody id="recent-transactions"></tbody>
-                    </table>
-                </div>
-            </div>
+    <!-- Panel C: Stock Pressure -->
+    <div class="panel" role="region" aria-label="Stock pressure">
+      <div class="panel-header"><span class="panel-title">Stock Pressure</span></div>
+      <div class="tab-bar">
+        <button class="tab-btn active" data-pane="stock-risk-pane">Stock-out Risk</button>
+        <button class="tab-btn"        data-pane="stock-low-pane">Low Stock</button>
+        <button class="tab-btn"        data-pane="stock-dead-pane">Dead Stock</button>
+      </div>
+      <div class="panel-body">
+        <div class="tab-pane active" id="stock-risk-pane">
+          <table><thead></thead><tbody id="stock-risk"></tbody></table>
         </div>
-
-        <!-- RIGHT COLUMN -->
-        <div style="display:flex;flex-direction:column;gap:24px;">
-            <div class="panel">
-                <div class="panel-h"><span class="panel-t">Needs Attention</span></div>
-                <div class="panel-b" id="alerts-container"></div>
-            </div>
-
-            <div class="panel">
-                <div class="panel-h"><span class="panel-t">Quick Actions</span></div>
-                <div class="panel-b">
-                    <div class="action-grid">
-                        <a href="/inventory/" class="action-btn"><span>Inventory Health</span></a>
-                        <a href="/reports/" class="action-btn"><span>Financial Reports</span></a>
-                        <a href="/pos/" class="action-btn"><span>Launch POS</span></a>
-                        <a href="/accounting/" class="action-btn"><span>Accounting</span></a>
-                        <a href="/b2b/" class="action-btn"><span>B2B Accounts</span></a>
-                        <a href="/production/" class="action-btn"><span>Production</span></a>
-                    </div>
-                </div>
-            </div>
-
-            <div class="panel">
-                <div class="panel-h"><span class="panel-t">Top Products (Month)</span></div>
-                <div class="panel-b" id="top-products-list"></div>
-            </div>
+        <div class="tab-pane" id="stock-low-pane">
+          <table><thead></thead><tbody id="stock-low"></tbody></table>
         </div>
+        <div class="tab-pane" id="stock-dead-pane">
+          <table><thead></thead><tbody id="stock-dead"></tbody></table>
+        </div>
+      </div>
     </div>
 
-    <!-- LOWER SECTION -->
-    <div class="panel">
-        <div class="panel-h"><span class="panel-t">Inventory Status: Out of Stock</span></div>
-        <div class="panel-b" style="padding:0">
-            <table>
-                <thead><tr><th>SKU</th><th>Product</th><th>On Hand</th><th>Status</th></tr></thead>
-                <tbody id="oos-table"></tbody>
-            </table>
-        </div>
-    </div>
-
-    <div class="panel">
-        <div class="panel-h"><span class="panel-t">Inventory Status: Low Stock (≤ 5)</span></div>
-        <div class="panel-b" style="padding:0">
-            <table>
-                <thead><tr><th>SKU</th><th>Product</th><th>On Hand</th><th>Status</th></tr></thead>
-                <tbody id="lowstock-table"></tbody>
-            </table>
-        </div>
-    </div>
-</div>
-
-<script>
-function toggleAccountMenu(e){
-    e.stopPropagation();
-    document.getElementById("account-dropdown").classList.toggle("open");
-}
-document.addEventListener("click", () => document.getElementById("account-dropdown").classList.remove("open"));
-
-function toggleMode(){
-    const isLight = document.body.classList.toggle("light");
-    localStorage.setItem("colorMode", isLight ? "light" : "dark");
-    document.getElementById("mode-btn").innerText = isLight ? "☀️" : "🌙";
-}
-
-async function initUser(){
-    const r = await fetch("/auth/me");
-    if(!r.ok) return;
-    const u = await r.json();
-    document.getElementById("user-name").innerText = u.name;
-    document.getElementById("user-avatar").innerText = u.name[0].toUpperCase();
-}
-
-async function logout(){
-    await fetch("/auth/logout", { method: "POST" });
-    window.location.href = "/";
-}
-
-function formatCurrency(val){
-    return Number(val || 0).toLocaleString('en-GB', {minimumFractionDigits:2}) + " EGP";
-}
-
-async function loadDashboard(){
-    try {
-        const res = await fetch("/dashboard/data");
-        const d = await res.json();
-
-        // Header Metrics
-        document.getElementById("ms-revenue").innerText = formatCurrency(d.total_month);
-        document.getElementById("ms-expenses").innerText = formatCurrency(d.expenses_month);
-        document.getElementById("ms-receivables").innerText = formatCurrency(d.b2b_outstanding);
-        document.getElementById("ms-lowstock").innerText = d.low_stock_count;
-
-        // Performance KPIs
-        document.getElementById("kpi-today-rev").innerText = formatCurrency(d.total_today);
-        document.getElementById("kpi-refunds").innerText = formatCurrency(d.ref_month);
-        document.getElementById("kpi-farm").innerText = d.farm_month + " deliveries";
-
-        // Revenue Chart
-        const maxVal = Math.max(...d.last7.map(x => x.total), 1);
-        document.getElementById("revenue-chart").innerHTML = d.last7.map(day => {
-            const h = (day.total / maxVal) * 100;
-            const date = new Date(day.date).toLocaleDateString('en-GB', {weekday:'short'});
-            return `
-                <div class="chart-bar-wrap">
-                    <div class="chart-hover-val">${Math.round(day.total)}</div>
-                    <div class="chart-bar" style="height:${h}%"></div>
-                    <div class="chart-label">${date}</div>
-                </div>
-            `;
-        }).join("");
-
-        // Recent Transactions
-        document.getElementById("recent-transactions").innerHTML = d.recent_sales.map(s => `
+    <!-- Panel D: Recent Activity -->
+    <div class="panel" role="region" aria-label="Recent activity">
+      <div class="panel-header"><span class="panel-title">Today's Operations</span></div>
+      <div class="panel-body">
+        <table>
+          <thead>
             <tr>
-                <td class="bold">${s.invoice_number}</td>
-                <td>${s.customer}</td>
-                <td class="mono bold" style="color:${s.total < 0 ? 'var(--error)' : 'var(--success)'}">${formatCurrency(s.total)}</td>
-                <td><span class="badge ${s.type === 'refund' ? 'badge-refund' : 'badge-pos'}">${s.method}</span></td>
-                <td class="mono">${s.time}</td>
+              <th>Ref</th><th>Customer</th><th>Total</th><th>Method</th><th>Time</th>
             </tr>
-        `).join("") || '<tr><td colspan="5" style="text-align:center">No recent activity</td></tr>';
+          </thead>
+          <tbody id="recent-activity"></tbody>
+        </table>
+      </div>
+    </div>
 
-        // Alerts (Needs Attention)
-        const alerts = [
-            {label: 'Out of Stock Items', val: d.out_of_stock_count, type: 'error', sub: 'Immediate restocking required'},
-            {label: 'Low Stock Products', val: d.low_stock_count, type: 'warn', sub: 'Below threshold level (5)'},
-            {label: 'Total Receivables', val: formatCurrency(d.b2b_outstanding), type: 'warn', sub: 'Unpaid B2B invoices'}
-        ];
-        document.getElementById("alerts-container").innerHTML = alerts.map(a => `
-            <div class="alert-item ${a.type === 'warn' ? 'warn' : ''}">
-                <div class="alert-info">
-                    <span class="alert-label">${a.label}</span>
-                    <span class="alert-sub">${a.sub}</span>
-                </div>
-                <span class="alert-val">${a.val}</span>
-            </div>
-        `).join("");
+  </div><!-- /secondary-grid -->
 
-        // Top Products
-        document.getElementById("top-products-list").innerHTML = d.top_products.slice(0, 5).map(p => `
-            <div class="top-prod-row">
-                <span class="top-prod-name">${p.name}</span>
-                <span class="top-prod-rev">${formatCurrency(p.revenue)}</span>
-            </div>
-        `).join("");
+</div><!-- /content -->
 
-        // Inventory Tables
-        document.getElementById("oos-table").innerHTML = d.out_of_stock.map(p => `
-            <tr>
-                <td class="mono">${p.sku}</td>
-                <td class="bold">${p.name}</td>
-                <td class="mono bold" style="color:var(--error)">0</td>
-                <td><span class="badge badge-refund">Critical</span></td>
-            </tr>
-        `).join("") || '<tr><td colspan="4" style="text-align:center">Full availability</td></tr>';
+<!-- ── Assistant drawer ───────────────────────────────────────────── -->
+<aside id="assistant-drawer" aria-label="AI Assistant" role="complementary">
+  <div class="drawer-header">
+    <span class="drawer-title">AI Assistant</span>
+    <button class="drawer-close" onclick="closeDrawer()" aria-label="Close assistant">✕</button>
+  </div>
+  <div class="drawer-body" id="chat-body">
+    <div class="preset-chips" id="preset-chips">
+      <!-- Chips rendered by JS from /dashboard/insights -->
+    </div>
+  </div>
+  <div class="drawer-footer">
+    <div class="chat-input-wrap">
+      <input class="chat-input" id="chat-input" type="text"
+             placeholder="Ask anything about your business…" autocomplete="off">
+      <button class="chat-send" id="chat-send" aria-label="Send">→</button>
+    </div>
+  </div>
+</aside>
 
-        document.getElementById("lowstock-table").innerHTML = d.low_stock.map(p => `
-            <tr>
-                <td class="mono">${p.sku}</td>
-                <td class="bold">${p.name}</td>
-                <td class="mono bold" style="color:var(--warning)">${p.stock}</td>
-                <td><span class="badge badge-b2b">Low</span></td>
-            </tr>
-        `).join("") || '<tr><td colspan="4" style="text-align:center">Healthy levels</td></tr>';
+<!-- FAB (mobile) -->
+<button class="fab" onclick="openDrawer()" aria-label="Open AI assistant">💬</button>
 
-        document.getElementById("date-display").innerText = new Date().toLocaleDateString('en-GB', {weekday:'long', year:'numeric', month:'long', day:'numeric'});
-        document.getElementById("loading").style.display = "none";
-    } catch(err) {
-        console.error(err);
-        document.getElementById("loading").innerHTML = `<div style="color:var(--error)">Initialization error. Please refresh.</div>`;
-    }
-}
-
-const isLight = localStorage.getItem("colorMode") === "light";
-document.body.classList.toggle("light", isLight);
-document.getElementById("mode-btn").innerText = isLight ? "☀️" : "🌙";
-
-initUser();
-loadDashboard();
-</script>
+<script src="/static/dashboard.js"></script>
 </body>
 </html>"""

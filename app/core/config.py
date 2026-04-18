@@ -78,6 +78,9 @@ class BaseAppSettings(BaseSettings):
     REDIS_SOCKET_CONNECT_TIMEOUT: float = 0.25
     REDIS_SOCKET_TIMEOUT: float = 0.25
 
+    APP_TIMEZONE: str = "Africa/Cairo"
+    APP_LOCALE_DIR: str = "ltr"
+
     ASSISTANT_MEMORY_CHANNEL: str = "dashboard"
 
     SENTRY_DSN: str | None = None
