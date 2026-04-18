@@ -152,15 +152,32 @@ async def seed_accounts(db: AsyncSession = Depends(get_async_session)):
 # ── CLIENT API ─────────────────────────────────────────
 @router.get("/api/clients")
 async def get_clients(q: str = "", db: AsyncSession = Depends(get_async_session)):
-    stmt = select(B2BClient).where(B2BClient.is_active == True).options(selectinload(B2BClient.invoices))
+    # Compute outstanding live from invoice data so it always matches the invoices tab
+    outstanding_sub = (
+        select(
+            B2BInvoice.client_id,
+            func.coalesce(
+                func.sum(B2BInvoice.total - B2BInvoice.amount_paid), 0
+            ).label("outstanding"),
+        )
+        .where(B2BInvoice.status.in_(["unpaid", "partial"]))
+        .group_by(B2BInvoice.client_id)
+        .subquery()
+    )
+    stmt = (
+        select(B2BClient, func.coalesce(outstanding_sub.c.outstanding, 0).label("computed_outstanding"))
+        .outerjoin(outstanding_sub, outstanding_sub.c.client_id == B2BClient.id)
+        .where(B2BClient.is_active == True)
+        .options(selectinload(B2BClient.invoices))
+        .order_by(B2BClient.name)
+    )
     if q:
         stmt = stmt.where(
             B2BClient.name.ilike(f"%{q}%") |
             B2BClient.phone.ilike(f"%{q}%")
         )
-    stmt = stmt.order_by(B2BClient.name)
     _r = await db.execute(stmt)
-    clients = _r.scalars().all()
+    rows = _r.all()
     return [
         {
             "id":             c.id,
@@ -172,11 +189,11 @@ async def get_clients(q: str = "", db: AsyncSession = Depends(get_async_session)
             "payment_terms":  c.payment_terms,
             "discount_pct":   float(c.discount_pct or 0),
             "credit_limit":   float(c.credit_limit or 0),
-            "outstanding":    float(c.outstanding),
+            "outstanding":    float(computed_outstanding or 0),
             "notes":          c.notes or "",
             "invoice_count":  len(c.invoices),
         }
-        for c in clients
+        for c, computed_outstanding in rows
     ]
 
 @router.post("/api/clients", dependencies=[Depends(require_action("b2b", "clients", "create_client"))])
@@ -821,11 +838,14 @@ async def create_client_refund(data: ClientRefundCreate, db: AsyncSession = Depe
 @router.get("/api/stats")
 async def get_stats(db: AsyncSession = Depends(get_async_session)):
     r1 = await db.execute(select(func.count(B2BClient.id)).where(B2BClient.is_active == True))
-    r2 = await db.execute(select(func.sum(B2BClient.outstanding)).where(B2BClient.is_active == True))
-    r3 = await db.execute(select(func.count(B2BInvoice.id)).where(
-        B2BInvoice.status.in_(["unpaid","partial"]),
-        B2BInvoice.invoice_type.in_(["cash", "full_payment"]),
-    ))
+    r2 = await db.execute(
+        select(func.sum(B2BInvoice.total - B2BInvoice.amount_paid))
+        .where(B2BInvoice.status.in_(["unpaid", "partial"]))
+    )
+    r3 = await db.execute(
+        select(func.count(B2BInvoice.id))
+        .where(B2BInvoice.status.in_(["unpaid", "partial"]))
+    )
     r4 = await db.execute(select(func.count(Consignment.id)).where(Consignment.status == "active"))
     return {
         "total_clients":     r1.scalar() or 0,
@@ -1635,7 +1655,7 @@ async def client_statement_data(client_id: int, db: AsyncSession = Depends(get_a
             "address":        client.address or "",
             "payment_terms":  client.payment_terms or "",
             "credit_limit":   float(client.credit_limit or 0),
-            "outstanding":    float(client.outstanding or 0),
+            "outstanding":    round(running, 2),
         },
         "transactions":  rows,
         "total_invoiced": sum(t["debit"]  for t in rows),

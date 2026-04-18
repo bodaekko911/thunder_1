@@ -95,7 +95,7 @@ async def dashboard_data(db: AsyncSession = Depends(get_async_session)):
 
     r = await db.execute(
         select(func.sum(B2BInvoice.total - B2BInvoice.amount_paid))
-        .where(B2BInvoice.status.in_(["unpaid","partial"]), B2BInvoice.invoice_type.in_(["cash", "full_payment"]))
+        .where(B2BInvoice.status.in_(["unpaid", "partial"]))
     )
     b2b_outstanding = float(r.scalar() or 0)
     r = await db.execute(select(func.count(B2BClient.id)).where(B2BClient.is_active == True))
