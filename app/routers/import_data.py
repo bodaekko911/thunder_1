@@ -1,3 +1,4 @@
+from decimal import Decimal
 from fastapi import APIRouter, Form, UploadFile, File, Depends
 from fastapi.responses import HTMLResponse, StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -13,6 +14,8 @@ from app.models.inventory import StockMove
 from app.models.product import Product
 from app.models.customer import Customer
 from app.services.sales_import_service import import_sales
+from app.services.b2b_sales_import_service import import_b2b_sales
+from app.models.b2b import B2BInvoice as B2BInvoiceModel, Consignment as ConsignmentModel
 
 router = APIRouter(
     prefix="/import",
@@ -468,6 +471,225 @@ async def delete_import_batch(
     return {"ok": True, "deleted_invoices": len(invoices)}
 
 
+# ── B2B SALES IMPORT ────────────────────────────────────────────────────────
+
+@router.post("/api/b2b-sales")
+async def import_b2b_sales_endpoint(
+    file: UploadFile = File(...),
+    dry_run: bool = Form(True),
+    mode: str = Form("history_only"),
+    force: bool = Form(False),
+    db: AsyncSession = Depends(get_async_session),
+    current_user=Depends(get_current_user),
+):
+    contents = await file.read()
+    return await import_b2b_sales(
+        db=db,
+        workbook_bytes=contents,
+        filename=file.filename or "upload.xlsx",
+        current_user_id=current_user.id,
+        dry_run=dry_run,
+        mode=mode,
+        force=force,
+    )
+
+
+@router.get("/api/b2b-sales/template")
+async def download_b2b_sales_template(_=Depends(get_current_user)):
+    from openpyxl.styles import Font, PatternFill, Alignment
+    from openpyxl.utils import get_column_letter
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "B2B Sales"
+
+    headers = ["SKU", "Item", "QTY", "Price", "Discount", "Payment type", "Client name", "Date"]
+    hdr_font = Font(bold=True, color="4D9FFF")
+    hdr_fill = PatternFill("solid", fgColor="0F1424")
+    for col, h in enumerate(headers, 1):
+        c = ws.cell(1, col, h)
+        c.font = hdr_font
+        c.fill = hdr_fill
+        c.alignment = Alignment(horizontal="center")
+    for col, w in enumerate([14, 28, 8, 10, 10, 16, 26, 14], 1):
+        ws.column_dimensions[get_column_letter(col)].width = w
+
+    ws.append(["SKU-001", "Olive Oil 500ml",  50,  14.00, 10, "cash",         "Nile Grocery",     "2026-01-10"])
+    ws.append(["SKU-002", "Tahini 250g",      100,  7.00,  5, "full_payment", "Cairo Mart",       "2026-01-12"])
+    ws.append(["SKU-001", "Olive Oil 500ml",  30,  14.00, 10, "full_payment", "Cairo Mart",       "2026-01-12"])
+    ws.append(["SKU-003", "Sesame Oil 250ml",  20,  9.50,  0, "consignment",  "Delta Foods Co.",  "2026-01-15"])
+
+    readme = wb.create_sheet("README")
+    readme.column_dimensions["A"].width = 20
+    readme.column_dimensions["B"].width = 75
+    readme.append(["Column", "Rules"])
+    readme["A1"].font = Font(bold=True)
+    readme["B1"].font = Font(bold=True)
+    rules = [
+        ("SKU",          "Required. Must match a product SKU in the ERP (whitespace stripped). Numeric-looking SKUs normalised."),
+        ("Item",         "Optional. Product description — used only in error messages. Not stored."),
+        ("QTY",          "Required. Numeric, must be > 0. Decimals accepted."),
+        ("Price",        "Required. Unit price BEFORE discount. Must be >= 0."),
+        ("Discount",     "Optional. Per-line discount PERCENTAGE (e.g. 10 = 10%). Blank/null = 0. Range 0–100."),
+        ("Payment type", "Required. One of: cash, full_payment, consignment (or aliases). "
+                         "cash aliases: paid, cod, immediate. "
+                         "full_payment aliases: credit, net30, on account, invoiced. "
+                         "consignment aliases: cons, sale or return, sor."),
+        ("Client name",  "Required. B2B client name. Auto-created if not found."),
+        ("Date",         "Required. Must be >= 2026-01-01. Accepted formats: YYYY-MM-DD, DD/MM/YYYY, MM/DD/YYYY. Excel date cells also accepted."),
+        ("", ""),
+        ("Grouping",     "Rows with same Client name + Date + Payment type become one invoice. "
+                         "Same client can have cash + consignment rows on the same day — those create two separate invoices."),
+        ("Dry run",      "Always preview with Dry run checked first. Uncheck only for the final confirmed import."),
+    ]
+    for key, val in rules:
+        readme.append([key, val])
+        if key:
+            readme.cell(readme.max_row, 1).font = Font(bold=True)
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    return StreamingResponse(
+        buf,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": "attachment; filename=b2b_sales_import_template.xlsx"},
+    )
+
+
+@router.get("/api/b2b-sales/batches")
+async def list_b2b_import_batches(
+    db: AsyncSession = Depends(get_async_session),
+    _=Depends(get_current_user),
+):
+    _r = await db.execute(
+        select(B2BInvoiceModel.import_batch_id, B2BInvoiceModel.notes)
+        .where(B2BInvoiceModel.import_batch_id.isnot(None))
+        .distinct(B2BInvoiceModel.import_batch_id)
+    )
+    batch_rows = _r.all()
+    batches = []
+    for (batch_id, notes) in batch_rows:
+        _stats = await db.execute(
+            select(B2BInvoiceModel).where(B2BInvoiceModel.import_batch_id == batch_id)
+        )
+        invs = _stats.scalars().all()
+        total = sum(float(i.total) for i in invs)
+        earliest = min((i.created_at for i in invs), default=None)
+        batches.append({
+            "batch_id":      batch_id,
+            "filename":      _extract_filename(notes),
+            "ran_on":        earliest.date().isoformat() if earliest else None,
+            "invoice_count": len(invs),
+            "total_value":   round(total, 2),
+        })
+    batches.sort(key=lambda b: b["ran_on"] or "", reverse=True)
+    return {"batches": batches}
+
+
+@router.delete("/api/b2b-sales/batch/{batch_id}")
+async def delete_b2b_import_batch(
+    batch_id: str,
+    db: AsyncSession = Depends(get_async_session),
+    _=Depends(get_current_user),
+):
+    """Revert a B2B historical-import batch.
+
+    - Deletes b2b_invoices + b2b_invoice_items
+    - Deletes consignments + consignment_items linked to those invoices
+    - Reverses Journal account balances and deletes journals/entries
+    - Reverses client.outstanding for full_payment/consignment invoices
+    - Reverses stock if with_stock_adjustment mode was used (detected via StockMove rows)
+    - Does NOT revert client.discount_pct or B2BClientPrice (durable settings)
+    """
+    from sqlalchemy.orm import selectinload
+    from app.models.accounting import Journal, JournalEntry
+    from app.models.b2b import B2BClient, B2BInvoiceItem, ConsignmentItem
+
+    _r = await db.execute(
+        select(B2BInvoiceModel)
+        .where(B2BInvoiceModel.import_batch_id == batch_id)
+        .options(selectinload(B2BInvoiceModel.items))
+    )
+    invoices = _r.scalars().all()
+    if not invoices:
+        return {"ok": True, "deleted_invoices": 0, "deleted_consignments": 0}
+
+    invoice_ids = [inv.id for inv in invoices]
+
+    # 1. Reverse client.outstanding for unpaid invoices
+    client_adjustments: dict[int, float] = {}
+    for inv in invoices:
+        if inv.invoice_type in ("full_payment", "consignment"):
+            unpaid = max(0.0, float(inv.total) - float(inv.amount_paid))
+            client_adjustments[inv.client_id] = (
+                client_adjustments.get(inv.client_id, 0.0) + unpaid
+            )
+    for client_id, delta in client_adjustments.items():
+        _c = await db.execute(select(B2BClient).where(B2BClient.id == client_id))
+        client = _c.scalar_one_or_none()
+        if client:
+            client.outstanding = Decimal(str(max(0.0, float(client.outstanding) - delta)))
+
+    # 2. Reverse stock moves
+    _sm = await db.execute(
+        select(StockMove).where(
+            StockMove.ref_type == "b2b",
+            StockMove.ref_id.in_(invoice_ids),
+        )
+    )
+    for move in _sm.scalars().all():
+        _pr = await db.execute(select(Product).where(Product.id == move.product_id))
+        product = _pr.scalar_one_or_none()
+        if product and move.qty is not None:
+            product.stock = float(product.stock) - float(move.qty)
+    await db.execute(
+        delete(StockMove).where(
+            StockMove.ref_type == "b2b",
+            StockMove.ref_id.in_(invoice_ids),
+        )
+    )
+
+    # 3. Reverse journal account balances and delete journals
+    _jr = await db.execute(
+        select(Journal)
+        .options(selectinload(Journal.entries).selectinload(JournalEntry.account))
+        .where(Journal.ref_type == "b2b", Journal.ref_id.in_(invoice_ids))
+    )
+    for journal in _jr.scalars().all():
+        for entry in journal.entries:
+            if entry.account:
+                entry.account.balance -= (
+                    Decimal(str(entry.debit)) - Decimal(str(entry.credit))
+                )
+        await db.delete(journal)
+
+    # 4. Delete consignments + items (by batch_id first, then by invoice linkage)
+    _cons = await db.execute(
+        select(ConsignmentModel)
+        .options(selectinload(ConsignmentModel.items))
+        .where(ConsignmentModel.import_batch_id == batch_id)
+    )
+    cons_list = _cons.scalars().all()
+    cons_deleted = len(cons_list)
+    for cons in cons_list:
+        for ci in cons.items:
+            await db.delete(ci)
+        await db.delete(cons)
+
+    # 5. Delete invoices (cascade removes invoice items via ORM relationship)
+    for inv in invoices:
+        await db.delete(inv)
+
+    await db.commit()
+    return {
+        "ok": True,
+        "deleted_invoices":     len(invoices),
+        "deleted_consignments": cons_deleted,
+        "note": "client.discount_pct and B2BClientPrice entries were NOT reverted (durable settings).",
+    }
+
+
 # ── UI ─────────────────────────────────────────────────
 @router.get("/", response_class=HTMLResponse)
 def import_ui():
@@ -757,9 +979,82 @@ td{padding:8px 12px;border-top:1px solid var(--border);color:var(--sub);white-sp
         </div>
     </div>
 
-    <!-- Recent Batches -->
+    <!-- Recent Retail Batches -->
     <div class="section-label">Recent Sales Import Batches</div>
     <div id="batches-panel" style="background:var(--card);border:1px solid var(--border);border-radius:12px;padding:18px 20px;">
+        <div style="color:var(--muted);font-size:13px">Loading…</div>
+    </div>
+
+    <div class="section-label" style="margin-top:32px">Historical B2B Sales</div>
+    <div class="import-grid" style="grid-template-columns:minmax(340px,780px)">
+
+        <!-- HISTORICAL B2B SALES -->
+        <div class="import-card">
+            <div class="import-card-header">
+                <div class="import-card-icon" style="background:rgba(77,159,255,.10)">🏭</div>
+                <div>
+                    <div class="import-card-title">Historical B2B Sales</div>
+                    <div class="import-card-sub">Import wholesale/B2B sales from Excel with per-line discounts and payment types</div>
+                </div>
+            </div>
+            <div class="import-card-body">
+                <div class="col-map">
+                    <div class="col-map-title">Expected Excel Columns</div>
+                    <div class="col-row"><span class="col-excel">SKU</span><span class="col-arrow">→</span><span class="col-field">Must match existing product</span><span style="color:var(--danger);font-size:10px;margin-left:4px">required</span></div>
+                    <div class="col-row"><span class="col-excel">Item</span><span class="col-arrow">→</span><span class="col-field">Product name (informational)</span><span class="col-opt">optional</span></div>
+                    <div class="col-row"><span class="col-excel">QTY</span><span class="col-arrow">→</span><span class="col-field">Quantity (&gt; 0)</span><span style="color:var(--danger);font-size:10px;margin-left:4px">required</span></div>
+                    <div class="col-row"><span class="col-excel">Price</span><span class="col-arrow">→</span><span class="col-field">Unit price before discount</span><span style="color:var(--danger);font-size:10px;margin-left:4px">required</span></div>
+                    <div class="col-row"><span class="col-excel">Discount</span><span class="col-arrow">→</span><span class="col-field">Per-line discount % (blank = 0)</span><span class="col-opt">optional</span></div>
+                    <div class="col-row"><span class="col-excel">Payment type</span><span class="col-arrow">→</span><span class="col-field">cash · full_payment · consignment</span><span style="color:var(--danger);font-size:10px;margin-left:4px">required</span></div>
+                    <div class="col-row"><span class="col-excel">Client name</span><span class="col-arrow">→</span><span class="col-field">B2B client (auto-created if new)</span><span style="color:var(--danger);font-size:10px;margin-left:4px">required</span></div>
+                    <div class="col-row"><span class="col-excel">Date</span><span class="col-arrow">→</span><span class="col-field">Sale date ≥ 2026-01-01</span><span style="color:var(--danger);font-size:10px;margin-left:4px">required</span></div>
+                    <div style="margin-top:8px">
+                        <a href="/import/api/b2b-sales/template" download style="font-size:11px;color:var(--blue);text-decoration:none">⬇ Download B2B template</a>
+                    </div>
+                </div>
+
+                <!-- Mode radios -->
+                <div style="background:var(--card2);border:1px solid var(--border);border-radius:10px;padding:12px 14px;">
+                    <div class="col-map-title" style="margin-bottom:10px">Import Mode</div>
+                    <label style="display:flex;align-items:flex-start;gap:8px;margin-bottom:10px;cursor:pointer;font-size:13px;color:var(--sub)">
+                        <input type="radio" name="b2b-mode" value="history_only" checked style="margin-top:2px;accent-color:var(--blue)">
+                        <span><b style="color:var(--text)">History only</b> — recommended<br><span style="font-size:11px;color:var(--muted)">Creates B2B invoices + journal entries (AR/cash). No stock adjustment.</span></span>
+                    </label>
+                    <label style="display:flex;align-items:flex-start;gap:8px;cursor:pointer;font-size:13px;color:var(--sub)">
+                        <input type="radio" name="b2b-mode" value="with_stock_adjustment" style="margin-top:2px;accent-color:var(--danger)">
+                        <span><b style="color:var(--danger)">Also adjust stock — use with extreme caution</b><br><span style="font-size:11px;color:var(--muted)">Decrements products.stock and writes StockMoves. Only use if stock movement was NOT already recorded.</span></span>
+                    </label>
+                </div>
+
+                <!-- Options -->
+                <div style="display:flex;flex-direction:column;gap:8px;">
+                    <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:13px;color:var(--sub)">
+                        <input type="checkbox" id="chk-b2b-dryrun" checked style="accent-color:var(--blue)">
+                        <span><b style="color:var(--text)">Dry run</b> — preview without saving (recommended first step)</span>
+                    </label>
+                    <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:13px;color:var(--sub)">
+                        <input type="checkbox" id="chk-b2b-force" style="accent-color:var(--warn)">
+                        <span>Force import even if duplicates detected</span>
+                    </label>
+                </div>
+
+                <div class="drop-zone" id="drop-b2b-sales" ondragover="onDrag(event,'b2b-sales')" ondragleave="offDrag('b2b-sales')" ondrop="onDrop(event,'b2b-sales')">
+                    <input type="file" accept=".xlsx,.xls" onchange="onFile(this,'b2b-sales')">
+                    <div class="drop-icon">🏭</div>
+                    <div class="drop-text">Click or drag b2b_sales.xlsx here</div>
+                    <div class="drop-hint" id="hint-b2b-sales">Rows grouped by Client + Date + Payment type</div>
+                </div>
+                <div class="progress-wrap" id="prog-b2b-sales"><div class="progress-fill" id="progfill-b2b-sales" style="width:0%"></div></div>
+                <div id="preview-b2b-sales"></div>
+                <div class="result-box" id="res-b2b-sales"></div>
+                <button class="import-btn" style="background:linear-gradient(135deg,var(--blue),#4d6fff);color:#fff" id="btn-b2b-sales" onclick="doImportB2B()" disabled>⬆ Import B2B Sales</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Recent B2B Batches -->
+    <div class="section-label">Recent B2B Import Batches</div>
+    <div id="b2b-batches-panel" style="background:var(--card);border:1px solid var(--border);border-radius:12px;padding:18px 20px;">
         <div style="color:var(--muted);font-size:13px">Loading…</div>
     </div>
 
@@ -804,7 +1099,7 @@ async function logout(){
 }
   initializeColorMode();
   initUser();
-  const files = {products:null, stock:null, customers:null, sales:null};
+  const files = {products:null, stock:null, customers:null, sales:null, 'b2b-sales':null};
 
 function onDrag(e,t){ e.preventDefault(); document.getElementById('drop-'+t).classList.add('drag-over'); }
 function offDrag(t){ document.getElementById('drop-'+t).classList.remove('drag-over'); }
@@ -1021,6 +1316,191 @@ async function revertBatch(batchId) {
 
 // Load batches on page load
 loadBatches();
+
+// ── Historical B2B Sales ────────────────────────────────────────────────────
+
+async function doImportB2B() {
+    const f = files['b2b-sales'];
+    if (!f) { showResult('b2b-sales', 'Please select a file first', 'err'); return; }
+    const btn = document.getElementById('btn-b2b-sales');
+    btn.disabled = true; btn.innerHTML = '⏳ Processing…';
+    showProg('b2b-sales', 40); showResult('b2b-sales', '', '');
+
+    const mode   = document.querySelector('input[name="b2b-mode"]:checked').value;
+    const dryRun = document.getElementById('chk-b2b-dryrun').checked;
+    const force  = document.getElementById('chk-b2b-force').checked;
+
+    const fd = new FormData();
+    fd.append('file',    f);
+    fd.append('dry_run', dryRun ? 'true' : 'false');
+    fd.append('mode',    mode);
+    fd.append('force',   force ? 'true' : 'false');
+
+    const res  = await fetch('/import/api/b2b-sales', { method: 'POST', body: fd });
+    const data = await res.json();
+    showProg('b2b-sales', 100);
+    btn.disabled = false;
+    btn.innerHTML = '⬆ Import B2B Sales';
+
+    if (data.error) { showResult('b2b-sales', '✗ ' + data.error, 'err'); return; }
+
+    renderB2BResult(data);
+    loadB2BBatches();
+}
+
+function renderB2BResult(data) {
+    const s    = data.summary || {};
+    const isDry = data.dry_run;
+    const created = isDry ? s.invoices_would_create : s.invoices_created;
+    const label   = isDry ? 'would create' : 'created';
+
+    let html = `<div style="font-size:13px">
+        ${isDry ? '<span style="color:var(--warn)">⚠ DRY RUN — nothing was saved</span><br>' : ''}
+        <b>${s.rows_read}</b> rows read &nbsp;·&nbsp;
+        <b>${created}</b> invoices ${label} &nbsp;·&nbsp;
+        <b>${s.line_items}</b> line items &nbsp;·&nbsp;
+        <b>${s.rows_skipped}</b> skipped<br>
+        <span style="color:var(--sub);font-size:12px">
+            Clients auto-created: <b>${s.clients_auto_created || 0}</b> &nbsp;·&nbsp;
+            Consignments: <b>${isDry ? (s.consignments_would_create||0) : (s.consignments_created||0)}</b> &nbsp;·&nbsp;
+            Date range: ${s.earliest_date||'–'} → ${s.latest_date||'–'}
+        </span><br>
+        <span style="color:var(--sub);font-size:12px">
+            Subtotal: <b>${(s.total_subtotal||0).toFixed(2)}</b> &nbsp;·&nbsp;
+            Discount: <b>${(s.total_discount||0).toFixed(2)}</b> &nbsp;·&nbsp;
+            Invoiced: <b>${(s.total_invoiced||0).toFixed(2)}</b>
+        </span>`;
+
+    if (data.batch_id) {
+        html += `<br><span style="color:var(--muted);font-size:11px">Batch ID: ${data.batch_id}</span>`;
+    }
+
+    // by_payment_type breakdown
+    const bpt = s.by_payment_type || {};
+    if (Object.keys(bpt).length) {
+        html += `<br><br><b style="font-size:12px">By payment type:</b>
+        <table style="font-size:11px;margin-top:4px">
+            <thead><tr><th>Type</th><th>Invoices</th><th>Total</th></tr></thead>
+            <tbody>${Object.entries(bpt).map(([t,v])=>`<tr>
+                <td>${t}</td><td>${v.invoices}</td><td>${(v.total||0).toFixed(2)}</td>
+            </tr>`).join('')}</tbody>
+        </table>`;
+    }
+
+    // discount_pct_suggestions
+    if (data.discount_pct_suggestions && data.discount_pct_suggestions.length) {
+        html += `<br><details style="margin-top:8px"><summary style="font-size:12px;cursor:pointer;color:var(--blue)">
+            Discount % suggestions (${data.discount_pct_suggestions.length})
+        </summary><div style="margin-top:6px">`;
+        data.discount_pct_suggestions.forEach(s => {
+            const badge = s.applied
+                ? `<span style="color:var(--green);font-size:10px">✓ auto-applied</span>`
+                : `<span style="color:var(--warn);font-size:10px">⚠ manual review needed</span>`;
+            html += `<div style="font-size:11px;padding:4px 0;border-bottom:1px solid var(--border)">
+                <b>${s.client}</b>: current ${s.current}% → suggested <b>${s.suggested}%</b> ${badge}`;
+            if (!s.applied && !isDry) {
+                html += ` <button onclick="applyClientDiscount('${s.client}', ${s.suggested})"
+                    style="margin-left:6px;padding:2px 8px;border-radius:4px;border:1px solid var(--blue);
+                    background:transparent;color:var(--blue);font-size:10px;cursor:pointer">Apply</button>`;
+            }
+            html += '</div>';
+        });
+        html += '</div></details>';
+    }
+
+    // auto_created_clients
+    if (data.auto_created_clients && data.auto_created_clients.length) {
+        html += `<br><details style="margin-top:4px"><summary style="font-size:12px;cursor:pointer;color:var(--sub)">
+            Auto-created clients (${data.auto_created_clients.length})
+        </summary><div style="margin-top:4px;font-size:11px;color:var(--muted)">
+        ${data.auto_created_clients.map(c=>
+            `${c.name} · ${c.payment_terms} · discount ${c.discount_pct}%`
+        ).join('<br>')}
+        </div></details>`;
+    }
+
+    if (data.errors && data.errors.length) {
+        html += `<br><br><b style="color:var(--danger)">${data.errors.length} error(s):</b>
+        <div style="max-height:180px;overflow-y:auto;margin-top:6px">
+        <table style="font-size:11px;width:100%">
+            <thead><tr><th>Row</th><th>SKU</th><th>Client</th><th>Date</th><th>Reason</th></tr></thead>
+            <tbody>${data.errors.map(e=>`<tr>
+                <td>${e.row}</td><td style="font-family:var(--mono)">${e.sku||''}</td>
+                <td>${e.client||''}</td><td>${e.date||''}</td>
+                <td style="color:var(--danger)">${e.reason}</td>
+            </tr>`).join('')}</tbody>
+        </table></div>`;
+    }
+
+    if (isDry && (!data.errors || data.errors.length === 0)) {
+        html += `<br><br>
+        <button onclick="runRealB2BImport()" style="width:100%;padding:10px;border-radius:8px;
+            background:linear-gradient(135deg,var(--blue),#4d6fff);color:#fff;
+            font-weight:800;font-size:13px;border:none;cursor:pointer;">
+            ✓ Run real B2B import
+        </button>`;
+    }
+
+    html += '</div>';
+    const kind = data.errors && data.errors.length ? 'warn' : 'ok';
+    showResult('b2b-sales', html, kind);
+}
+
+async function runRealB2BImport() {
+    document.getElementById('chk-b2b-dryrun').checked = false;
+    await doImportB2B();
+}
+
+async function applyClientDiscount(clientName, discountPct) {
+    // Placeholder — future: call PUT /b2b/api/clients/{id} with new discount_pct
+    alert('To apply: go to B2B → Clients → ' + clientName + ' → edit discount to ' + discountPct + '%');
+}
+
+async function loadB2BBatches() {
+    const panel = document.getElementById('b2b-batches-panel');
+    try {
+        const r = await fetch('/import/api/b2b-sales/batches');
+        const d = await r.json();
+        const batches = d.batches || [];
+        if (!batches.length) {
+            panel.innerHTML = '<div style="color:var(--muted);font-size:12px">No B2B import batches found.</div>';
+            return;
+        }
+        panel.innerHTML = `<table style="width:100%;font-size:12px">
+            <thead><tr>
+                <th>Batch ID</th><th>File</th><th>Date</th>
+                <th>Invoices</th><th>Total Value</th><th></th>
+            </tr></thead>
+            <tbody>${batches.map(b=>`<tr>
+                <td style="font-family:var(--mono);font-size:10px">${b.batch_id.slice(0,12)}…</td>
+                <td>${b.filename}</td><td>${b.ran_on||'–'}</td>
+                <td>${b.invoice_count}</td><td>${b.total_value.toFixed(2)}</td>
+                <td><button onclick="revertB2BBatch('${b.batch_id}')"
+                    style="padding:4px 10px;border-radius:6px;border:1px solid var(--danger);
+                    background:rgba(255,77,109,.08);color:var(--danger);
+                    font-size:11px;cursor:pointer;font-family:var(--sans)">
+                    Revert
+                </button></td>
+            </tr>`).join('')}
+            </tbody></table>`;
+    } catch(e) {
+        panel.innerHTML = '<div style="color:var(--muted);font-size:12px">Could not load batches.</div>';
+    }
+}
+
+async function revertB2BBatch(batchId) {
+    if (!confirm('Delete all B2B invoices in batch ' + batchId.slice(0,8) + '…? This cannot be undone.')) return;
+    const r = await fetch('/import/api/b2b-sales/batch/' + batchId, { method: 'DELETE' });
+    const d = await r.json();
+    if (d.ok) {
+        showResult('b2b-sales', `✓ Batch reverted — ${d.deleted_invoices} invoices, ${d.deleted_consignments} consignments deleted.`, 'ok');
+    } else {
+        showResult('b2b-sales', '✗ Revert failed', 'err');
+    }
+    loadB2BBatches();
+}
+
+loadB2BBatches();
 </script>
 </body>
 </html>"""

@@ -412,15 +412,33 @@ nav{position:sticky;top:0;z-index:100;display:flex;align-items:center;gap:10px;p
 .panel-title{font-size:13px;font-weight:700;letter-spacing:.5px;}
 .panel-badge{font-size:11px;font-weight:700;padding:3px 9px;border-radius:20px;}
 .panel-body{padding:16px 18px;}
-.assistant-panel{background:var(--card);border:1px solid var(--border);border-radius:var(--r);padding:16px 18px;display:flex;flex-direction:column;gap:12px;}
-.assistant-row{display:flex;gap:10px;flex-wrap:wrap;}
-.assistant-input{flex:1;min-width:240px;background:var(--card2);border:1px solid var(--border2);border-radius:12px;padding:12px 14px;color:var(--text);font-family:var(--sans);font-size:14px;outline:none;}
-.assistant-input:focus{border-color:rgba(0,255,157,.3);}
-.assistant-btn{padding:12px 16px;border:none;border-radius:12px;background:linear-gradient(135deg,var(--green),var(--blue));color:#021a10;font-family:var(--sans);font-size:13px;font-weight:800;cursor:pointer;}
-.assistant-hints{display:flex;gap:8px;flex-wrap:wrap;}
-.assistant-chip{padding:6px 10px;border-radius:999px;border:1px solid var(--border2);background:var(--card2);color:var(--sub);font-size:11px;cursor:pointer;}
-.assistant-result{min-height:44px;color:var(--sub);font-size:13px;line-height:1.5;}
-.assistant-meta{font-size:11px;color:var(--muted);font-family:var(--mono);margin-top:6px;}
+.insights-layout{display:grid;grid-template-columns:1.35fr .95fr .9fr;gap:16px;}
+.insights-block{display:flex;flex-direction:column;gap:12px;}
+.insights-subtitle{font-size:10px;font-weight:700;letter-spacing:1.3px;text-transform:uppercase;color:var(--muted);}
+.insight-list{display:flex;flex-direction:column;gap:10px;}
+.insight-item{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:12px 14px;border:1px solid var(--border);border-radius:12px;background:linear-gradient(180deg,color-mix(in srgb,var(--card2) 88%,white 12%),var(--card2));}
+.insight-copy{display:flex;flex-direction:column;gap:4px;min-width:0;}
+.insight-label{font-size:12px;font-weight:700;color:var(--text);}
+.insight-note{font-size:11px;color:var(--muted);line-height:1.35;}
+.insight-value{font-family:var(--mono);font-size:14px;font-weight:700;white-space:nowrap;}
+.insight-value.good{color:var(--green);}
+.insight-value.warn{color:var(--warn);}
+.insight-value.bad{color:var(--danger);}
+.insight-value.blue{color:var(--blue);}
+.action-list{display:grid;grid-template-columns:1fr 1fr;gap:10px;}
+.action-link{display:flex;flex-direction:column;gap:5px;min-height:88px;padding:14px;border-radius:12px;border:1px solid var(--border);background:linear-gradient(180deg,color-mix(in srgb,var(--card2) 86%,white 14%),var(--card2));text-decoration:none;transition:border-color .18s,transform .18s,box-shadow .18s;}
+.action-link:hover{border-color:var(--border2);transform:translateY(-1px);box-shadow:0 12px 28px rgba(0,0,0,.16);}
+.action-title{font-size:13px;font-weight:700;color:var(--text);}
+.action-note{font-size:11px;color:var(--sub);line-height:1.35;}
+.mini-list{display:flex;flex-direction:column;gap:10px;}
+.mini-row{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:10px 0;border-bottom:1px solid var(--border);}
+.mini-row:last-child{border-bottom:none;padding-bottom:0;}
+.mini-primary{display:flex;flex-direction:column;gap:3px;min-width:0;}
+.mini-title{font-size:12px;font-weight:700;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.mini-meta{font-size:11px;color:var(--muted);}
+.mini-value{font-family:var(--mono);font-size:12px;color:var(--green);white-space:nowrap;}
+@media(max-width:1100px){.insights-layout{grid-template-columns:1fr;}.action-list{grid-template-columns:1fr 1fr;}}
+@media(max-width:700px){.action-list{grid-template-columns:1fr;}}
 
 /* CHART */
 .chart-wrap{display:flex;align-items:flex-end;gap:6px;height:140px;padding:0 18px 14px;border-top:1px solid var(--border);}
@@ -476,66 +494,6 @@ tr:hover td{background:rgba(255,255,255,.02);}
 .spinner{width:36px;height:36px;border:3px solid var(--border2);border-top-color:var(--green);border-radius:50%;animation:spin .7s linear infinite;}
 @keyframes spin{to{transform:rotate(360deg);}}
 
-/* CHAT WIDGET */
-.chat-btn{position:fixed;bottom:28px;right:28px;width:56px;height:56px;border-radius:50%;background:linear-gradient(135deg,var(--green),var(--blue));border:none;cursor:pointer;display:flex;align-items:center;justify-content:center;box-shadow:0 8px 32px rgba(0,255,157,.3);z-index:9000;transition:transform .2s,box-shadow .2s;}
-.chat-btn:hover{transform:scale(1.08);box-shadow:0 12px 44px rgba(0,255,157,.42);}
-.chat-badge{position:absolute;top:-2px;right:-2px;width:14px;height:14px;background:var(--danger);border-radius:50%;border:2px solid var(--bg);display:none;}
-.chat-window{position:fixed;bottom:96px;right:28px;width:380px;background:var(--card);border:1px solid var(--border2);border-radius:20px;display:flex;flex-direction:column;z-index:8999;box-shadow:0 24px 60px rgba(0,0,0,.45);transform:scale(.92) translateY(20px);opacity:0;pointer-events:none;transition:transform .22s cubic-bezier(.34,1.2,.64,1),opacity .18s ease;}
-.chat-window.open{transform:scale(1) translateY(0);opacity:1;pointer-events:all;}
-.chat-header{display:flex;align-items:center;justify-content:space-between;padding:14px 18px;border-bottom:1px solid var(--border);border-radius:20px 20px 0 0;background:var(--card2);}
-.chat-header-left{display:flex;align-items:center;gap:10px;}
-.chat-avatar{width:32px;height:32px;background:linear-gradient(135deg,var(--green),var(--blue));border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:800;color:#021a10;flex-shrink:0;}
-.chat-title{font-size:13px;font-weight:700;color:var(--text);}
-.chat-status{font-size:11px;color:var(--green);}
-.chat-close{width:28px;height:28px;background:transparent;border:1px solid var(--border);border-radius:8px;color:var(--muted);font-size:13px;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:all .15s;line-height:1;}
-.chat-close:hover{border-color:var(--border2);color:var(--text);}
-.chat-messages{overflow-y:auto;padding:16px;display:flex;flex-direction:column;gap:12px;min-height:0;max-height:340px;scrollbar-width:thin;scrollbar-color:var(--border2) transparent;}
-.chat-messages::-webkit-scrollbar{width:4px;}
-.chat-messages::-webkit-scrollbar-thumb{background:var(--border2);border-radius:4px;}
-.msg{display:flex;flex-direction:column;max-width:85%;}
-.msg.user{align-self:flex-end;align-items:flex-end;}
-.msg.assistant{align-self:flex-start;align-items:flex-start;}
-.msg-bubble{padding:10px 14px;font-size:13px;line-height:1.55;}
-.msg.user .msg-bubble{background:linear-gradient(135deg,rgba(0,255,157,.18),rgba(77,159,255,.15));border:1px solid rgba(0,255,157,.25);color:var(--text);border-radius:14px 14px 4px 14px;}
-.msg.assistant .msg-bubble{background:var(--card2);border:1px solid var(--border);color:var(--sub);border-radius:14px 14px 14px 4px;}
-.msg-time{font-size:10px;color:var(--muted);margin-top:4px;font-family:var(--mono);}
-.typing-indicator{display:flex;gap:4px;padding:12px 14px;background:var(--card2);border:1px solid var(--border);border-radius:14px 14px 14px 4px;align-items:center;width:fit-content;}
-.typing-dot{width:6px;height:6px;background:var(--muted);border-radius:50%;animation:typeBounce 1.2s infinite;}
-.typing-dot:nth-child(2){animation-delay:.2s;}
-.typing-dot:nth-child(3){animation-delay:.4s;}
-@keyframes typeBounce{0%,60%,100%{transform:translateY(0);opacity:.4;}30%{transform:translateY(-5px);opacity:1;}}
-.chat-hints{display:flex;gap:6px;flex-wrap:wrap;padding:8px 16px 4px;}
-.chat-chip{padding:4px 10px;border-radius:999px;border:1px solid var(--border2);background:transparent;color:var(--sub);font-size:11px;cursor:pointer;font-family:var(--sans);transition:all .15s;}
-.chat-chip:hover{background:var(--card2);color:var(--text);}
-.chat-input-row{display:flex;gap:8px;padding:12px 16px;border-top:1px solid var(--border);}
-.chat-input{flex:1;background:var(--card2);border:1px solid var(--border2);border-radius:12px;padding:10px 14px;color:var(--text);font-family:var(--sans);font-size:13px;outline:none;min-width:0;}
-.chat-input:focus{border-color:rgba(0,255,157,.4);}
-.chat-send{width:38px;height:38px;background:linear-gradient(135deg,var(--green),var(--blue));border:none;border-radius:12px;color:#021a10;font-size:16px;cursor:pointer;display:flex;align-items:center;justify-content:center;flex-shrink:0;transition:filter .15s;}
-.chat-send:hover{filter:brightness(1.1);}
-.chat-send:disabled{opacity:.45;cursor:not-allowed;}
-@media(max-width:480px){.chat-window{width:calc(100vw - 32px);right:16px;bottom:88px;}.chat-btn{bottom:20px;right:20px;}}
-/* CHAT: RICH PAYLOAD LAYOUT */
-.msg.assistant.rich{max-width:100%;width:100%;}
-/* CHAT: HIGHLIGHTS */
-.chat-highlights{display:grid;grid-template-columns:repeat(auto-fit,minmax(90px,1fr));gap:6px;margin:6px 0 4px;}
-.chat-highlight{background:var(--card2);border:1px solid var(--border);border-radius:10px;padding:8px 10px;display:flex;flex-direction:column;gap:2px;}
-.chat-highlight-label{font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;}
-.chat-highlight-value{font-family:var(--mono);font-size:13px;font-weight:700;color:var(--text);}
-.chat-highlight.good .chat-highlight-value{color:var(--green);}
-.chat-highlight.bad  .chat-highlight-value{color:var(--danger);}
-/* CHAT: TABLE */
-.chat-table-wrap{max-height:180px;overflow:auto;overflow-x:auto;border:1px solid var(--border);border-radius:10px;margin:6px 0 4px;}
-.chat-table{width:100%;border-collapse:collapse;font-size:12px;}
-.chat-table th,.chat-table td{padding:6px 8px;text-align:left;border-bottom:1px solid var(--border);}
-.chat-table th{position:sticky;top:0;background:var(--card2);color:var(--sub);font-weight:600;font-size:11px;text-transform:uppercase;letter-spacing:.04em;}
-.chat-table td.right,.chat-table th.right{text-align:right;font-family:var(--mono);}
-.chat-table-truncated{padding:6px 8px;font-size:11px;color:var(--muted);text-align:center;}
-/* CHAT: SUGGESTIONS */
-.chat-suggestions{display:flex;gap:6px;flex-wrap:wrap;padding:4px 0 2px;}
-.chat-suggestion{padding:5px 10px;border-radius:999px;border:1px solid var(--border2);background:var(--card2);color:var(--sub);font-size:11px;cursor:pointer;font-family:var(--sans);transition:all .15s;}
-.chat-suggestion:hover{border-color:var(--green);color:var(--text);}
-/* CHAT: CONFIDENCE HINT */
-.chat-confidence-hint{font-size:10px;color:var(--muted);font-style:italic;margin-bottom:4px;}
 </style>
     <script src="/static/auth-guard.js"></script>
 </head>
@@ -651,7 +609,52 @@ tr:hover td{background:rgba(255,255,255,.02);}
         </div>
     </div>
 
-    <!-- ROW 3: SALES CHART -->
+    <!-- ROW 3: INSIGHTS & ACTIONS -->
+    <div class="panel">
+        <div class="panel-header">
+            <span class="panel-title">Insights &amp; Actions</span>
+            <span class="panel-badge" style="background:rgba(77,159,255,.12);color:var(--blue)">operations cockpit</span>
+        </div>
+        <div class="panel-body">
+            <div class="insights-layout">
+                <div class="insights-block">
+                    <div class="insights-subtitle">Needs Attention</div>
+                    <div class="insight-list" id="attention-list"></div>
+                </div>
+                <div class="insights-block">
+                    <div class="insights-subtitle">Quick Actions</div>
+                    <div class="action-list">
+                        <a class="action-link" href="/inventory/">
+                            <span class="action-title">View Inventory</span>
+                            <span class="action-note">Review stock gaps and movement details.</span>
+                        </a>
+                        <a class="action-link" href="/reports/">
+                            <span class="action-title">View Reports</span>
+                            <span class="action-note">Open financial and operational reporting.</span>
+                        </a>
+                        <a class="action-link" href="/b2b/">
+                            <span class="action-title">Open B2B</span>
+                            <span class="action-note">Check receivables and customer accounts.</span>
+                        </a>
+                        <a class="action-link" href="/expenses/">
+                            <span class="action-title">Open Expenses</span>
+                            <span class="action-note">Inspect this month’s cost activity.</span>
+                        </a>
+                        <a class="action-link" href="/pos">
+                            <span class="action-title">Open POS</span>
+                            <span class="action-note">Jump into live sales operations.</span>
+                        </a>
+                    </div>
+                </div>
+                <div class="insights-block">
+                    <div class="insights-subtitle">Top Products Snapshot</div>
+                    <div class="mini-list" id="insights-top-products"></div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ROW 4: SALES CHART -->
     <div class="panel">
         <div class="panel-header">
             <span class="panel-title">Revenue — Last 7 Days</span>
@@ -664,7 +667,7 @@ tr:hover td{background:rgba(255,255,255,.02);}
         <div class="chart-wrap" id="chart-wrap"></div>
     </div>
 
-    <!-- ROW 4: TOP PRODUCTS + PAYMENT METHODS -->
+    <!-- ROW 5: TOP PRODUCTS + PAYMENT METHODS -->
     <div class="grid-2">
         <div class="panel">
             <div class="panel-header">
@@ -681,7 +684,7 @@ tr:hover td{background:rgba(255,255,255,.02);}
         </div>
     </div>
 
-    <!-- ROW 5: RECENT SALES + OUT OF STOCK -->
+    <!-- ROW 6: RECENT SALES + OUT OF STOCK -->
     <div class="grid-2">
         <div class="panel">
             <div class="panel-header">
@@ -706,7 +709,7 @@ tr:hover td{background:rgba(255,255,255,.02);}
         </div>
     </div>
 
-    <!-- ROW 6: LOW STOCK -->
+    <!-- ROW 7: LOW STOCK -->
     <div class="panel">
         <div class="panel-header">
             <span class="panel-title" style="color:var(--warn)">Low Stock Products (1–5 units)</span>
@@ -718,42 +721,6 @@ tr:hover td{background:rgba(255,255,255,.02);}
         </table>
     </div>
 
-</div>
-
-<!-- FLOATING CHAT BUTTON -->
-<button class="chat-btn" id="chat-btn" onclick="toggleChat()" title="Ask the Dashboard Assistant">
-    <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#021a10" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-        <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
-    </svg>
-    <span class="chat-badge" id="chat-badge"></span>
-</button>
-
-<!-- CHAT WINDOW -->
-<div class="chat-window" id="chat-window">
-    <div class="chat-header">
-        <div class="chat-header-left">
-            <div class="chat-avatar">AI</div>
-            <div>
-                <div class="chat-title">Dashboard Assistant</div>
-                <div class="chat-status">&#9679; Online</div>
-            </div>
-        </div>
-        <button class="chat-close" onclick="toggleChat()">&#x2715;</button>
-    </div>
-    <div class="chat-messages" id="chat-messages"></div>
-    <div class="chat-hints" id="chat-hints">
-        <button class="chat-chip" onclick="chatPreset(`today's sales`)">Today's sales</button>
-        <button class="chat-chip" onclick="chatPreset('top products')">Top products</button>
-        <button class="chat-chip" onclick="chatPreset('low-stock items')">Low stock</button>
-        <button class="chat-chip" onclick="chatPreset('expenses this month')">Expenses</button>
-        <button class="chat-chip" onclick="chatPreset('unpaid invoices')">Unpaid invoices</button>
-    </div>
-    <div class="chat-input-row">
-        <input id="chat-input" class="chat-input" placeholder="Ask about your business&#8230;" autocomplete="off">
-        <button class="chat-send" id="chat-send" onclick="sendChatMessage()">
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="#021a10"><path d="M2 21l21-9L2 3v7l15 2-15 2z"/></svg>
-        </button>
-    </div>
 </div>
 
 <script>
@@ -868,6 +835,74 @@ function renderExpenseTrend(current, previous){
 
 setupDashboardCards();
 
+function formatMoney(value){
+    return Number(value || 0).toFixed(2) + " EGP";
+}
+
+function renderInsightsPanel(d){
+    const attention = [
+        {
+            label: "Out of stock",
+            note: "Products unavailable for immediate sale.",
+            value: Number(d.out_of_stock_count || 0),
+            tone: Number(d.out_of_stock_count || 0) > 0 ? "bad" : "good",
+        },
+        {
+            label: "Low stock",
+            note: "Products at or below the current reorder threshold.",
+            value: Number(d.low_stock_count || 0),
+            tone: Number(d.low_stock_count || 0) > 0 ? "warn" : "good",
+        },
+        {
+            label: "B2B outstanding",
+            note: Number(d.b2b_clients || 0) + " active B2B clients on file.",
+            value: formatMoney(d.b2b_outstanding),
+            tone: Number(d.b2b_outstanding || 0) > 0 ? "blue" : "good",
+        },
+        {
+            label: "Expenses this month",
+            note: "Compared against last month in the main KPI row.",
+            value: formatMoney(d.expenses_month),
+            tone: Number(d.expenses_month || 0) > 0 ? "warn" : "good",
+        },
+        {
+            label: "Refunds this month",
+            note: Number(d.ref_count_month || 0) + " refund transactions recorded.",
+            value: formatMoney(d.ref_month),
+            tone: Number(d.ref_month || 0) > 0 ? "bad" : "good",
+        },
+    ];
+
+    const attentionHost = document.getElementById("attention-list");
+    if (attentionHost) {
+        attentionHost.innerHTML = attention.map(item => `
+            <div class="insight-item">
+                <div class="insight-copy">
+                    <div class="insight-label">${item.label}</div>
+                    <div class="insight-note">${item.note}</div>
+                </div>
+                <div class="insight-value ${item.tone}">${item.value}</div>
+            </div>
+        `).join("");
+    }
+
+    const topProductsHost = document.getElementById("insights-top-products");
+    if (topProductsHost) {
+        const topProducts = Array.isArray(d.top_products) ? d.top_products.slice(0, 3) : [];
+        topProductsHost.innerHTML = topProducts.length
+            ? topProducts.map((product, idx) => `
+                <div class="mini-row">
+                    <div class="mini-primary">
+                        <div class="mini-title">${idx + 1}. ${product.name}</div>
+                        <div class="mini-meta">${Number(product.qty || 0).toFixed(0)} units sold this month</div>
+                    </div>
+                    <div class="mini-value">${formatMoney(product.revenue)}</div>
+                </div>
+            `).join("")
+            : `<div style="color:var(--muted);font-size:13px">No product movement to highlight yet this month.</div>`;
+    }
+}
+
 async function load(){
     try {
         let d = await (await fetch("/dashboard/data")).json();
@@ -895,6 +930,7 @@ async function load(){
         document.getElementById("s-farm").innerText       = d.farm_month;
         document.getElementById("s-batches").innerText    = d.batches_month;
         document.getElementById("s-spoilage").innerText   = "spoilage this month: " + d.spoilage_month.toFixed(1);
+        renderInsightsPanel(d);
 
         // ── CHART ──
         let maxVal = Math.max(...d.last7.map(x=>x.total), 1);
@@ -997,195 +1033,8 @@ async function load(){
     }
 }
 
-// ── CHAT WIDGET ──────────────────────────────────────────────────────────────
-// XSS-safe escaper — used on every dynamic value interpolated into innerHTML
-function _esc(s) {
-    if (s == null) return "";
-    return String(s).replace(/[&<>"']/g, c => (
-        {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]
-    ));
-}
-
-let _chatOpen = false;
-let _chatHistory = [];
-let _chatBusy = false;
-
-function toggleChat() {
-    _chatOpen = !_chatOpen;
-    const win = document.getElementById("chat-window");
-    const badge = document.getElementById("chat-badge");
-    if (_chatOpen) {
-        win.classList.add("open");
-        setTimeout(() => document.getElementById("chat-input")?.focus(), 60);
-        badge.style.display = "none";
-        if (_chatHistory.length === 0) {
-            _addMsg("assistant", "Hi! I can answer questions about your sales, inventory, expenses, and invoices. What would you like to know?");
-        }
-    } else {
-        win.classList.remove("open");
-    }
-}
-
-function _now() {
-    return new Date().toLocaleTimeString("en-GB", {hour:"2-digit", minute:"2-digit"});
-}
-
-function _addMsg(role, text, payload = null) {
-    _chatHistory.push({role, text, time: _now(), payload});
-    _renderChat();
-}
-
-function _renderChat() {
-    const c = document.getElementById("chat-messages");
-    if (!c) return;
-
-    c.innerHTML = _chatHistory.map(m => {
-        // ── User bubble ───────────────────────────────────────────────────────
-        if (m.role === "user") {
-            return `<div class="msg user">
-                <div class="msg-bubble">${_esc(m.text)}</div>
-                <div class="msg-time">${_esc(m.time)}</div>
-            </div>`;
-        }
-
-        // ── Assistant: no payload (greeting / network error) ──────────────────
-        const p = m.payload;
-        if (!p) {
-            return `<div class="msg assistant">
-                <div class="msg-bubble">${_esc(m.text)}</div>
-                <div class="msg-time">${_esc(m.time)}</div>
-            </div>`;
-        }
-
-        // ── Assistant: rich payload ───────────────────────────────────────────
-        const hasHighlights = p.highlights && p.highlights.length > 0;
-        const hasTable      = !!p.table;
-        const hasSuggestions= p.suggestions && p.suggestions.length > 0;
-        const isRich        = hasHighlights || hasTable || hasSuggestions;
-
-        let inner = "";
-
-        // 1. Low-confidence hint (only when supported + uncertain + has chips)
-        if (p.supported === true && p.confidence != null && p.confidence < 0.6 && hasSuggestions) {
-            inner += `<div class="chat-confidence-hint">Did you mean one of these?</div>`;
-        }
-
-        // 2. Message text
-        inner += `<div class="msg-bubble">${_esc(m.text)}</div>`;
-
-        // 3. Highlights grid
-        if (hasHighlights) {
-            const cards = p.highlights.map(h => {
-                const toneClass = (h.tone === "good" || h.tone === "bad") ? ` ${_esc(h.tone)}` : "";
-                return `<div class="chat-highlight${toneClass}" aria-label="${_esc(h.label)}">
-                    <span class="chat-highlight-label">${_esc(h.label)}</span>
-                    <span class="chat-highlight-value">${_esc(h.value)}</span>
-                </div>`;
-            }).join("");
-            inner += `<div class="chat-highlights">${cards}</div>`;
-        }
-
-        // 4. Table
-        if (hasTable) {
-            const cols  = p.table.columns || [];
-            const rows  = p.table.rows    || [];
-            const thead = cols.map(col =>
-                `<th class="${col.align === "right" ? "right" : ""}">${_esc(col.label)}</th>`
-            ).join("");
-            const tbody = rows.map(row => {
-                const cells = cols.map(col =>
-                    `<td class="${col.align === "right" ? "right" : ""}">${_esc(row[col.key] != null ? row[col.key] : "")}</td>`
-                ).join("");
-                return `<tr>${cells}</tr>`;
-            }).join("");
-            let tfooter = "";
-            if (p.table.truncated) {
-                const shown = rows.length;
-                const total = p.table.total_count || "more";
-                tfooter = `<tr><td colspan="${cols.length}" class="chat-table-truncated">Showing ${_esc(shown)} of ${_esc(total)} — ask for details on a specific item to see more.</td></tr>`;
-            }
-            inner += `<div class="chat-table-wrap"><table class="chat-table">
-                <thead><tr>${thead}</tr></thead>
-                <tbody>${tbody}${tfooter}</tbody>
-            </table></div>`;
-        }
-
-        // 5. Suggestion chips
-        if (hasSuggestions) {
-            const chips = p.suggestions.map(s =>
-                `<button class="chat-suggestion" role="listitem" data-q="${_esc(s)}">${_esc(s)}</button>`
-            ).join("");
-            inner += `<div class="chat-suggestions" role="list">${chips}</div>`;
-        }
-
-        // 6. Timestamp
-        inner += `<div class="msg-time">${_esc(m.time)}</div>`;
-
-        return `<div class="msg assistant${isRich ? " rich" : ""}">${inner}</div>`;
-    }).join("");
-
-    if (_chatBusy) {
-        c.innerHTML += `<div class="msg assistant"><div class="typing-indicator"><div class="typing-dot"></div><div class="typing-dot"></div><div class="typing-dot"></div></div></div>`;
-    }
-    c.scrollTop = c.scrollHeight;
-}
-
-async function sendChatMessage() {
-    const input = document.getElementById("chat-input");
-    const sendBtn = document.getElementById("chat-send");
-    const q = (input?.value || "").trim();
-    if (!q || _chatBusy) return;
-
-    input.value = "";
-    _addMsg("user", q);
-
-    const hints = document.getElementById("chat-hints");
-    if (hints) hints.style.display = "none";
-
-    _chatBusy = true;
-    sendBtn.disabled = true;
-    _renderChat();
-
-    try {
-        const res = await fetch("/dashboard/assistant", {
-            method: "POST",
-            headers: {"Content-Type": "application/json"},
-            body: JSON.stringify({question: q}),
-        });
-        const data = await res.json();
-        _chatBusy = false;
-        sendBtn.disabled = false;
-        const text = data.message || (res.ok ? "Done." : (data.detail || "Something went wrong."));
-        _addMsg("assistant", text, res.ok ? data : null);
-    } catch(e) {
-        _chatBusy = false;
-        sendBtn.disabled = false;
-        _addMsg("assistant", "I\u2019m temporarily unavailable \u2014 please try again.");
-    }
-}
-
-function chatPreset(q) {
-    const input = document.getElementById("chat-input");
-    if (input) input.value = q;
-    sendChatMessage();
-}
-
-document.getElementById("chat-input")?.addEventListener("keydown", e => {
-    if (e.key === "Enter") { e.preventDefault(); sendChatMessage(); }
-});
-
-// Suggestion chip clicks — delegated so it survives innerHTML re-renders
-document.getElementById("chat-messages")?.addEventListener("click", e => {
-    const btn = e.target.closest(".chat-suggestion");
-    if (!btn) return;
-    const q = btn.dataset.q;
-    if (!q) return;
-    const input = document.getElementById("chat-input");
-    if (input) input.value = q;
-    sendChatMessage();
-});
-
 load();
+
 </script>
 </body>
 </html>"""

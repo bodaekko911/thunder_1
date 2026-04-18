@@ -41,6 +41,7 @@ class B2BInvoice(Base):
     amount_paid     = Column(Numeric(14,2), default=0)
     due_date        = Column(Date, nullable=True)
     notes           = Column(Text)
+    import_batch_id = Column(String(64), nullable=True, index=True)
     created_at      = Column(DateTime(timezone=True), server_default=func.now())
 
     client          = relationship("B2BClient", back_populates="invoices")
@@ -72,6 +73,7 @@ class Consignment(Base):
     user_id         = Column(Integer, ForeignKey("users.id"), nullable=True)
     status          = Column(String(20), default="active")  # active | settled | closed
     notes           = Column(Text)
+    import_batch_id = Column(String(64), nullable=True, index=True)
     created_at      = Column(DateTime(timezone=True), server_default=func.now())
     settled_at      = Column(DateTime(timezone=True), nullable=True)
 

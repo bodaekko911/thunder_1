@@ -79,44 +79,17 @@ class ClientRefundCreate(BaseModel):
 
 
 # ── HELPERS ────────────────────────────────────────────
-async def _next_b2b_number(db: AsyncSession) -> str:
-    _r = await db.execute(select(func.max(B2BInvoice.id)))
-    max_id = _r.scalar() or 0
-    return f"B2B-{str(max_id + 1).zfill(5)}"
-
-async def _next_cons_number(db: AsyncSession) -> str:
-    _r = await db.execute(select(func.max(Consignment.id)))
-    max_id = _r.scalar() or 0
-    return f"CONS-{str(max_id + 1).zfill(4)}"
+from app.services.b2b_shared import (
+    post_journal      as _post_journal,
+    seed_deferred_revenue as _seed_deferred_revenue,
+    next_b2b_number   as _next_b2b_number,
+    next_cons_number  as _next_cons_number,
+)
 
 async def _next_refund_number(db: AsyncSession) -> str:
     _r = await db.execute(select(func.max(B2BRefund.id)))
     max_id = _r.scalar() or 0
     return f"RFD-{str(max_id + 1).zfill(5)}"
-
-async def _post_journal(db: AsyncSession, description, ref_type, entries, user_id=None):
-    journal = Journal(ref_type=ref_type, description=description, user_id=user_id)
-    db.add(journal); await db.flush()
-    for code, debit, credit in entries:
-        _r = await db.execute(select(Account).where(Account.code == code))
-        acc = _r.scalar_one_or_none()
-        if acc:
-            db.add(JournalEntry(
-                journal_id=journal.id, account_id=acc.id,
-                debit=debit, credit=credit,
-            ))
-            acc.balance += Decimal(str(debit)) - Decimal(str(credit))
-
-async def _seed_deferred_revenue(db: AsyncSession):
-    """Make sure account 2200 Deferred Revenue exists."""
-    _r = await db.execute(select(Account).where(Account.code == "2200"))
-    acc = _r.scalar_one_or_none()
-    if not acc:
-        db.add(Account(
-            code="2200", name="Deferred Revenue",
-            account_type="liability", balance=Decimal("0"),
-        ))
-        await db.commit()
 
 def _normalized_client_terms(client: B2BClient) -> str:
     terms = (client.payment_terms or "cash").strip().lower()
