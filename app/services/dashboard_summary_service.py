@@ -151,36 +151,49 @@ async def _daily_sparkline(
     acc_id: int | None,
 ) -> list[float]:
     tz = _tz()
-    invoice_day = _local_day_expr(Invoice.created_at)
-    refund_day = _local_day_expr(RetailRefund.created_at)
-    journal_day = _local_day_expr(Journal.created_at)
+    invoice_daily = (
+        select(
+            _local_day_expr(Invoice.created_at).label("day"),
+            Invoice.total.label("amount"),
+        )
+        .where(Invoice.created_at >= utc_s, Invoice.created_at <= utc_e, Invoice.status == "paid")
+        .subquery("invoice_daily")
+    )
 
     pos_rows = await db.execute(
         select(
-            invoice_day.label("day"),
-            func.sum(Invoice.total).label("total"),
+            invoice_daily.c.day,
+            func.sum(invoice_daily.c.amount).label("total"),
         )
-        .where(Invoice.created_at >= utc_s, Invoice.created_at <= utc_e, Invoice.status == "paid")
-        .group_by(invoice_day)
+        .select_from(invoice_daily)
+        .group_by(invoice_daily.c.day)
     )
     pos_by_day = {str(r.day): float(r.total) for r in pos_rows}
 
-    ref_rows = await db.execute(
+    refund_daily = (
         select(
-            refund_day.label("day"),
-            func.sum(RetailRefund.total).label("total"),
+            _local_day_expr(RetailRefund.created_at).label("day"),
+            RetailRefund.total.label("amount"),
         )
         .where(RetailRefund.created_at >= utc_s, RetailRefund.created_at <= utc_e)
-        .group_by(refund_day)
+        .subquery("refund_daily")
+    )
+    ref_rows = await db.execute(
+        select(
+            refund_daily.c.day,
+            func.sum(refund_daily.c.amount).label("total"),
+        )
+        .select_from(refund_daily)
+        .group_by(refund_daily.c.day)
     )
     ref_by_day = {str(r.day): float(r.total) for r in ref_rows}
 
     b2b_by_day: dict[str, float] = {}
     if acc_id:
-        b2b_rows = await db.execute(
+        journal_daily = (
             select(
-                journal_day.label("day"),
-                func.sum(JournalEntry.credit).label("total"),
+                _local_day_expr(Journal.created_at).label("day"),
+                JournalEntry.credit.label("amount"),
             )
             .join(JournalEntry, JournalEntry.journal_id == Journal.id)
             .where(
@@ -189,7 +202,15 @@ async def _daily_sparkline(
                 Journal.created_at <= utc_e,
                 Journal.ref_type.in_(_B2B_REF_TYPES),
             )
-            .group_by(journal_day)
+            .subquery("journal_daily")
+        )
+        b2b_rows = await db.execute(
+            select(
+                journal_daily.c.day,
+                func.sum(journal_daily.c.amount).label("total"),
+            )
+            .select_from(journal_daily)
+            .group_by(journal_daily.c.day)
         )
         b2b_by_day = {str(r.day): float(r.total) for r in b2b_rows}
 
@@ -364,39 +385,53 @@ async def _hero_farm(db: AsyncSession, rng: dict) -> dict:
 async def _chart(db: AsyncSession, rng: dict, acc_id: int | None) -> dict:
     tz     = _tz()
     utc_s, utc_e = rng["utc_start"], rng["utc_end"]
-    invoice_day = _local_day_expr(Invoice.created_at)
-    refund_day = _local_day_expr(RetailRefund.created_at)
-    journal_day = _local_day_expr(Journal.created_at)
+    invoice_daily = (
+        select(
+            _local_day_expr(Invoice.created_at).label("day"),
+            Invoice.total.label("amount"),
+            Invoice.id.label("invoice_id"),
+        )
+        .where(Invoice.created_at >= utc_s, Invoice.created_at <= utc_e, Invoice.status == "paid")
+        .subquery("chart_invoice_daily")
+    )
 
     pos_rows = await db.execute(
         select(
-            invoice_day.label("day"),
-            func.sum(Invoice.total).label("pos"),
-            func.count(Invoice.id).label("orders"),
+            invoice_daily.c.day,
+            func.sum(invoice_daily.c.amount).label("pos"),
+            func.count(invoice_daily.c.invoice_id).label("orders"),
         )
-        .where(Invoice.created_at >= utc_s, Invoice.created_at <= utc_e, Invoice.status == "paid")
-        .group_by(invoice_day)
+        .select_from(invoice_daily)
+        .group_by(invoice_daily.c.day)
     )
     pos_by_day: dict[str, tuple[float, int]] = {
         str(r.day): (float(r.pos), int(r.orders)) for r in pos_rows
     }
 
-    ref_rows = await db.execute(
+    refund_daily = (
         select(
-            refund_day.label("day"),
-            func.sum(RetailRefund.total).label("refunds"),
+            _local_day_expr(RetailRefund.created_at).label("day"),
+            RetailRefund.total.label("amount"),
         )
         .where(RetailRefund.created_at >= utc_s, RetailRefund.created_at <= utc_e)
-        .group_by(refund_day)
+        .subquery("chart_refund_daily")
+    )
+    ref_rows = await db.execute(
+        select(
+            refund_daily.c.day,
+            func.sum(refund_daily.c.amount).label("refunds"),
+        )
+        .select_from(refund_daily)
+        .group_by(refund_daily.c.day)
     )
     ref_by_day = {str(r.day): float(r.refunds) for r in ref_rows}
 
     b2b_by_day: dict[str, float] = {}
     if acc_id:
-        b2b_rows = await db.execute(
+        journal_daily = (
             select(
-                journal_day.label("day"),
-                func.sum(JournalEntry.credit).label("b2b"),
+                _local_day_expr(Journal.created_at).label("day"),
+                JournalEntry.credit.label("amount"),
             )
             .join(JournalEntry, JournalEntry.journal_id == Journal.id)
             .where(
@@ -405,7 +440,15 @@ async def _chart(db: AsyncSession, rng: dict, acc_id: int | None) -> dict:
                 Journal.created_at <= utc_e,
                 Journal.ref_type.in_(_B2B_REF_TYPES),
             )
-            .group_by(journal_day)
+            .subquery("chart_journal_daily")
+        )
+        b2b_rows = await db.execute(
+            select(
+                journal_daily.c.day,
+                func.sum(journal_daily.c.amount).label("b2b"),
+            )
+            .select_from(journal_daily)
+            .group_by(journal_daily.c.day)
         )
         b2b_by_day = {str(r.day): float(r.b2b) for r in b2b_rows}
 
