@@ -558,7 +558,17 @@ function renderPanels(panels) {
   renderRecentActivity(panels.recent_activity || []);
 }
 
+function clearTable(tbodyId) {
+  const tbody = document.getElementById(tbodyId);
+  if (!tbody) return;
+  tbody.innerHTML = "";
+}
+
 function renderTopProducts(tp) {
+  clearTable("top-by-revenue");
+  clearTable("top-by-qty");
+  clearTable("top-by-margin");
+
   const byRev = tp.by_revenue || [];
   renderTable("top-by-revenue", byRev,
     ["<th>Product</th><th>Revenue</th><th>Share</th>"],
@@ -823,6 +833,7 @@ async function loadSummary() {
     else                                   renderHeroAdmin(hero);
 
     renderMainChart(data.chart || {}, data.range?.label);
+    console.log("Top products:", data.panels?.top_products);
     renderPanels(data.panels || {});
 
     const rl = document.getElementById("range-label");
