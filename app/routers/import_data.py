@@ -1266,11 +1266,29 @@ async function doImportSales() {
     fd.append('force',   force ? 'true' : 'false');
     if (costRatio !== '') fd.append('default_cost_ratio', costRatio);
 
-    const res  = await fetch('/import/api/sales', { method: 'POST', body: fd });
-    const data = await res.json();
+    let res, data;
+    try {
+        res  = await fetch('/import/api/sales', { method: 'POST', body: fd });
+        data = await res.json();
+    } catch (e) {
+        showProg('sales', 100);
+        btn.disabled = false; btn.innerHTML = '⬆ Import Sales';
+        showResult('sales', '✗ Network error: ' + e.message, 'err');
+        return;
+    }
     showProg('sales', 100);
     btn.disabled = false;
     btn.innerHTML = '⬆ Import Sales';
+
+    if (!res.ok) {
+        // FastAPI error format: {"detail": "..."} or {"detail": [{...}]}
+        const detail = data.detail;
+        const msg = Array.isArray(detail)
+            ? detail.map(e => e.msg || JSON.stringify(e)).join('; ')
+            : (detail || data.error || `HTTP ${res.status}`);
+        showResult('sales', '✗ ' + msg, 'err');
+        return;
+    }
 
     if (data.error) { showResult('sales', '✗ ' + data.error, 'err'); return; }
 
@@ -1279,22 +1297,31 @@ async function doImportSales() {
 }
 
 function renderSalesResult(data, wasDryRun) {
-    const s = data.summary || {};
-    const isDry = data.dry_run;
-    const created = isDry ? s.invoices_would_create : s.invoices_created;
+    if (!data || !data.summary) {
+        showResult('sales', '✗ Unexpected response from server — no summary returned.', 'err');
+        return;
+    }
+    const s = data.summary;
+    const isDry = !!data.dry_run;
+    // Guard helper: treat null/undefined as 0 for numeric display
+    const n  = v => (v != null && !isNaN(+v)) ? +v : 0;
+    const fmt  = v => n(v).toLocaleString();
+    const fmt2 = v => n(v).toFixed(2);
+
+    const created = isDry ? n(s.invoices_would_create) : n(s.invoices_created);
     const label   = isDry ? 'would create' : 'created';
 
     let html = `<div style="font-size:13px">
         ${isDry ? '<span style="color:var(--warn)">⚠ DRY RUN — nothing was saved</span><br>' : ''}
-        <b>${s.rows_read}</b> rows read &nbsp;·&nbsp;
-        <b>${created}</b> invoices ${label} &nbsp;·&nbsp;
-        <b>${s.line_items}</b> line items &nbsp;·&nbsp;
-        <b>${s.rows_skipped}</b> skipped<br>
+        <b>${fmt(s.rows_read)}</b> rows read &nbsp;·&nbsp;
+        <b>${fmt(created)}</b> invoices ${label} &nbsp;·&nbsp;
+        <b>${fmt(s.line_items)}</b> line items &nbsp;·&nbsp;
+        <b>${fmt(s.rows_skipped)}</b> skipped<br>
         <span style="color:var(--sub);font-size:12px">
-            Customers ${isDry?'would create':'created'}: <b>${s.customers_auto_created}</b> &nbsp;·&nbsp;
-            Products ${isDry?'would create':'created'}: <b>${s.products_auto_created||0}</b> &nbsp;·&nbsp;
+            Customers ${isDry?'would create':'created'}: <b>${fmt(s.customers_auto_created)}</b> &nbsp;·&nbsp;
+            Products ${isDry?'would create':'created'}: <b>${fmt(s.products_auto_created)}</b> &nbsp;·&nbsp;
             Date range: ${s.earliest_date||'–'} → ${s.latest_date||'–'} &nbsp;·&nbsp;
-            Total value: <b>${(s.total_value||0).toFixed(2)}</b>
+            Total value: <b>${fmt2(s.total_value)}</b>
         </span>`;
 
     if (data.batch_id) {
