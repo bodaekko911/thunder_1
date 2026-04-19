@@ -286,7 +286,7 @@ async def dashboard_assistant(
 
 @router.get("/dashboard/summary")
 async def dashboard_summary(
-    range: str = Query("today", regex="^(today|7d|30d|mtd|qtd|custom)$"),
+    range_param: str = Query("today", pattern="^(today|7d|30d|mtd|qtd|custom)$", alias="range"),
     start: Optional[str] = Query(None),
     end:   Optional[str] = Query(None),
     db:    AsyncSession  = Depends(get_async_session),
@@ -301,7 +301,7 @@ async def dashboard_summary(
             socket_timeout=settings.REDIS_SOCKET_TIMEOUT,
             decode_responses=True,
         )
-        cache_key = f"dash_summary:{current_user.id}:{range}:{start}:{end}"
+        cache_key = f"dash_summary:{current_user.id}:{range_param}:{start}:{end}"
         cached = await redis_client.get(cache_key)
         if cached:
             await redis_client.aclose()
@@ -311,7 +311,7 @@ async def dashboard_summary(
         cache_key    = None
 
     from app.services.dashboard_summary_service import get_summary
-    data = await get_summary(db, range, start, end, current_user)
+    data = await get_summary(db, range_param, start, end, current_user)
 
     if redis_client and cache_key:
         try:
