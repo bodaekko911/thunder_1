@@ -6,6 +6,7 @@ that can be serialised to JSON for Claude's tool_result messages.
 """
 from __future__ import annotations
 
+import difflib
 from datetime import date as date_type, datetime, timedelta
 
 from sqlalchemy import and_, func, or_, select
@@ -17,7 +18,66 @@ from app.models.expense import Expense, ExpenseCategory
 from app.models.invoice import Invoice, InvoiceItem
 from app.models.product import Product
 from app.models.refund import RetailRefund
+from app.services.copilot import fuzzy as copilot_fuzzy
 from app.services.expense_service import get_summary as _expense_summary
+
+
+def _normalized_product_parts(product: Product) -> tuple[str, str, str]:
+    sku = copilot_fuzzy.normalize(product.sku or "")
+    name = copilot_fuzzy.normalize(product.name or "")
+    combined = " ".join(part for part in [sku, name] if part).strip()
+    return sku, name, combined
+
+
+def _product_match_score(query: str, product: Product) -> float:
+    normalized_query = copilot_fuzzy.normalize(query or "")
+    if not normalized_query:
+        return 0.0
+
+    sku, name, combined = _normalized_product_parts(product)
+    query_tokens = [token for token in normalized_query.split() if token]
+    combined_tokens = set(combined.split())
+    score = 0.0
+
+    if sku and normalized_query == sku:
+        score += 140.0
+    if name and normalized_query == name:
+        score += 125.0
+    if sku and sku.startswith(normalized_query):
+        score += 100.0
+    if name and name.startswith(normalized_query):
+        score += 90.0
+    if sku and normalized_query in sku:
+        score += 70.0
+    if name and normalized_query in name:
+        score += 65.0
+
+    if query_tokens:
+        matched_tokens = sum(1 for token in query_tokens if token in combined_tokens)
+        score += matched_tokens * 18.0
+        if matched_tokens == len(query_tokens):
+            score += 35.0
+
+    score += difflib.SequenceMatcher(None, normalized_query, sku).ratio() * 40.0 if sku else 0.0
+    score += difflib.SequenceMatcher(None, normalized_query, name).ratio() * 55.0 if name else 0.0
+    return score
+
+
+def _serialize_product(product: Product) -> dict:
+    return {
+        "product_id": int(product.id),
+        "sku": product.sku,
+        "name": product.name,
+        "category": product.category,
+        "item_type": product.item_type,
+        "unit": product.unit,
+        "price": round(float(product.price or 0), 2),
+        "cost": round(float(product.cost or 0), 2),
+        "stock": round(float(product.stock or 0), 3),
+        "min_stock": round(float(product.min_stock or 0), 3),
+        "reorder_level": round(float(product.reorder_level or 0), 3) if product.reorder_level is not None else None,
+        "reorder_qty": round(float(product.reorder_qty or 0), 3) if product.reorder_qty is not None else None,
+    }
 
 
 async def get_sales_summary(db: AsyncSession, *, date_from: str, date_to: str) -> dict:
@@ -298,55 +358,56 @@ async def get_product_details(
     product_query: str | None = None,
     product_id: int | None = None,
 ) -> dict:
-    """Find product details by SKU or name fragment."""
+    """Find product details by SKU or name fragment, with fuzzy fallback."""
     query = (product_query or "").strip()
     if not query and product_id is None:
         return {"matches": [], "count": 0, "query": query}
 
-    clauses = []
-    if query:
-        clauses.extend(
-            [
-                Product.sku.ilike(query),
-                Product.sku.ilike(f"%{query}%"),
-                Product.name.ilike(f"%{query}%"),
-            ]
-        )
     if product_id is not None:
-        clauses.append(Product.id == int(product_id))
+        result = await db.execute(
+            select(Product)
+            .where(Product.is_active == True, Product.id == int(product_id))
+            .limit(1)
+        )
+        product = result.scalar_one_or_none()
+        matches = [_serialize_product(product)] if product else []
+        return {
+            "query": query,
+            "count": len(matches),
+            "matches": matches,
+            "selected": matches[0] if matches else None,
+            "ambiguous": False,
+        }
 
     result = await db.execute(
         select(Product)
-        .where(
-            Product.is_active == True,
-            or_(*clauses),
-        )
-        .order_by(Product.name.asc())
-        .limit(5)
+        .where(Product.is_active == True)
     )
     products = result.scalars().all()
-    matches = [
-        {
-            "product_id": int(product.id),
-            "sku": product.sku,
-            "name": product.name,
-            "category": product.category,
-            "item_type": product.item_type,
-            "unit": product.unit,
-            "price": round(float(product.price or 0), 2),
-            "cost": round(float(product.cost or 0), 2),
-            "stock": round(float(product.stock or 0), 3),
-            "min_stock": round(float(product.min_stock or 0), 3),
-            "reorder_level": round(float(product.reorder_level or 0), 3) if product.reorder_level is not None else None,
-            "reorder_qty": round(float(product.reorder_qty or 0), 3) if product.reorder_qty is not None else None,
-        }
+    scored = [
+        (score, product)
         for product in products
+        if (score := _product_match_score(query, product)) >= 45.0
     ]
+    scored.sort(key=lambda item: (-item[0], (item[1].name or "").lower(), (item[1].sku or "").lower()))
+
+    top_ranked = scored[:5]
+    matches = [_serialize_product(product) for _, product in top_ranked]
+    selected = matches[0] if matches else None
+    ambiguous = False
+    if len(top_ranked) > 1:
+        top_score = top_ranked[0][0]
+        next_score = top_ranked[1][0]
+        ambiguous = (top_score - next_score) < 18.0
+        if ambiguous:
+            selected = None
+
     return {
         "query": query,
         "count": len(matches),
         "matches": matches,
-        "selected": matches[0] if matches else None,
+        "selected": selected,
+        "ambiguous": ambiguous,
     }
 
 

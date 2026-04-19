@@ -442,7 +442,7 @@ async def _chart(db: AsyncSession, rng: dict, acc_id: int | None) -> dict:
 async def _panels(db: AsyncSession, rng: dict) -> dict:
     tz     = _tz()
     utc_s, utc_e = rng["utc_start"], rng["utc_end"]
-    today  = datetime.now(tz).date()
+    period_end = utc_e.astimezone(tz).date()
 
     # Top products ──────────────────────────────────────────────────────────
     r_total = await db.execute(
@@ -512,14 +512,17 @@ async def _panels(db: AsyncSession, rng: dict) -> dict:
             func.min(B2BInvoice.due_date).label("oldest_due"),
         )
         .join(B2BInvoice, B2BInvoice.client_id == B2BClient.id)
-        .where(B2BInvoice.status.in_(["unpaid", "partial"]))
+        .where(
+            B2BInvoice.status.in_(["unpaid", "partial"]),
+            B2BInvoice.created_at <= utc_e,
+        )
         .group_by(B2BClient.id, B2BClient.name)
         .order_by(func.sum(B2BInvoice.total - B2BInvoice.amount_paid).desc())
         .limit(8)
     )
     receivables_b2b = []
     for r in b2b_rows:
-        days_overdue = max(0, (today - r.oldest_due).days) if r.oldest_due else 0
+        days_overdue = max(0, (period_end - r.oldest_due).days) if r.oldest_due else 0
         receivables_b2b.append({
             "name":        r.name,
             "client_id":   r.id,
@@ -528,7 +531,7 @@ async def _panels(db: AsyncSession, rng: dict) -> dict:
         })
 
     # Stock pressure ────────────────────────────────────────────────────────
-    d14_s, d14_e = _utc_range(today - timedelta(days=13), today)
+    d14_s, d14_e = _utc_range(period_end - timedelta(days=13), period_end)
     sales_rows = await db.execute(
         select(InvoiceItem.product_id, func.sum(InvoiceItem.qty).label("qty"))
         .join(Invoice, InvoiceItem.invoice_id == Invoice.id)
@@ -567,7 +570,7 @@ async def _panels(db: AsyncSession, rng: dict) -> dict:
         for r in low_stock_rows
     ]
 
-    d60_s, d60_e = _utc_range(today - timedelta(days=59), today)
+    d60_s, d60_e = _utc_range(period_end - timedelta(days=59), period_end)
     sold_ids_r = await db.execute(
         select(InvoiceItem.product_id.distinct())
         .join(Invoice, InvoiceItem.invoice_id == Invoice.id)
@@ -590,7 +593,11 @@ async def _panels(db: AsyncSession, rng: dict) -> dict:
             Invoice.invoice_number, Invoice.customer_id, Invoice.total,
             Invoice.payment_method, Invoice.created_at,
         )
-        .where(Invoice.status == "paid")
+        .where(
+            Invoice.status == "paid",
+            Invoice.created_at >= utc_s,
+            Invoice.created_at <= utc_e,
+        )
         .order_by(Invoice.created_at.desc())
         .limit(10)
     )
@@ -600,6 +607,10 @@ async def _panels(db: AsyncSession, rng: dict) -> dict:
         select(
             RetailRefund.refund_number, RetailRefund.customer_id,
             RetailRefund.total, RetailRefund.refund_method, RetailRefund.created_at,
+        )
+        .where(
+            RetailRefund.created_at >= utc_s,
+            RetailRefund.created_at <= utc_e,
         )
         .order_by(RetailRefund.created_at.desc())
         .limit(5)

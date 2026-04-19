@@ -596,6 +596,16 @@ def _message_for_tool(intent: str, result: dict) -> str:
                 f"{selected['name']} ({selected['sku']}) is priced at {selected['price']:.2f} "
                 f"with stock {selected['stock']:.3f}."
             )
+        matches = result.get("matches") or []
+        if matches:
+            shortlist = ", ".join(
+                f"{item.get('name', 'Unknown')} ({item.get('sku') or 'no SKU'})"
+                for item in matches[:3]
+            )
+            return (
+                f"I found multiple close product matches for '{result.get('query', '')}': {shortlist}. "
+                "Reply with the exact product name or SKU."
+            )
         return f"No product match was found for '{result.get('query', '')}'."
     if intent == "stock_levels":
         return f"I found {result.get('count', 0)} stock records in the current inventory snapshot."

@@ -665,6 +665,33 @@ def dashboard_ui():
 
 </div><!-- /content -->
 
+<div id="custom-range-modal" class="range-modal hidden" role="dialog" aria-modal="true" aria-labelledby="custom-range-title">
+  <div class="range-modal-card">
+    <div class="range-modal-header">
+      <div>
+        <h3 id="custom-range-title">Custom Range</h3>
+        <p>Select a start date and end date for the dashboard summary.</p>
+      </div>
+      <button type="button" class="range-modal-close" onclick="closeCustomRangePicker()" aria-label="Close custom range">×</button>
+    </div>
+    <div class="range-modal-body">
+      <label class="range-field">
+        <span>Start date</span>
+        <input id="custom-range-start" type="date">
+      </label>
+      <label class="range-field">
+        <span>End date</span>
+        <input id="custom-range-end" type="date">
+      </label>
+      <p id="custom-range-error" class="range-error" hidden></p>
+    </div>
+    <div class="range-modal-actions">
+      <button type="button" class="range-secondary-btn" onclick="closeCustomRangePicker()">Cancel</button>
+      <button type="button" class="range-primary-btn" onclick="applyCustomRange()">Apply</button>
+    </div>
+  </div>
+</div>
+
 <!-- ── Assistant drawer ───────────────────────────────────────────── -->
 <aside id="assistant-drawer" aria-label="AI Assistant" role="complementary">
   <div class="drawer-header">

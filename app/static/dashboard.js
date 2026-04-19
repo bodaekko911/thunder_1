@@ -160,11 +160,8 @@ function onRangeClick(e) {
   const btn = e.currentTarget;
   const range = btn.dataset.range;
   if (range === "custom") {
-    const s = prompt("Start date (YYYY-MM-DD):");
-    if (!s) return;
-    const en = prompt("End date (YYYY-MM-DD):");
-    if (!en) return;
-    _customStart = s; _customEnd = en;
+    openCustomRangePicker();
+    return;
   }
   setActiveRange(range);
   loadSummary();
@@ -173,6 +170,52 @@ function onRangeClick(e) {
 document.querySelectorAll(".range-btn").forEach(b =>
   b.addEventListener("click", onRangeClick)
 );
+
+function openCustomRangePicker() {
+  const modal = document.getElementById("custom-range-modal");
+  const startInput = document.getElementById("custom-range-start");
+  const endInput = document.getElementById("custom-range-end");
+  const range = _lastData?.range || {};
+  if (!modal || !startInput || !endInput) return;
+
+  startInput.value = _customStart || range.start || "";
+  endInput.value = _customEnd || range.end || "";
+  setCustomRangeError("");
+  modal.classList.remove("hidden");
+}
+
+function closeCustomRangePicker() {
+  document.getElementById("custom-range-modal")?.classList.add("hidden");
+  setCustomRangeError("");
+}
+
+function setCustomRangeError(message) {
+  const el = document.getElementById("custom-range-error");
+  if (!el) return;
+  el.textContent = message || "";
+  el.hidden = !message;
+}
+
+function applyCustomRange() {
+  const startInput = document.getElementById("custom-range-start");
+  const endInput = document.getElementById("custom-range-end");
+  const start = startInput?.value || "";
+  const end = endInput?.value || "";
+  if (!start || !end) {
+    setCustomRangeError("Choose both a start date and an end date.");
+    return;
+  }
+  if (start > end) {
+    setCustomRangeError("Start date must be before or equal to the end date.");
+    return;
+  }
+
+  _customStart = start;
+  _customEnd = end;
+  setActiveRange("custom");
+  closeCustomRangePicker();
+  loadSummary();
+}
 
 // ── tabs ───────────────────────────────────────────────────────────────
 function initTabs() {
@@ -713,14 +756,17 @@ function showLoadError(title, detail, errObj) {
 }
 
 function renderPartialErrorBanner(errors) {
-  const existing = document.querySelector(".partial-error-banner");
-  if (existing) existing.remove();
+  clearPartialErrorBanner();
   const sections = errors.map(e => e.section).join(", ");
   const banner = document.createElement("div");
   banner.className = "partial-error-banner";
   banner.style.cssText = "background:rgba(245,158,11,.08);border:1px solid rgba(245,158,11,.3);color:#f59e0b;padding:10px 16px;border-radius:10px;margin-bottom:16px;font-size:13px";
   banner.textContent = `⚠ Some sections couldn't load: ${sections}. Shown data may be partial.`;
   document.querySelector(".content")?.prepend(banner);
+}
+
+function clearPartialErrorBanner() {
+  document.querySelector(".partial-error-banner")?.remove();
 }
 
 // ── data fetch + render ────────────────────────────────────────────────
@@ -769,6 +815,7 @@ async function loadSummary() {
 
   // 5. Render
   try {
+    clearPartialErrorBanner();
     _heroType = data.hero_type || "admin";
     const hero = data.hero || {};
     if (_heroType === "cashier")           renderHeroCashier(hero);
@@ -816,6 +863,13 @@ async function initDashboard() {
 
   // Restore drawer state
   if (document.cookie.includes("drawer_open=1")) openDrawer();
+
+  document.getElementById("custom-range-modal")?.addEventListener("click", e => {
+    if (e.target?.id === "custom-range-modal") closeCustomRangePicker();
+  });
+  document.addEventListener("keydown", e => {
+    if (e.key === "Escape") closeCustomRangePicker();
+  });
 
   updateDateDisplay();
   initTabs();

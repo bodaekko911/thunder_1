@@ -102,6 +102,83 @@ nav {
 .range-btn:hover  { border-color:var(--accent); color:var(--accent); }
 .range-btn.active { background:var(--accent); color:#fff; border-color:var(--accent); }
 
+.range-modal {
+  position: fixed; inset: 0; z-index: 250;
+  display: flex; align-items: center; justify-content: center;
+  padding: 20px;
+  background: rgba(9, 11, 20, .6);
+  backdrop-filter: blur(8px);
+}
+.range-modal.hidden { display: none; }
+.range-modal-card {
+  width: min(100%, 420px);
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: 16px;
+  box-shadow: 0 24px 60px rgba(0,0,0,.28);
+}
+.range-modal-header,
+.range-modal-actions {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 12px;
+  padding: 18px 20px;
+}
+.range-modal-header { border-bottom: 1px solid var(--border); }
+.range-modal-header h3 { font-size: 16px; font-weight: 700; }
+.range-modal-header p { color: var(--text-muted); font-size: 12px; margin-top: 4px; }
+.range-modal-close {
+  border: none; background: transparent; color: var(--text-muted);
+  font-size: 24px; line-height: 1; cursor: pointer;
+}
+.range-modal-body {
+  display: grid; gap: 14px;
+  padding: 20px;
+}
+.range-field {
+  display: grid; gap: 6px;
+  font-size: 12px; color: var(--text-sub); font-weight: 600;
+}
+.range-field input {
+  width: 100%;
+  background: var(--card);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 12px 14px;
+  font: inherit;
+}
+.range-field input:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px rgba(77,159,255,.2);
+}
+.range-error {
+  color: var(--error);
+  font-size: 12px;
+}
+.range-modal-actions {
+  justify-content: flex-end;
+  border-top: 1px solid var(--border);
+}
+.range-primary-btn,
+.range-secondary-btn {
+  border-radius: 999px;
+  padding: 10px 16px;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+}
+.range-primary-btn {
+  background: var(--accent);
+  border: 1px solid var(--accent);
+  color: #fff;
+}
+.range-secondary-btn {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text-sub);
+}
+
 /* ── Insights strip ───────────────────────────────────────────────── */
 .insights-strip {
   display:flex; gap:12px; overflow-x:auto; padding-bottom:4px;
