@@ -44,6 +44,9 @@ from app.models.invoice import Invoice, InvoiceItem
 from app.models.inventory import StockMove
 from app.models.accounting import Account, Journal, JournalEntry
 from app.models.product import Product
+from app.models.refund import RetailRefund
+from app.models.b2b import B2BInvoiceItem
+from app.models.supplier import PurchaseItem
 from app.services.sales_import_service import import_sales
 
 
@@ -144,6 +147,9 @@ class FakeImportSession:
         if ent is Journal:
             return _FakeResult([])
         if ent is StockMove:
+            return _FakeResult([])
+        # Reference-check models used by batch revert: no refs in import tests
+        if ent in (InvoiceItem, B2BInvoiceItem, PurchaseItem, RetailRefund):
             return _FakeResult([])
         return _FakeResult(None)
 
@@ -311,28 +317,31 @@ def test_real_import_with_journals_creates_dated_journal():
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-# Test 4 — Unknown SKU → row-level error, that group skipped, other groups ok
+# Test 4 — Unknown SKU → product auto-created, invoice succeeds
 # ═════════════════════════════════════════════════════════════════════════════
 
-def test_unknown_sku_skips_group_but_imports_others():
-    """An unknown SKU produces a row-level error; the other group still imports."""
+def test_unknown_sku_auto_creates_product_and_imports():
+    """An unknown SKU now triggers automatic Product creation; both groups succeed."""
     p1 = _make_product("SKU-001", "Olive Oil")
 
     rows = [
-        ["SKU-001",  "Olive Oil", 2, 15.0, "Ahmed", "2026-01-10"],   # good
-        ["UNKNOWN",  "Mystery",   1,  5.0, "Ahmed", "2026-01-11"],   # bad SKU
+        ["SKU-001",  "Olive Oil", 2, 15.0, "Ahmed", "2026-01-10"],   # existing product
+        ["UNKNOWN",  "Mystery",   1,  5.0, "Ahmed", "2026-01-11"],   # unknown → auto-create
     ]
     xls = _make_xlsx(rows)
     db  = FakeImportSession(products=[p1])
 
     result = _run(import_sales(db, xls, "sales.xlsx", 1, dry_run=False))
 
-    assert result["summary"]["invoices_created"] == 1
-    assert result["summary"]["rows_skipped"] == 1
-    errors = result["errors"]
-    assert len(errors) == 1
-    assert "not found" in errors[0]["reason"].lower()
-    assert errors[0]["sku"] == "UNKNOWN"
+    assert result["summary"]["invoices_created"] == 2
+    assert result["summary"]["rows_skipped"] == 0
+    assert result["summary"]["products_auto_created"] == 1
+    assert not result["errors"]
+
+    new_products = [o for o in db.added if isinstance(o, Product)]
+    assert len(new_products) == 1
+    assert new_products[0].sku == "UNKNOWN"
+    assert new_products[0].category == "Imported - Historical"
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -627,3 +636,321 @@ def test_missing_required_column_returns_error():
     result = _run(import_sales(db, xls, "bad.xlsx", 1, dry_run=True))
     assert "error" in result
     assert "Date" in result["error"]
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# New Tests — Product auto-creation
+# ═════════════════════════════════════════════════════════════════════════════
+
+# NT-1 — Unknown SKU + known customer → product auto-created, invoice created
+
+def test_new1_unknown_sku_known_customer_product_auto_created():
+    """Unknown SKU with a known customer creates the product and the invoice."""
+    c1 = _make_customer("Ahmed", cid=5)
+    rows = [["OLIVE-500", "Olive Oil 500ml", 2, 120.0, "Ahmed", "2026-02-01"]]
+    xls  = _make_xlsx(rows)
+    db   = FakeImportSession(products=[], customers=[c1])
+
+    result = _run(import_sales(db, xls, "sales.xlsx", 1, dry_run=False))
+
+    assert result["summary"]["invoices_created"] == 1
+    assert result["summary"]["products_auto_created"] == 1
+    assert not result["errors"]
+
+    new_prods = [o for o in db.added if isinstance(o, Product)]
+    assert len(new_prods) == 1
+    p = new_prods[0]
+    assert p.sku == "OLIVE-500"
+    assert p.name == "Olive Oil 500ml"
+    assert float(p.price) == 120.0
+    assert float(p.cost) == 0.0
+    assert float(p.stock) == 0
+    assert p.category == "Imported - Historical"
+    assert p.created_by_import_batch == result["batch_id"]
+
+    auto_list = result["auto_created_products"]
+    assert len(auto_list) == 1
+    assert auto_list[0]["sku"] == "OLIVE-500"
+
+
+# NT-2 — Unknown SKU + unknown customer → both auto-created
+
+def test_new2_unknown_sku_unknown_customer_both_created():
+    """When both SKU and customer are new, both are auto-created."""
+    rows = [["NEW-SKU", "Mystery Item", 1, 50.0, "Brand New", "2026-02-05"]]
+    xls  = _make_xlsx(rows)
+    db   = FakeImportSession(products=[], customers=[])
+
+    result = _run(import_sales(db, xls, "sales.xlsx", 1, dry_run=False))
+
+    assert result["summary"]["invoices_created"] == 1
+    assert result["summary"]["products_auto_created"] == 1
+    assert result["summary"]["customers_auto_created"] == 1
+    assert "Brand New" in result["auto_created_customers"]
+    assert result["auto_created_products"][0]["sku"] == "NEW-SKU"
+
+
+# NT-3 — Same unknown SKU across 3 rows with different prices → one product, 3 lines
+
+def test_new3_same_unknown_sku_different_prices_one_product():
+    """Three rows with the same unknown SKU at different prices create one product and three invoice lines."""
+    rows = [
+        ["MULTI-PRICE", "Oil", 1, 100.0, "Ahmed", "2026-02-10"],
+        ["MULTI-PRICE", "Oil", 2, 110.0, "Ahmed", "2026-02-11"],
+        ["MULTI-PRICE", "Oil", 3, 120.0, "Ahmed", "2026-02-12"],
+    ]
+    xls = _make_xlsx(rows)
+    db  = FakeImportSession(products=[], customers=[])
+
+    result = _run(import_sales(db, xls, "sales.xlsx", 1, dry_run=False))
+
+    # 3 invoice groups (different dates)
+    assert result["summary"]["invoices_created"] == 3
+    # Only one product should be auto-created
+    assert result["summary"]["products_auto_created"] == 1
+    new_prods = [o for o in db.added if isinstance(o, Product)]
+    assert len(new_prods) == 1
+    # Price on the product is from first occurrence
+    assert float(new_prods[0].price) == 100.0
+
+    # Three InvoiceItem rows at their respective prices
+    items = [o for o in db.added if isinstance(o, InvoiceItem)]
+    prices = sorted(float(it.unit_price) for it in items)
+    assert prices == [100.0, 110.0, 120.0]
+
+
+# NT-4 — Same unknown SKU with conflicting item names → first-seen name wins, warning emitted
+
+def test_new4_conflicting_item_names_uses_first_warns():
+    """When the same unknown SKU appears with two different names, the first name is used and a warning is emitted."""
+    rows = [
+        ["CONFLICT", "Olive Oil 500ml",  1, 50.0, "Ahmed", "2026-02-10"],
+        ["CONFLICT", "Olive oil 0.5L",   1, 50.0, "Ahmed", "2026-02-11"],
+    ]
+    xls = _make_xlsx(rows)
+    db  = FakeImportSession(products=[], customers=[])
+
+    result = _run(import_sales(db, xls, "sales.xlsx", 1, dry_run=False))
+
+    assert result["summary"]["products_auto_created"] == 1
+    new_prods = [o for o in db.added if isinstance(o, Product)]
+    assert new_prods[0].name == "Olive Oil 500ml"
+
+    warnings = result["warnings"]
+    assert any("conflicting item names" in w for w in warnings)
+    conflict_warn = next(w for w in warnings if "conflicting item names" in w)
+    assert "Olive Oil 500ml" in conflict_warn
+    assert "Olive oil 0.5L"  in conflict_warn
+
+
+# NT-5 — default_cost_ratio applied to auto-created product
+
+def test_new5_default_cost_ratio_applied_to_auto_created():
+    """With default_cost_ratio=0.6, auto-created product cost = price * 0.6."""
+    rows = [["RATIO-SKU", "Test Item", 1, 100.0, "Ahmed", "2026-02-15"]]
+    xls  = _make_xlsx(rows)
+    db   = FakeImportSession(products=[], customers=[])
+
+    result = _run(import_sales(db, xls, "sales.xlsx", 1, dry_run=False, default_cost_ratio=0.6))
+
+    new_prods = [o for o in db.added if isinstance(o, Product)]
+    assert len(new_prods) == 1
+    assert float(new_prods[0].cost) == pytest.approx(60.0, rel=1e-3)
+    assert result["auto_created_products"][0]["cost"] == pytest.approx(60.0, rel=1e-3)
+    # No cost-zero warning when ratio is set
+    assert not any("cost = 0" in w for w in result["warnings"])
+
+
+# NT-6 — Dry-run with unknown SKUs: nothing written, response lists them
+
+def test_new6_dry_run_unknown_sku_not_created_but_reported():
+    """Dry-run with unknown SKUs: no Product rows written, but auto_created_products is populated."""
+    rows = [["DRY-SKU", "Dry Item", 3, 75.0, "Ahmed", "2026-03-01"]]
+    xls  = _make_xlsx(rows)
+    db   = FakeImportSession(products=[], customers=[])
+
+    result = _run(import_sales(db, xls, "sales.xlsx", 1, dry_run=True))
+
+    assert result["dry_run"] is True
+    assert result["summary"]["products_auto_created"] == 1
+    assert result["summary"]["invoices_would_create"] == 1
+
+    # No Product should have been written to the DB
+    new_prods = [o for o in db.added if isinstance(o, Product)]
+    assert len(new_prods) == 0
+
+    # But it should appear in the response
+    assert len(result["auto_created_products"]) == 1
+    assert result["auto_created_products"][0]["sku"] == "DRY-SKU"
+
+
+# NT-7 — Batch revert deletes orphan auto-created product, keeps referenced one
+
+class _BatchFakeSessionWithAutoProducts:
+    """Fake session for the cascade-delete test.
+
+    Simulates:
+    - Two invoices in the batch.
+    - Product A (created_by_import_batch=batch_id): used ONLY in this batch.
+    - Product B (created_by_import_batch=batch_id): also referenced by a PurchaseItem.
+    """
+
+    BATCH_ID = "revert-cascade-test"
+
+    def __init__(self):
+        self.inv1 = Invoice(
+            customer_id=1, payment_method="historical_import",
+            subtotal=10, discount=0, total=10, status="paid",
+            notes="Imported from t.xlsx on 2026-03-01",
+            import_batch_id=self.BATCH_ID,
+        )
+        self.inv1.id = 201
+        self.inv1.created_at = datetime(2026, 3, 1, 12, 0, 0)
+
+        self.prod_a = Product(sku="A", name="Auto A", price=10, cost=0, stock=0)
+        self.prod_a.id = 301
+        self.prod_a.created_by_import_batch = self.BATCH_ID
+
+        self.prod_b = Product(sku="B", name="Auto B", price=20, cost=0, stock=0)
+        self.prod_b.id = 302
+        self.prod_b.created_by_import_batch = self.BATCH_ID
+
+        self.deleted: list = []
+        self.committed = 0
+        self._flushed  = False
+
+    def _entity(self, stmt):
+        try:
+            for d in stmt.column_descriptions:
+                if d.get("entity") is not None:
+                    return d["entity"]
+        except Exception:
+            pass
+        return None
+
+    async def execute(self, stmt):
+        ent = self._entity(stmt)
+        if ent is Invoice:
+            return _FakeResult([self.inv1])
+        if ent is StockMove:
+            return _FakeResult([])
+        if ent is Journal:
+            return _FakeResult([])
+        if ent is Product:
+            # After flush (invoices deleted), return auto-created products
+            if self._flushed:
+                return _FakeResult([self.prod_a, self.prod_b])
+            return _FakeResult([])
+        if ent is Customer:
+            return _FakeResult([])
+        if ent is InvoiceItem:
+            # prod_a has no remaining invoice items; prod_b has none either
+            return _FakeResult([])
+        if ent is B2BInvoiceItem:
+            return _FakeResult([])
+        if ent is PurchaseItem:
+            # prod_b IS referenced by a PurchaseItem
+            return _FakeResult([object()])  # non-None sentinel
+        if ent is RetailRefund:
+            return _FakeResult([])
+        return _FakeResult([])
+
+    def add(self, _obj): pass
+
+    async def delete(self, obj):
+        self.deleted.append(obj)
+
+    async def flush(self):
+        self._flushed = True
+
+    async def commit(self):
+        self.committed += 1
+
+    async def rollback(self): pass
+
+    async def refresh(self, _obj): pass
+
+
+def test_new7_batch_revert_cascade_deletes_orphan_product_keeps_referenced():
+    """Batch revert deletes an auto-created product with no other refs, keeps one that has a PurchaseItem ref."""
+    session = _BatchFakeSessionWithAutoProducts()
+    client  = _make_http_client_with_session(session)
+
+    resp = client.delete(f"/import/api/sales/batch/{_BatchFakeSessionWithAutoProducts.BATCH_ID}")
+    assert resp.status_code == 200
+    d = resp.json()
+    assert d["ok"] is True
+    assert d["deleted_invoices"]  == 1
+    assert d["deleted_products"]  == 1   # only prod_a (orphan); prod_b kept
+    assert d["deleted_customers"] == 0
+
+    deleted_ids = {id(obj) for obj in session.deleted}
+    assert id(session.prod_a) in deleted_ids
+    assert id(session.prod_b) not in deleted_ids
+
+
+# NT-8 — SKU normalization: "01234" and "1234" map to the same product
+
+def test_new8_sku_normalization_deduplication():
+    """Leading-zero SKU and its normalized form share a single auto-created product."""
+    rows = [
+        ["01234", "Item A", 1, 10.0, "Ahmed", "2026-03-10"],
+        ["1234",  "Item A", 2, 10.0, "Ahmed", "2026-03-11"],
+    ]
+    xls = _make_xlsx(rows)
+    db  = FakeImportSession(products=[], customers=[])
+
+    result = _run(import_sales(db, xls, "sales.xlsx", 1, dry_run=False))
+
+    # Only one product should be created for both SKU variants
+    assert result["summary"]["products_auto_created"] == 1
+    new_prods = [o for o in db.added if isinstance(o, Product)]
+    assert len(new_prods) == 1
+
+
+# NT-9 — Auto-created customer + auto-created product in the same invoice
+
+def test_new9_auto_created_customer_and_product_both_linked():
+    """Auto-created customer and auto-created product both appear correctly on the invoice."""
+    rows = [["BRAND-NEW", "New Product", 3, 80.0, "NewCustomer", "2026-03-15"]]
+    xls  = _make_xlsx(rows)
+    db   = FakeImportSession(products=[], customers=[])
+
+    result = _run(import_sales(db, xls, "sales.xlsx", 1, dry_run=False))
+
+    assert result["summary"]["invoices_created"] == 1
+    assert result["summary"]["customers_auto_created"] == 1
+    assert result["summary"]["products_auto_created"] == 1
+
+    invoices = [o for o in db.added if isinstance(o, Invoice)]
+    items    = [o for o in db.added if isinstance(o, InvoiceItem)]
+    assert len(invoices) == 1
+    assert len(items)    == 1
+
+    item = items[0]
+    assert item.sku  == "BRAND-NEW"
+    assert item.name == "New Product"
+    assert float(item.unit_price) == 80.0
+
+
+# NT-10 — Truncation: 300-char SKU → truncated to 80, warning in errors, no crash
+
+def test_new10_long_sku_truncated_with_warning():
+    """A SKU longer than 80 chars is truncated; a warning is added to errors and the row still imports."""
+    long_sku = "X" * 300
+    rows = [[long_sku, "Long SKU Product", 1, 25.0, "Ahmed", "2026-03-20"]]
+    xls  = _make_xlsx(rows)
+    db   = FakeImportSession(products=[], customers=[])
+
+    result = _run(import_sales(db, xls, "sales.xlsx", 1, dry_run=False))
+
+    # Row should still succeed (truncation is a note, not a fatal error)
+    assert result["summary"]["invoices_created"] == 1
+    assert result["summary"]["products_auto_created"] == 1
+
+    new_prods = [o for o in db.added if isinstance(o, Product)]
+    assert len(new_prods) == 1
+    assert len(new_prods[0].sku) == 80
+
+    # The truncation notice should appear in errors
+    assert any("truncated" in e["reason"].lower() for e in result["errors"])

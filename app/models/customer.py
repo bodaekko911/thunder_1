@@ -15,5 +15,6 @@ class Customer(Base):
     discount_pct = Column(Numeric(6, 2), default=0)
     balance    = Column(Numeric(12, 2), default=0)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
+    created_by_import_batch = Column(String(64), nullable=True, index=True)
 
     invoices = relationship("Invoice", back_populates="customer")

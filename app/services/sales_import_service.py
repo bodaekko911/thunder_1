@@ -17,6 +17,12 @@ Every real (non-dry-run) import carries a UUID4 batch_id stamped on every
 Invoice.import_batch_id.  Re-running the same file after a successful import is
 detected via "notes LIKE 'Imported from %'" on the same (customer, date).  The
 caller can override with force=True.
+
+Product auto-creation
+─────────────────────
+When a row's SKU is not in the products table, a Product is created inline with
+category="Imported - Historical" and created_by_import_batch=batch_id.
+cost defaults to 0 unless the caller passes default_cost_ratio (cost = price × ratio).
 """
 
 import io
@@ -39,6 +45,9 @@ from app.services.pos_service import get_walk_in_customer_id, post_journal
 
 MIN_IMPORT_DATE = date(2026, 1, 1)
 VALID_MODES = frozenset({"history_only", "with_journals", "with_stock_and_journals"})
+_SKU_MAX  = 80
+_NAME_MAX = 200
+_CUST_MAX = 150
 
 
 # ── Row-level helpers ─────────────────────────────────────────────────────────
@@ -99,12 +108,13 @@ async def import_sales(
     dry_run: bool = True,
     mode: str = "history_only",
     force: bool = False,
+    default_cost_ratio: Optional[float] = None,
 ) -> dict:
     """
     Parse an Excel workbook and import historical sales.
 
     Returns a result dict matching the documented response shape.
-    All DB writes are skipped when dry_run=True.
+    In dry_run=True mode, simulates customer/product resolution without writing.
     """
     if mode not in VALID_MODES:
         mode = "history_only"
@@ -137,15 +147,13 @@ async def import_sales(
     def _cell(row, col):
         if not col:
             return None
-        v = ws.cell(row, col).value
-        return v
+        return ws.cell(row, col).value
 
     # ── Parse & validate every data row ────────────────────────────────────
     rows_read = 0
     all_rows: list[dict] = []
 
     for rn in range(2, ws.max_row + 1):
-        # Skip completely empty rows
         if all(_cell(rn, c) is None for c in range(1, ws.max_column + 1)):
             continue
         rows_read += 1
@@ -157,12 +165,12 @@ async def import_sales(
         raw_date     = _cell(rn, col_date)
         raw_item     = _cell(rn, col_item) if col_item else None
 
-        sku          = _normalize_sku(raw_sku)
-        qty          = _safe_float(raw_qty)
-        price        = _safe_float(raw_price)
+        sku           = _normalize_sku(raw_sku)
+        qty           = _safe_float(raw_qty)
+        price         = _safe_float(raw_price)
         customer_name = str(raw_customer).strip() if raw_customer is not None else ""
-        sale_date    = _parse_date(raw_date)
-        item_hint    = str(raw_item).strip() if raw_item else ""
+        sale_date     = _parse_date(raw_date)
+        item_hint     = str(raw_item).strip() if raw_item else ""
 
         row_errors: list[str] = []
         if not sku:
@@ -194,7 +202,7 @@ async def import_sales(
     # ── Group by (normalised customer name, date) ───────────────────────────
     groups: dict[tuple, list[dict]] = {}
     for r in all_rows:
-        key = (r["customer"].lower(), r["date"])   # date may be None → own group
+        key = (r["customer"].lower(), r["date"])
         groups.setdefault(key, []).append(r)
 
     valid_groups:   dict[tuple, list[dict]] = {}
@@ -219,7 +227,6 @@ async def import_sales(
                     "reason":   msg,
                 })
 
-    # Pre-compute summary stats from valid groups
     valid_rows = [r for rows in valid_groups.values() for r in rows]
     all_valid_dates = [r["date"] for r in valid_rows if r["date"]]
     total_value = sum(
@@ -229,68 +236,78 @@ async def import_sales(
     )
     earliest_date = min(all_valid_dates).isoformat() if all_valid_dates else None
     latest_date   = max(all_valid_dates).isoformat() if all_valid_dates else None
-    line_items_count = len(valid_rows)
 
-    # ── Dry-run: return preview without touching DB ─────────────────────────
-    if dry_run:
-        return {
-            "dry_run":  True,
-            "mode":     mode,
-            "file":     filename,
-            "batch_id": None,
-            "summary": {
-                "rows_read":            rows_read,
-                "invoices_created":     0,
-                "invoices_would_create": len(valid_groups),
-                "line_items":           line_items_count,
-                "customers_auto_created": 0,
-                "rows_skipped":         rows_skipped,
-                "earliest_date":        earliest_date,
-                "latest_date":          latest_date,
-                "total_value":          round(total_value, 2),
-            },
-            "errors":                  errors_report,
-            "auto_created_customers":  [],
-        }
-
-    # ── Real import ─────────────────────────────────────────────────────────
-    batch_id                  = str(uuid.uuid4())
-    invoices_created          = 0
-    line_items_created        = 0
-    customers_auto_created    = 0
-    auto_created_customer_names: list[str] = []
-    today_str                 = date.today().isoformat()
-
-    # Fetch all active products once (barcode matching is done in Python, same as POS).
+    # ── Load existing products once (used in both dry-run and real) ─────────
     _all_p = await db.execute(
         select(Product).where(or_(Product.is_active.is_(True), Product.is_active.is_(None)))
     )
     all_products = _all_p.scalars().all()
-    products_by_norm_sku = {normalize_barcode_value(p.sku): p for p in all_products}
+    products_by_norm_sku: dict[str, Product] = {
+        normalize_barcode_value(p.sku): p for p in all_products
+    }
 
+    # ── Per-batch state ─────────────────────────────────────────────────────
+    batch_id = str(uuid.uuid4()) if not dry_run else None
+    today_str = date.today().isoformat()
+
+    invoices_created       = 0
+    line_items_created     = 0
+    customers_auto_created = 0
+    products_auto_created  = 0
+    auto_created_customer_names: list[str]  = []
+    auto_created_products_list:  list[dict] = []
+    warnings_list: list[str] = []
+
+    # In-memory registries to avoid double-creating within the same import run
+    newly_created_by_norm_sku: dict[str, Product]  = {}
+    new_customers_by_name_lower: dict[str, Customer] = {}
+    sku_name_registry: dict[str, str] = {}  # norm_sku → first-seen item name
+
+    # ── Process each invoice group ──────────────────────────────────────────
     for (customer_key, sale_date), rows in valid_groups.items():
         customer_name = rows[0]["customer"]
 
-        # ── Resolve customer ───────────────────────────────────────────────
+        # ── Resolve / simulate customer ────────────────────────────────────
         if not customer_name:
-            customer_id = await get_walk_in_customer_id(db)
+            customer_id = (await get_walk_in_customer_id(db)) if not dry_run else -1
         else:
-            _cr = await db.execute(
-                select(Customer).where(
-                    sa_func.lower(Customer.name) == customer_name.lower()
-                )
-            )
-            customer = _cr.scalar_one_or_none()
+            # Check in-session registry first to avoid double-create
+            customer = new_customers_by_name_lower.get(customer_name.lower())
             if not customer:
-                customer = Customer(name=customer_name)
-                db.add(customer)
-                await db.flush()
+                _cr = await db.execute(
+                    select(Customer).where(
+                        sa_func.lower(Customer.name) == customer_name.lower()
+                    )
+                )
+                customer = _cr.scalar_one_or_none()
+
+            if not customer:
+                # Truncate customer name if needed
+                stored_name = customer_name[:_CUST_MAX]
+                if len(customer_name) > _CUST_MAX:
+                    warnings_list.append(
+                        f"Customer name truncated to {_CUST_MAX} chars: '{stored_name}'"
+                    )
+                if not dry_run:
+                    customer = Customer(
+                        name=stored_name,
+                        created_by_import_batch=batch_id,
+                    )
+                    db.add(customer)
+                    await db.flush()
+                    new_customers_by_name_lower[customer_name.lower()] = customer
+                else:
+                    customer = Customer(name=stored_name)
+                    new_customers_by_name_lower[customer_name.lower()] = customer
                 customers_auto_created += 1
                 auto_created_customer_names.append(customer_name)
-            customer_id = customer.id
+                customer_id = customer.id if not dry_run else -1
+            else:
+                new_customers_by_name_lower[customer_name.lower()] = customer
+                customer_id = customer.id
 
-        # ── Duplicate detection ────────────────────────────────────────────
-        if not force and sale_date is not None:
+        # ── Duplicate detection (real-run only) ────────────────────────────
+        if not dry_run and not force and sale_date is not None:
             _dup = await db.execute(
                 select(Invoice).where(
                     Invoice.customer_id == customer_id,
@@ -310,32 +327,86 @@ async def import_sales(
                 rows_skipped += len(rows)
                 continue
 
-        # ── Resolve products for each line item ────────────────────────────
-        line_items: list[tuple] = []   # (product, qty, unit_price, line_total)
-        line_errors: list[dict] = []
+        # ── Resolve / auto-create products for each line item ──────────────
+        line_items: list[tuple] = []  # (product, qty, unit_price, line_total)
 
         for r in rows:
-            norm_sku = normalize_barcode_value(r["sku"])
-            product  = products_by_norm_sku.get(norm_sku)
-            if not product:
-                line_errors.append({
+            raw_sku_str = r["sku"]
+
+            # Truncate SKU if too long
+            if len(raw_sku_str) > _SKU_MAX:
+                truncated_sku = raw_sku_str[:_SKU_MAX]
+                errors_report.append({
                     "row":      r["row"],
-                    "sku":      r["sku"],
+                    "sku":      raw_sku_str,
                     "customer": customer_name or "Walk-in",
                     "date":     str(sale_date),
-                    "reason":   f"Product SKU '{r['sku']}' not found",
+                    "reason":   f"SKU truncated from {len(raw_sku_str)} to {_SKU_MAX} chars: '{truncated_sku}'",
                 })
-            else:
-                line_total = float(r["qty"]) * float(r["price"])
-                line_items.append((product, float(r["qty"]), float(r["price"]), line_total))
+                raw_sku_str = truncated_sku
 
-        if line_errors:
-            errors_report.extend(line_errors)
-            rows_skipped += len(rows)
-            try:
-                await db.rollback()
-            except Exception:
-                pass
+            norm_sku = normalize_barcode_value(raw_sku_str)
+
+            product = products_by_norm_sku.get(norm_sku) or newly_created_by_norm_sku.get(norm_sku)
+            if not product:
+                # Determine item name (first-seen wins for duplicate SKUs)
+                raw_item_name = r["item"] or f"Imported {raw_sku_str}"
+                item_name = raw_item_name[:_NAME_MAX]
+
+                if norm_sku in sku_name_registry:
+                    first_name = sku_name_registry[norm_sku]
+                    if first_name.lower() != item_name.lower():
+                        warn_msg = (
+                            f"SKU '{raw_sku_str}' had conflicting item names: "
+                            f"'{first_name}' vs '{item_name}' — used the first."
+                        )
+                        if warn_msg not in warnings_list:
+                            warnings_list.append(warn_msg)
+                    item_name = first_name
+                else:
+                    sku_name_registry[norm_sku] = item_name
+
+                price_val = float(r["price"])
+                cost_val  = (
+                    round(price_val * default_cost_ratio, 4)
+                    if default_cost_ratio is not None
+                    else 0.0
+                )
+
+                new_product = Product(
+                    sku=raw_sku_str,
+                    name=item_name,
+                    price=price_val,
+                    cost=cost_val,
+                    stock=0,
+                    min_stock=5,
+                    unit="pcs",
+                    is_active=True,
+                    category="Imported - Historical",
+                    created_by_import_batch=batch_id,
+                )
+
+                if not dry_run:
+                    db.add(new_product)
+                    await db.flush()
+
+                newly_created_by_norm_sku[norm_sku] = new_product
+                products_auto_created += 1
+                auto_created_products_list.append({
+                    "sku":   raw_sku_str,
+                    "name":  item_name,
+                    "price": price_val,
+                    "cost":  cost_val,
+                })
+                product = new_product
+
+            line_total = float(r["qty"]) * float(r["price"])
+            line_items.append((product, float(r["qty"]), float(r["price"]), line_total))
+
+        # In dry-run, count the group and move on
+        if dry_run:
+            invoices_created += 1
+            line_items_created += len(line_items)
             continue
 
         # ── Build Invoice ──────────────────────────────────────────────────
@@ -420,6 +491,39 @@ async def import_sales(
             })
             rows_skipped += len(rows)
 
+    # ── Build warnings ──────────────────────────────────────────────────────
+    if products_auto_created > 0 and default_cost_ratio is None:
+        warnings_list.insert(0,
+            f"{products_auto_created} products were auto-created with cost = 0. "
+            "Gross margin reports may be overstated. "
+            "Set costs in Products → filter 'Imported - Historical' category."
+        )
+
+    # ── Return result ───────────────────────────────────────────────────────
+    if dry_run:
+        return {
+            "dry_run":  True,
+            "mode":     mode,
+            "file":     filename,
+            "batch_id": None,
+            "summary": {
+                "rows_read":              rows_read,
+                "invoices_created":       0,
+                "invoices_would_create":  invoices_created,
+                "line_items":             line_items_created,
+                "customers_auto_created": customers_auto_created,
+                "products_auto_created":  products_auto_created,
+                "rows_skipped":           rows_skipped,
+                "earliest_date":          earliest_date,
+                "latest_date":            latest_date,
+                "total_value":            round(total_value, 2),
+            },
+            "errors":                  errors_report,
+            "auto_created_customers":  auto_created_customer_names[:50],
+            "auto_created_products":   auto_created_products_list[:50],
+            "warnings":                warnings_list,
+        }
+
     return {
         "dry_run":  False,
         "mode":     mode,
@@ -430,6 +534,7 @@ async def import_sales(
             "invoices_created":       invoices_created,
             "line_items":             line_items_created,
             "customers_auto_created": customers_auto_created,
+            "products_auto_created":  products_auto_created,
             "rows_skipped":           rows_skipped,
             "earliest_date":          earliest_date,
             "latest_date":            latest_date,
@@ -437,4 +542,6 @@ async def import_sales(
         },
         "errors":                  errors_report,
         "auto_created_customers":  auto_created_customer_names[:50],
+        "auto_created_products":   auto_created_products_list[:50],
+        "warnings":                warnings_list,
     }

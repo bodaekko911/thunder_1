@@ -22,6 +22,7 @@ class Product(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     category  = Column(String(100), nullable=True)
     item_type = Column(String(20),  default="finished")
+    created_by_import_batch = Column(String(64), nullable=True, index=True)
 
     invoice_items  = relationship("InvoiceItem", back_populates="product")
     purchase_items = relationship("PurchaseItem", back_populates="product")

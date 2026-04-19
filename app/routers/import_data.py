@@ -1,4 +1,5 @@
 from decimal import Decimal
+from typing import Optional
 from fastapi import APIRouter, Form, UploadFile, File, Depends
 from fastapi.responses import HTMLResponse, StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -8,14 +9,16 @@ import openpyxl, io
 from app.core.permissions import require_permission
 from app.core.security import get_current_user
 from app.database import get_async_session
-from app.models.invoice import Invoice
+from app.models.invoice import Invoice, InvoiceItem
 from app.models.accounting import Journal
 from app.models.inventory import StockMove
 from app.models.product import Product
 from app.models.customer import Customer
+from app.models.refund import RetailRefund
+from app.models.b2b import B2BInvoice as B2BInvoiceModel, B2BInvoiceItem, Consignment as ConsignmentModel
+from app.models.supplier import PurchaseItem
 from app.services.sales_import_service import import_sales
 from app.services.b2b_sales_import_service import import_b2b_sales
-from app.models.b2b import B2BInvoice as B2BInvoiceModel, Consignment as ConsignmentModel
 
 router = APIRouter(
     prefix="/import",
@@ -285,6 +288,7 @@ async def import_sales_endpoint(
     dry_run: bool = Form(True),
     mode: str = Form("history_only"),
     force: bool = Form(False),
+    default_cost_ratio: Optional[float] = Form(None),
     db: AsyncSession = Depends(get_async_session),
     current_user=Depends(get_current_user),
 ):
@@ -293,6 +297,7 @@ async def import_sales_endpoint(
     dry_run=True (default): validate and preview without writing anything.
     mode: history_only | with_journals | with_stock_and_journals
     force=True: skip duplicate detection and re-import even if records exist.
+    default_cost_ratio: if set, auto-created products get cost = price × ratio.
     """
     contents = await file.read()
     return await import_sales(
@@ -303,6 +308,7 @@ async def import_sales_endpoint(
         dry_run=dry_run,
         mode=mode,
         force=force,
+        default_cost_ratio=default_cost_ratio,
     )
 
 
@@ -420,6 +426,9 @@ async def delete_import_batch(
     Deletes all invoices in the batch (cascades to invoice_items), removes any
     StockMoves and Journals that reference those invoice IDs, and (for
     with_stock_and_journals imports) restores product.stock.
+
+    Also cascade-deletes auto-created products and customers that were stamped
+    with this batch_id, but only if they have no references outside this batch.
     """
     _r = await db.execute(
         select(Invoice).where(Invoice.import_batch_id == batch_id)
@@ -467,8 +476,49 @@ async def delete_import_batch(
     for inv in invoices:
         await db.delete(inv)
 
+    # Flush so cascade deletes are visible to the reference-count queries below
+    await db.flush()
+
+    # 5. Cascade-delete auto-created products that now have zero references
+    _ap = await db.execute(
+        select(Product).where(Product.created_by_import_batch == batch_id)
+    )
+    deleted_products = 0
+    for product in _ap.scalars().all():
+        pid = product.id
+        refs = []
+        for model, col in [
+            (InvoiceItem,    InvoiceItem.product_id),
+            (B2BInvoiceItem, B2BInvoiceItem.product_id),
+            (PurchaseItem,   PurchaseItem.product_id),
+            (StockMove,      StockMove.product_id),
+        ]:
+            _ref = await db.execute(select(model).where(col == pid).limit(1))
+            refs.append(_ref.scalar_one_or_none())
+        if all(r is None for r in refs):
+            await db.delete(product)
+            deleted_products += 1
+
+    # 6. Cascade-delete auto-created customers that now have zero references
+    _ac = await db.execute(
+        select(Customer).where(Customer.created_by_import_batch == batch_id)
+    )
+    deleted_customers = 0
+    for customer in _ac.scalars().all():
+        cid = customer.id
+        _inv_ref = await db.execute(select(Invoice).where(Invoice.customer_id == cid).limit(1))
+        _ref_ref = await db.execute(select(RetailRefund).where(RetailRefund.customer_id == cid).limit(1))
+        if _inv_ref.scalar_one_or_none() is None and _ref_ref.scalar_one_or_none() is None:
+            await db.delete(customer)
+            deleted_customers += 1
+
     await db.commit()
-    return {"ok": True, "deleted_invoices": len(invoices)}
+    return {
+        "ok": True,
+        "deleted_invoices":  len(invoices),
+        "deleted_products":  deleted_products,
+        "deleted_customers": deleted_customers,
+    }
 
 
 # ── B2B SALES IMPORT ────────────────────────────────────────────────────────
@@ -925,13 +975,17 @@ td{padding:8px 12px;border-top:1px solid var(--border);color:var(--sub);white-sp
             <div class="import-card-body">
                 <div class="col-map">
                     <div class="col-map-title">Expected Excel Columns</div>
-                    <div class="col-row"><span class="col-excel">SKU</span><span class="col-arrow">→</span><span class="col-field">Must match existing product</span><span style="color:var(--danger);font-size:10px;margin-left:4px">required</span></div>
-                    <div class="col-row"><span class="col-excel">Item</span><span class="col-arrow">→</span><span class="col-field">Product name (informational)</span><span class="col-opt">optional</span></div>
+                    <div class="col-row"><span class="col-excel">SKU</span><span class="col-arrow">→</span><span class="col-field">Product SKU — auto-created if unknown</span><span style="color:var(--danger);font-size:10px;margin-left:4px">required</span></div>
+                    <div class="col-row"><span class="col-excel">Item</span><span class="col-arrow">→</span><span class="col-field">Product name (used when auto-creating)</span><span class="col-opt">optional</span></div>
                     <div class="col-row"><span class="col-excel">QTY</span><span class="col-arrow">→</span><span class="col-field">Quantity sold (&gt; 0)</span><span style="color:var(--danger);font-size:10px;margin-left:4px">required</span></div>
                     <div class="col-row"><span class="col-excel">Price</span><span class="col-arrow">→</span><span class="col-field">Unit price at time of sale</span><span style="color:var(--danger);font-size:10px;margin-left:4px">required</span></div>
-                    <div class="col-row"><span class="col-excel">Customer</span><span class="col-arrow">→</span><span class="col-field">Customer name (blank = Walk-in)</span><span class="col-opt">optional</span></div>
+                    <div class="col-row"><span class="col-excel">Customer</span><span class="col-arrow">→</span><span class="col-field">Customer name — auto-created if unknown (blank = Walk-in)</span><span class="col-opt">optional</span></div>
                     <div class="col-row"><span class="col-excel">Date</span><span class="col-arrow">→</span><span class="col-field">Sale date ≥ 2026-01-01</span><span style="color:var(--danger);font-size:10px;margin-left:4px">required</span></div>
-                    <div style="margin-top:8px">
+                    <div style="margin-top:8px;font-size:11px;color:var(--sub);padding:8px 10px;background:rgba(77,159,255,.06);border-radius:6px;border:1px solid rgba(77,159,255,.15);">
+                        Unknown SKUs and unknown customers will be automatically created from the sheet data.
+                        Auto-created products get <code style="font-family:var(--mono)">cost = 0</code> by default — set this via the 'Default cost ratio' option below, or adjust after import in Products → "Imported - Historical".
+                    </div>
+                    <div style="margin-top:6px">
                         <a href="/import/api/sales/template" download style="font-size:11px;color:var(--blue);text-decoration:none">⬇ Download template</a>
                     </div>
                 </div>
@@ -963,6 +1017,19 @@ td{padding:8px 12px;border-top:1px solid var(--border);color:var(--sub);white-sp
                         <input type="checkbox" id="chk-force" style="accent-color:var(--warn)">
                         <span>Force import even if duplicates detected</span>
                     </label>
+                    <div style="display:flex;flex-direction:column;gap:4px;">
+                        <label style="font-size:12px;font-weight:600;color:var(--sub)">
+                            Default cost ratio for auto-created products
+                            <span style="font-weight:400;color:var(--muted)">(optional)</span>
+                        </label>
+                        <input type="number" id="inp-cost-ratio" step="0.01" min="0" max="1"
+                            placeholder="e.g. 0.65 — leave blank for cost = 0"
+                            style="background:var(--card2);border:1px solid var(--border2);border-radius:8px;
+                            padding:8px 12px;color:var(--text);font-family:var(--sans);font-size:13px;width:100%;">
+                        <span style="font-size:11px;color:var(--muted)">
+                            If set, auto-created products get cost = price × this ratio. Leave blank for cost = 0.
+                        </span>
+                    </div>
                 </div>
 
                 <div class="drop-zone" id="drop-sales" ondragover="onDrag(event,'sales')" ondragleave="offDrag('sales')" ondrop="onDrop(event,'sales')">
@@ -1187,15 +1254,17 @@ async function doImportSales() {
     btn.disabled = true; btn.innerHTML = '⏳ Processing…';
     showProg('sales', 40); showResult('sales', '', '');
 
-    const mode    = document.querySelector('input[name="sales-mode"]:checked').value;
-    const dryRun  = document.getElementById('chk-dryrun').checked;
-    const force   = document.getElementById('chk-force').checked;
+    const mode      = document.querySelector('input[name="sales-mode"]:checked').value;
+    const dryRun    = document.getElementById('chk-dryrun').checked;
+    const force     = document.getElementById('chk-force').checked;
+    const costRatio = document.getElementById('inp-cost-ratio').value.trim();
 
     const fd = new FormData();
     fd.append('file',    f);
     fd.append('dry_run', dryRun ? 'true' : 'false');
     fd.append('mode',    mode);
     fd.append('force',   force ? 'true' : 'false');
+    if (costRatio !== '') fd.append('default_cost_ratio', costRatio);
 
     const res  = await fetch('/import/api/sales', { method: 'POST', body: fd });
     const data = await res.json();
@@ -1222,13 +1291,53 @@ function renderSalesResult(data, wasDryRun) {
         <b>${s.line_items}</b> line items &nbsp;·&nbsp;
         <b>${s.rows_skipped}</b> skipped<br>
         <span style="color:var(--sub);font-size:12px">
-            Customers auto-created: <b>${s.customers_auto_created}</b> &nbsp;·&nbsp;
+            Customers ${isDry?'would create':'created'}: <b>${s.customers_auto_created}</b> &nbsp;·&nbsp;
+            Products ${isDry?'would create':'created'}: <b>${s.products_auto_created||0}</b> &nbsp;·&nbsp;
             Date range: ${s.earliest_date||'–'} → ${s.latest_date||'–'} &nbsp;·&nbsp;
             Total value: <b>${(s.total_value||0).toFixed(2)}</b>
         </span>`;
 
     if (data.batch_id) {
         html += `<br><span style="color:var(--muted);font-size:11px">Batch ID: ${data.batch_id}</span>`;
+    }
+
+    // Auto-created customers
+    if (data.auto_created_customers && data.auto_created_customers.length) {
+        html += `<br><details style="margin-top:6px"><summary style="font-size:12px;cursor:pointer;color:var(--sub)">
+            Auto-created customers (${data.auto_created_customers.length})
+        </summary><div style="margin-top:4px;font-size:11px;color:var(--muted)">
+            ${data.auto_created_customers.slice(0,10).join(', ')}
+            ${data.auto_created_customers.length > 10 ? ` <i>and ${data.auto_created_customers.length - 10} more…</i>` : ''}
+        </div></details>`;
+    }
+
+    // Auto-created products
+    if (data.auto_created_products && data.auto_created_products.length) {
+        const nProd = data.auto_created_products.length;
+        const costRatioSet = document.getElementById('inp-cost-ratio').value.trim() !== '';
+        const warnAmber = isDry && !costRatioSet && nProd > 5;
+        html += `<br><details style="margin-top:4px" ${isDry ? 'open' : ''}><summary style="font-size:12px;cursor:pointer;color:${warnAmber?'var(--warn)':'var(--sub)'}">
+            ${warnAmber ? '⚠ ' : ''}Auto-created products (${nProd})${warnAmber ? ' — cost = 0, consider setting Default cost ratio' : ''}
+        </summary><div style="margin-top:4px">
+        <table style="font-size:11px;width:100%">
+            <thead><tr><th>SKU</th><th>Name</th><th>Price</th><th>Cost</th></tr></thead>
+            <tbody>${data.auto_created_products.slice(0,10).map(p=>`<tr>
+                <td style="font-family:var(--mono)">${p.sku}</td>
+                <td>${p.name}</td>
+                <td>${p.price.toFixed(2)}</td>
+                <td>${p.cost === 0 ? '<span style="color:var(--warn)">0 — not set</span>' : p.cost.toFixed(2)}</td>
+            </tr>`).join('')}</tbody>
+        </table>
+        ${nProd > 10 ? `<div style="font-size:11px;color:var(--muted);padding-top:4px">…and ${nProd - 10} more</div>` : ''}
+        </div></details>`;
+    }
+
+    // Warnings
+    if (data.warnings && data.warnings.length) {
+        html += `<br><div style="margin-top:6px;padding:8px 12px;background:rgba(255,181,71,.08);
+            border:1px solid rgba(255,181,71,.2);border-radius:8px;font-size:12px;color:var(--warn)">
+            ${data.warnings.map(w=>`⚠ ${w}`).join('<br>')}
+        </div>`;
     }
 
     if (data.errors && data.errors.length) {
@@ -1307,7 +1416,10 @@ async function revertBatch(batchId) {
     const r = await fetch('/import/api/sales/batch/' + batchId, { method: 'DELETE' });
     const d = await r.json();
     if (d.ok) {
-        showResult('sales', '✓ Batch reverted — ' + d.deleted_invoices + ' invoices deleted.', 'ok');
+        let msg = `✓ Batch reverted — ${d.deleted_invoices} invoices deleted`;
+        if (d.deleted_products)  msg += `, ${d.deleted_products} auto-created products removed`;
+        if (d.deleted_customers) msg += `, ${d.deleted_customers} auto-created customers removed`;
+        showResult('sales', msg + '.', 'ok');
     } else {
         showResult('sales', '✗ Revert failed', 'err');
     }
