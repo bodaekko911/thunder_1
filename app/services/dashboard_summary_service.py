@@ -445,6 +445,22 @@ async def _panels(db: AsyncSession, rng: dict) -> dict:
     period_end = utc_e.astimezone(tz).date()
 
     # Top products ──────────────────────────────────────────────────────────
+    sales_items = (
+        select(
+            InvoiceItem.name.label("name"),
+            InvoiceItem.qty.label("qty"),
+            InvoiceItem.total.label("total"),
+            InvoiceItem.product_id.label("product_id"),
+        )
+        .join(Invoice, InvoiceItem.invoice_id == Invoice.id)
+        .where(
+            Invoice.created_at >= utc_s,
+            Invoice.created_at <= utc_e,
+            Invoice.status == "paid",
+        )
+        .subquery()
+    )
+
     r_total = await db.execute(
         select(func.coalesce(func.sum(Invoice.total), 0))
         .where(Invoice.created_at >= utc_s, Invoice.created_at <= utc_e, Invoice.status == "paid")
@@ -452,13 +468,13 @@ async def _panels(db: AsyncSession, rng: dict) -> dict:
     total_rev = float(r_total.scalar() or 1)
 
     by_rev_rows = await db.execute(
-        select(InvoiceItem.name,
-               func.sum(InvoiceItem.total).label("rev"),
-               func.sum(InvoiceItem.qty).label("qty"))
-        .join(Invoice, InvoiceItem.invoice_id == Invoice.id)
-        .where(Invoice.created_at >= utc_s, Invoice.created_at <= utc_e, Invoice.status == "paid")
-        .group_by(InvoiceItem.name)
-        .order_by(func.sum(InvoiceItem.total).desc())
+        select(
+            sales_items.c.name,
+            func.sum(sales_items.c.total).label("rev"),
+            func.sum(sales_items.c.qty).label("qty"),
+        )
+        .group_by(sales_items.c.name)
+        .order_by(func.sum(sales_items.c.total).desc())
         .limit(8)
     )
     by_revenue = [
@@ -468,27 +484,27 @@ async def _panels(db: AsyncSession, rng: dict) -> dict:
     ]
 
     by_qty_rows = await db.execute(
-        select(InvoiceItem.name,
-               func.sum(InvoiceItem.qty).label("qty"),
-               func.sum(InvoiceItem.total).label("rev"))
-        .join(Invoice, InvoiceItem.invoice_id == Invoice.id)
-        .where(Invoice.created_at >= utc_s, Invoice.created_at <= utc_e, Invoice.status == "paid")
-        .group_by(InvoiceItem.name)
-        .order_by(func.sum(InvoiceItem.qty).desc())
+        select(
+            sales_items.c.name,
+            func.sum(sales_items.c.qty).label("qty"),
+            func.sum(sales_items.c.total).label("rev"),
+        )
+        .group_by(sales_items.c.name)
+        .order_by(func.sum(sales_items.c.qty).desc())
         .limit(8)
     )
     by_qty = [{"name": r.name, "qty": round(float(r.qty), 2), "revenue": round(float(r.rev), 2)}
               for r in by_qty_rows]
 
     by_margin_rows = await db.execute(
-        select(InvoiceItem.name,
-               func.sum(InvoiceItem.total).label("rev"),
-               func.sum(InvoiceItem.qty * Product.cost).label("cogs"))
-        .join(Invoice,  InvoiceItem.invoice_id == Invoice.id)
-        .join(Product,  InvoiceItem.product_id == Product.id)
-        .where(Invoice.created_at >= utc_s, Invoice.created_at <= utc_e, Invoice.status == "paid")
-        .group_by(InvoiceItem.name)
-        .order_by((func.sum(InvoiceItem.total) - func.sum(InvoiceItem.qty * Product.cost)).desc())
+        select(
+            sales_items.c.name,
+            func.sum(sales_items.c.total).label("rev"),
+            func.sum(sales_items.c.qty * Product.cost).label("cogs"),
+        )
+        .join(Product, sales_items.c.product_id == Product.id)
+        .group_by(sales_items.c.name)
+        .order_by((func.sum(sales_items.c.total) - func.sum(sales_items.c.qty * Product.cost)).desc())
         .limit(8)
     )
     by_margin = []
