@@ -19,6 +19,7 @@ apply_test_environment_defaults()
 
 from app.services.dashboard_summary_service import (
     _utc_range,
+    _pick_granularity,
     resolve_range,
     get_summary,
 )
@@ -298,4 +299,73 @@ def test_summary_query_count():
 
     assert call_count["n"] <= 30, (
         f"Expected ≤ 30 DB queries for /dashboard/summary?range=30d, got {call_count['n']}"
+    )
+
+
+# ── chart granularity tests ───────────────────────────────────────────────
+
+def test_chart_7d_granularity_is_daily():
+    """7-day range → daily granularity and exactly 7 buckets."""
+    user = SimpleNamespace(id=1, name="Admin", role="admin", permissions="", is_active=True)
+    data = asyncio.run(get_summary(_ScalarDB(), "7d", None, None, user))
+    chart = data["chart"]
+    assert chart["granularity"] == "day", f"Expected 'day', got {chart['granularity']!r}"
+    assert len(chart["buckets"]) == 7, f"Expected 7 daily buckets, got {len(chart['buckets'])}"
+
+
+def test_chart_90d_granularity_is_weekly():
+    """90-day range → weekly granularity, ~13 buckets (90 / 7 ≈ 12.9 ISO weeks)."""
+    rng = resolve_range("90d")
+    assert _pick_granularity(rng) == "week"
+
+    user = SimpleNamespace(id=1, name="Admin", role="admin", permissions="", is_active=True)
+    data = asyncio.run(get_summary(_ScalarDB(), "90d", None, None, user))
+    chart = data["chart"]
+    assert chart["granularity"] == "week"
+    assert 12 <= len(chart["buckets"]) <= 15, (
+        f"Expected ~13 weekly buckets for 90d range, got {len(chart['buckets'])}"
+    )
+
+
+def test_chart_year_granularity_is_monthly():
+    """Year range → monthly granularity, approximately 12 buckets."""
+    rng = resolve_range("year")
+    assert _pick_granularity(rng) == "month"
+
+    user = SimpleNamespace(id=1, name="Admin", role="admin", permissions="", is_active=True)
+    data = asyncio.run(get_summary(_ScalarDB(), "year", None, None, user))
+    chart = data["chart"]
+    assert chart["granularity"] == "month"
+    assert 11 <= len(chart["buckets"]) <= 14, (
+        f"Expected ~12 monthly buckets for year range, got {len(chart['buckets'])}"
+    )
+
+
+def test_chart_today_top_products_structure_is_present():
+    """today range → panels.top_products has the three required sub-lists."""
+    user = SimpleNamespace(id=1, name="Admin", role="admin", permissions="", is_active=True)
+    data = asyncio.run(get_summary(_ScalarDB(), "today", None, None, user))
+    tp = data["panels"]["top_products"]
+    assert isinstance(tp["by_revenue"], list)
+    assert isinstance(tp["by_qty"], list)
+    assert isinstance(tp["by_margin"], list)
+
+
+def test_chart_timezone_march_sale_falls_in_april_not_march():
+    """
+    A sale at 23:30 UTC on March 31 is 01:30 Cairo on April 1 (Cairo is UTC+2).
+    It must fall inside April's UTC window and outside March's UTC window.
+    """
+    invoice_utc = datetime(2026, 3, 31, 23, 30, 0, tzinfo=UTC)
+
+    utc_s_apr, utc_e_apr = _utc_range(date(2026, 4, 1), date(2026, 4, 30))
+    utc_s_mar, utc_e_mar = _utc_range(date(2026, 3, 1), date(2026, 3, 31))
+
+    assert utc_s_apr <= invoice_utc <= utc_e_apr, (
+        f"23:30 UTC Mar 31 (= 01:30 Cairo Apr 1) must be INSIDE April's UTC window "
+        f"[{utc_s_apr}, {utc_e_apr}]"
+    )
+    assert not (utc_s_mar <= invoice_utc <= utc_e_mar), (
+        f"23:30 UTC Mar 31 (= 01:30 Cairo Apr 1) must NOT be in March's UTC window "
+        f"[{utc_s_mar}, {utc_e_mar}]"
     )

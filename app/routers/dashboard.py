@@ -522,8 +522,10 @@ def dashboard_ui():
         <button class="range-btn active" data-range="today">Today</button>
         <button class="range-btn" data-range="7d">7 days</button>
         <button class="range-btn" data-range="30d">30 days</button>
+        <button class="range-btn" data-range="90d">90 days</button>
         <button class="range-btn" data-range="mtd">This month</button>
         <button class="range-btn" data-range="qtd">This quarter</button>
+        <button class="range-btn" data-range="year">This year</button>
         <button class="range-btn" data-range="custom">Custom…</button>
       </div>
       <span id="range-label" class="text-muted" style="font-size:12px"></span>

@@ -51,6 +51,10 @@ def resolve_range(
         rs, re, label = today - timedelta(days=6), today, "Last 7 days"
     elif range_param == "30d":
         rs, re, label = today - timedelta(days=29), today, "Last 30 days"
+    elif range_param == "90d":
+        rs, re, label = today - timedelta(days=89), today, "Last 90 days"
+    elif range_param in ("year", "ytd"):
+        rs, re, label = today - timedelta(days=364), today, "Last 12 months"
     elif range_param == "mtd":
         rs, re, label = today.replace(day=1), today, "Month to date"
     elif range_param == "qtd":
@@ -82,6 +86,37 @@ def resolve_range(
         "prior_utc_end":   p_utc_e,
         "num_days":      num_days,
     }
+
+
+# ── chart granularity helpers ──────────────────────────────────────────────
+
+def _pick_granularity(rng: dict) -> str:
+    days = rng["num_days"]
+    if days <= 31:
+        return "day"
+    if days <= 180:
+        return "week"
+    return "month"
+
+
+def _aggregate_buckets(daily: list[dict], granularity: str) -> list[dict]:
+    if granularity == "day":
+        return daily
+    groups: dict[str, dict] = {}
+    for b in daily:
+        d = date.fromisoformat(b["date"])
+        if granularity == "week":
+            key = str(d - timedelta(days=d.weekday()))  # Monday of the ISO week
+        else:
+            key = f"{d.year}-{d.month:02d}-01"
+        if key not in groups:
+            groups[key] = {"date": key, "pos": 0.0, "b2b": 0.0, "refunds": 0.0, "orders": 0}
+        g = groups[key]
+        g["pos"]     = round(g["pos"]     + b["pos"],     2)
+        g["b2b"]     = round(g["b2b"]     + b["b2b"],     2)
+        g["refunds"] = round(g["refunds"] + b["refunds"], 2)
+        g["orders"]  += b["orders"]
+    return list(groups.values())
 
 
 # ── helpers ────────────────────────────────────────────────────────────────
@@ -472,12 +507,16 @@ async def _chart(db: AsyncSession, rng: dict, acc_id: int | None) -> dict:
         totals.append(day_total)
         d += timedelta(days=1)
 
+    granularity = _pick_granularity(rng)
+    agg_buckets = _aggregate_buckets(buckets, granularity)
+
+    agg_totals = [b["pos"] + b["b2b"] for b in agg_buckets]
     moving_avg = []
-    for i in range(len(buckets)):
-        window = totals[max(0, i - 6): i + 1]
+    for i in range(len(agg_buckets)):
+        window = agg_totals[max(0, i - 6): i + 1]
         moving_avg.append(round(sum(window) / len(window), 2))
 
-    return {"buckets": buckets, "moving_avg_7d": moving_avg}
+    return {"buckets": agg_buckets, "moving_avg_7d": moving_avg, "granularity": granularity}
 
 
 # ── panels ─────────────────────────────────────────────────────────────────

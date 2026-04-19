@@ -443,6 +443,12 @@ function renderHeroCard(elId, opts) {
 }
 
 // ── primary chart ─────────────────────────────────────────────────────
+function _fmtBucketLabel(dateStr, granularity) {
+  const d = new Date(dateStr + "T12:00:00");
+  if (granularity === "month") return d.toLocaleString("en-GB", { month: "short", year: "numeric" });
+  return d.toLocaleString("en-GB", { day: "numeric", month: "short" });
+}
+
 function renderMainChart(chartData, rangeLabel) {
   const ctx = document.getElementById("main-chart");
   if (!ctx) return;
@@ -450,9 +456,11 @@ function renderMainChart(chartData, rangeLabel) {
   const light = document.body.classList.contains("light");
   const gridColor  = light ? "rgba(0,0,0,.07)" : "rgba(255,255,255,.06)";
   const tickColor  = "#64748b";
+  const granularity = chartData.granularity || "day";
   const buckets    = chartData.buckets || [];
-  const labels     = buckets.map(b => b.date);
+  const labels     = buckets.map(b => _fmtBucketLabel(b.date, granularity));
   const movingAvg  = chartData.moving_avg_7d || [];
+  const maLabel    = granularity === "month" ? "3-mo Avg" : granularity === "week" ? "4-wk Avg" : "7-day Avg";
 
   if (_revenueChart) { _revenueChart.destroy(); _revenueChart = null; }
 
@@ -483,7 +491,7 @@ function renderMainChart(chartData, rangeLabel) {
           order: 2,
         },
         {
-          label: "7-day Avg",
+          label: maLabel,
           data: movingAvg,
           type: "line",
           borderColor: "rgba(245,158,11,.9)",
@@ -509,8 +517,8 @@ function renderMainChart(chartData, rangeLabel) {
             title: items => items[0]?.label || "",
             label: item => {
               const b = buckets[item.dataIndex];
-              if (item.dataset.label === "7-day Avg")
-                return " 7d avg: " + fmtNum(Math.round(item.raw)) + " EGP";
+              if (item.dataset.label === maLabel)
+                return " " + maLabel + ": " + fmtNum(Math.round(item.raw)) + " EGP";
               return " " + item.dataset.label + ": " + fmtNum(Math.round(item.raw)) + " EGP";
             },
             afterBody: items => {
@@ -790,7 +798,17 @@ function clearPartialErrorBanner() {
 }
 
 // ── data fetch + render ────────────────────────────────────────────────
+function _dimPanels() {
+  const els = [
+    document.querySelector(".chart-wrap"),
+    document.querySelector("[aria-label='Top products']"),
+  ];
+  els.forEach(el => { if (el) el.style.opacity = "0.4"; });
+  setTimeout(() => els.forEach(el => { if (el) el.style.removeProperty("opacity"); }), 300);
+}
+
 async function loadSummary() {
+  if (!_firstLoad) _dimPanels();
   let url = `/dashboard/summary?range=${_currentRange}`;
   if (_currentRange === "custom" && _customStart && _customEnd) {
     url += `&start=${_customStart}&end=${_customEnd}`;
