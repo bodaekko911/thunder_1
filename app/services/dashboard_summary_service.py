@@ -36,6 +36,10 @@ def _utc_range(local_start: date, local_end: date) -> tuple[datetime, datetime]:
     return start, end
 
 
+def _local_day_expr(column):
+    return func.date(func.timezone(settings.APP_TIMEZONE, column))
+
+
 def resolve_range(
     range_param: str,
     custom_start: str | None = None,
@@ -147,25 +151,27 @@ async def _daily_sparkline(
     acc_id: int | None,
 ) -> list[float]:
     tz = _tz()
-    tz_name = settings.APP_TIMEZONE
+    invoice_day = _local_day_expr(Invoice.created_at)
+    refund_day = _local_day_expr(RetailRefund.created_at)
+    journal_day = _local_day_expr(Journal.created_at)
 
     pos_rows = await db.execute(
         select(
-            func.date(func.timezone(tz_name, Invoice.created_at)).label("day"),
+            invoice_day.label("day"),
             func.sum(Invoice.total).label("total"),
         )
         .where(Invoice.created_at >= utc_s, Invoice.created_at <= utc_e, Invoice.status == "paid")
-        .group_by(func.date(func.timezone(tz_name, Invoice.created_at)))
+        .group_by(invoice_day)
     )
     pos_by_day = {str(r.day): float(r.total) for r in pos_rows}
 
     ref_rows = await db.execute(
         select(
-            func.date(func.timezone(tz_name, RetailRefund.created_at)).label("day"),
+            refund_day.label("day"),
             func.sum(RetailRefund.total).label("total"),
         )
         .where(RetailRefund.created_at >= utc_s, RetailRefund.created_at <= utc_e)
-        .group_by(func.date(func.timezone(tz_name, RetailRefund.created_at)))
+        .group_by(refund_day)
     )
     ref_by_day = {str(r.day): float(r.total) for r in ref_rows}
 
@@ -173,7 +179,7 @@ async def _daily_sparkline(
     if acc_id:
         b2b_rows = await db.execute(
             select(
-                func.date(func.timezone(tz_name, Journal.created_at)).label("day"),
+                journal_day.label("day"),
                 func.sum(JournalEntry.credit).label("total"),
             )
             .join(JournalEntry, JournalEntry.journal_id == Journal.id)
@@ -183,7 +189,7 @@ async def _daily_sparkline(
                 Journal.created_at <= utc_e,
                 Journal.ref_type.in_(_B2B_REF_TYPES),
             )
-            .group_by(func.date(func.timezone(tz_name, Journal.created_at)))
+            .group_by(journal_day)
         )
         b2b_by_day = {str(r.day): float(r.total) for r in b2b_rows}
 
@@ -357,17 +363,19 @@ async def _hero_farm(db: AsyncSession, rng: dict) -> dict:
 
 async def _chart(db: AsyncSession, rng: dict, acc_id: int | None) -> dict:
     tz     = _tz()
-    tz_name = settings.APP_TIMEZONE
     utc_s, utc_e = rng["utc_start"], rng["utc_end"]
+    invoice_day = _local_day_expr(Invoice.created_at)
+    refund_day = _local_day_expr(RetailRefund.created_at)
+    journal_day = _local_day_expr(Journal.created_at)
 
     pos_rows = await db.execute(
         select(
-            func.date(func.timezone(tz_name, Invoice.created_at)).label("day"),
+            invoice_day.label("day"),
             func.sum(Invoice.total).label("pos"),
             func.count(Invoice.id).label("orders"),
         )
         .where(Invoice.created_at >= utc_s, Invoice.created_at <= utc_e, Invoice.status == "paid")
-        .group_by(func.date(func.timezone(tz_name, Invoice.created_at)))
+        .group_by(invoice_day)
     )
     pos_by_day: dict[str, tuple[float, int]] = {
         str(r.day): (float(r.pos), int(r.orders)) for r in pos_rows
@@ -375,11 +383,11 @@ async def _chart(db: AsyncSession, rng: dict, acc_id: int | None) -> dict:
 
     ref_rows = await db.execute(
         select(
-            func.date(func.timezone(tz_name, RetailRefund.created_at)).label("day"),
+            refund_day.label("day"),
             func.sum(RetailRefund.total).label("refunds"),
         )
         .where(RetailRefund.created_at >= utc_s, RetailRefund.created_at <= utc_e)
-        .group_by(func.date(func.timezone(tz_name, RetailRefund.created_at)))
+        .group_by(refund_day)
     )
     ref_by_day = {str(r.day): float(r.refunds) for r in ref_rows}
 
@@ -387,7 +395,7 @@ async def _chart(db: AsyncSession, rng: dict, acc_id: int | None) -> dict:
     if acc_id:
         b2b_rows = await db.execute(
             select(
-                func.date(func.timezone(tz_name, Journal.created_at)).label("day"),
+                journal_day.label("day"),
                 func.sum(JournalEntry.credit).label("b2b"),
             )
             .join(JournalEntry, JournalEntry.journal_id == Journal.id)
@@ -397,7 +405,7 @@ async def _chart(db: AsyncSession, rng: dict, acc_id: int | None) -> dict:
                 Journal.created_at <= utc_e,
                 Journal.ref_type.in_(_B2B_REF_TYPES),
             )
-            .group_by(func.date(func.timezone(tz_name, Journal.created_at)))
+            .group_by(journal_day)
         )
         b2b_by_day = {str(r.day): float(r.b2b) for r in b2b_rows}
 
@@ -671,6 +679,7 @@ async def get_summary(
             hero_type = "admin"
     except Exception:
         logger.error("dashboard_summary: hero section failed", exc_info=True)
+        await db.rollback()
         _errors.append({"section": "hero", "reason": "query failed"})
 
     chart: dict = {"buckets": [], "moving_avg_7d": []}
@@ -678,6 +687,7 @@ async def get_summary(
         chart = await _chart(db, rng, acc_id)
     except Exception:
         logger.error("dashboard_summary: chart section failed", exc_info=True)
+        await db.rollback()
         _errors.append({"section": "chart", "reason": "query failed"})
 
     panels: dict = {
@@ -690,6 +700,7 @@ async def get_summary(
         panels = await _panels(db, rng)
     except Exception:
         logger.error("dashboard_summary: panels section failed", exc_info=True)
+        await db.rollback()
         _errors.append({"section": "panels", "reason": "query failed"})
 
     generated_at = datetime.now(_tz()).isoformat()
