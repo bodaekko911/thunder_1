@@ -1,7 +1,7 @@
 from datetime import date, datetime, timedelta
 from typing import Optional
 
-from fastapi import APIRouter, Depends, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -34,235 +34,304 @@ class DashboardAssistantQuestion(BaseModel):
     question: str
 
 
-# ── legacy data endpoint (kept intact for backward compat) ─────────────
+# ── legacy data endpoint ───────────────────────────────────────────────
 
 @router.get("/dashboard/data")
 async def dashboard_data(db: AsyncSession = Depends(get_async_session)):
-    from zoneinfo import ZoneInfo
-    tz    = ZoneInfo(settings.APP_TIMEZONE)
-    today = datetime.now(tz).date()           # timezone-correct "today"
-    month_s = today.replace(day=1)
-    year_s  = today.replace(month=1, day=1)
-
-    # ── POS SALES ──────────────────────────────────────
-    r = await db.execute(select(func.sum(Invoice.total)).where(func.date(Invoice.created_at) == today, Invoice.status == "paid"))
-    pos_today = float(r.scalar() or 0)
-    r = await db.execute(select(func.sum(Invoice.total)).where(func.date(Invoice.created_at) >= month_s, Invoice.status == "paid"))
-    pos_month = float(r.scalar() or 0)
-    r = await db.execute(select(func.sum(Invoice.total)).where(func.date(Invoice.created_at) >= year_s, Invoice.status == "paid"))
-    pos_year  = float(r.scalar() or 0)
-
-    # Subtract retail refunds from POS revenue
-    r = await db.execute(select(func.sum(RetailRefund.total)).where(func.date(RetailRefund.created_at) == today))
-    ref_today = float(r.scalar() or 0)
-    r = await db.execute(select(func.sum(RetailRefund.total)).where(func.date(RetailRefund.created_at) >= month_s))
-    ref_month = float(r.scalar() or 0)
-    r = await db.execute(select(func.sum(RetailRefund.total)).where(func.date(RetailRefund.created_at) >= year_s))
-    ref_year  = float(r.scalar() or 0)
-    pos_today = max(0, pos_today - ref_today)
-    pos_month = max(0, pos_month - ref_month)
-    pos_year  = max(0, pos_year  - ref_year)
-
-    r = await db.execute(select(func.count(Invoice.id)).where(func.date(Invoice.created_at) == today))
-    invoices_today = r.scalar() or 0
-    r = await db.execute(select(func.count(Invoice.id)).where(func.date(Invoice.created_at) >= month_s, Invoice.status == "paid"))
-    invoices_month = r.scalar() or 0
-
-    # ── B2B SALES ──────────────────────────────────────
+    from app.core.log import logger
+    from app.core.time_utils import today_local, utc_bounds
     from app.models.accounting import Account, Journal, JournalEntry
-    rev_result = await db.execute(select(Account).where(Account.code == "4000"))
-    rev_acc = rev_result.scalar_one_or_none()
 
-    async def journal_revenue(d_from, d_to):
-        if not rev_acc: return 0.0
-        stmt = (
-            select(func.sum(JournalEntry.credit))
-            .join(Journal, JournalEntry.journal_id == Journal.id)
-            .where(
-                JournalEntry.account_id == rev_acc.id,
-                Journal.created_at >= d_from,
-                Journal.created_at <= d_to,
-                Journal.ref_type.in_(["b2b", "b2b_invoice", "consignment_payment", "consignment"])
+    _errors: list[dict] = []
+
+    try:
+        today   = today_local()
+        month_s = today.replace(day=1)
+        year_s  = today.replace(month=1, day=1)
+
+        today_s,   today_e   = utc_bounds(today,   today)
+        month_s_u, month_e_u = utc_bounds(month_s, today)
+        year_s_u,  year_e_u  = utc_bounds(year_s,  today)
+
+        # ── B2B revenue account (used by multiple sections) ─────────────
+        rev_acc = None
+        try:
+            r = await db.execute(select(Account).where(Account.code == "4000"))
+            rev_acc = r.scalar_one_or_none()
+        except Exception:
+            logger.error("dashboard_data: account lookup failed", exc_info=True)
+
+        async def _jrev(utc_s, utc_e) -> float:
+            if not rev_acc:
+                return 0.0
+            r = await db.execute(
+                select(func.sum(JournalEntry.credit))
+                .join(Journal, JournalEntry.journal_id == Journal.id)
+                .where(
+                    JournalEntry.account_id == rev_acc.id,
+                    Journal.created_at >= utc_s,
+                    Journal.created_at <= utc_e,
+                    Journal.ref_type.in_(["b2b", "b2b_invoice", "consignment_payment", "consignment"]),
+                )
             )
+            return float(r.scalar() or 0)
+
+        # ── POS SALES ──────────────────────────────────────────────────
+        pos_today = pos_month = pos_year = 0.0
+        ref_today = ref_month = ref_year = 0.0
+        ref_count_today = ref_count_month = 0
+        invoices_today = invoices_month = 0
+        try:
+            r = await db.execute(select(func.sum(Invoice.total)).where(Invoice.created_at >= today_s, Invoice.created_at <= today_e, Invoice.status == "paid"))
+            pos_today = float(r.scalar() or 0)
+            r = await db.execute(select(func.sum(Invoice.total)).where(Invoice.created_at >= month_s_u, Invoice.created_at <= month_e_u, Invoice.status == "paid"))
+            pos_month = float(r.scalar() or 0)
+            r = await db.execute(select(func.sum(Invoice.total)).where(Invoice.created_at >= year_s_u, Invoice.created_at <= year_e_u, Invoice.status == "paid"))
+            pos_year  = float(r.scalar() or 0)
+
+            r = await db.execute(select(func.sum(RetailRefund.total)).where(RetailRefund.created_at >= today_s, RetailRefund.created_at <= today_e))
+            ref_today = float(r.scalar() or 0)
+            r = await db.execute(select(func.sum(RetailRefund.total)).where(RetailRefund.created_at >= month_s_u, RetailRefund.created_at <= month_e_u))
+            ref_month = float(r.scalar() or 0)
+            r = await db.execute(select(func.sum(RetailRefund.total)).where(RetailRefund.created_at >= year_s_u, RetailRefund.created_at <= year_e_u))
+            ref_year  = float(r.scalar() or 0)
+
+            pos_today = max(0.0, pos_today - ref_today)
+            pos_month = max(0.0, pos_month - ref_month)
+            pos_year  = max(0.0, pos_year  - ref_year)
+
+            r = await db.execute(select(func.count(Invoice.id)).where(Invoice.created_at >= today_s, Invoice.created_at <= today_e))
+            invoices_today = int(r.scalar() or 0)
+            r = await db.execute(select(func.count(Invoice.id)).where(Invoice.created_at >= month_s_u, Invoice.created_at <= month_e_u, Invoice.status == "paid"))
+            invoices_month = int(r.scalar() or 0)
+
+            r = await db.execute(select(func.count(RetailRefund.id)).where(RetailRefund.created_at >= today_s, RetailRefund.created_at <= today_e))
+            ref_count_today = int(r.scalar() or 0)
+            r = await db.execute(select(func.count(RetailRefund.id)).where(RetailRefund.created_at >= month_s_u, RetailRefund.created_at <= month_e_u))
+            ref_count_month = int(r.scalar() or 0)
+        except Exception:
+            logger.error("dashboard_data: pos_sales section failed", exc_info=True)
+            _errors.append({"section": "pos_sales", "reason": "query failed"})
+
+        # ── B2B SALES ──────────────────────────────────────────────────
+        b2b_today = b2b_month = b2b_year = 0.0
+        b2b_outstanding = 0.0
+        b2b_clients = 0
+        try:
+            b2b_today = await _jrev(today_s, today_e)
+            b2b_month = await _jrev(month_s_u, month_e_u)
+            b2b_year  = await _jrev(year_s_u,  year_e_u)
+
+            r = await db.execute(
+                select(func.sum(B2BInvoice.total - func.coalesce(B2BInvoice.amount_paid, 0)))
+                .where(B2BInvoice.status.in_(["unpaid", "partial"]))
+            )
+            b2b_outstanding = float(r.scalar() or 0)
+            r = await db.execute(select(func.count(B2BClient.id)).where(B2BClient.is_active == True))
+            b2b_clients = int(r.scalar() or 0)
+        except Exception:
+            logger.error("dashboard_data: b2b_sales section failed", exc_info=True)
+            _errors.append({"section": "b2b_sales", "reason": "query failed"})
+
+        total_today = pos_today + b2b_today
+        total_month = pos_month + b2b_month
+        total_year  = pos_year  + b2b_year
+
+        # ── EXPENSES ───────────────────────────────────────────────────
+        expenses_month = expenses_last_month = 0.0
+        try:
+            expense_summary     = await get_expense_summary(db)
+            expenses_month      = float(expense_summary["this_month"])
+            expenses_last_month = float(expense_summary["last_month"])
+        except Exception:
+            logger.error("dashboard_data: expenses section failed", exc_info=True)
+            _errors.append({"section": "expenses", "reason": "query failed"})
+
+        # ── CUSTOMERS ──────────────────────────────────────────────────
+        total_customers = new_customers_month = 0
+        try:
+            r = await db.execute(select(func.count(Customer.id)))
+            total_customers = int(r.scalar() or 0)
+            r = await db.execute(
+                select(func.count(Customer.id))
+                .where(Customer.created_at >= month_s_u, Customer.created_at <= month_e_u)
+            )
+            new_customers_month = int(r.scalar() or 0)
+        except Exception:
+            logger.error("dashboard_data: customers section failed", exc_info=True)
+            _errors.append({"section": "customers", "reason": "query failed"})
+
+        # ── INVENTORY ──────────────────────────────────────────────────
+        total_products = out_of_stock_count = low_stock_count = 0
+        stock_value = 0.0
+        out_of_stock: list = []
+        low_stock_list: list = []
+        try:
+            r = await db.execute(select(Product).where(Product.is_active == True))
+            all_products   = r.scalars().all()
+            out_of_stock   = [p for p in all_products if float(p.stock or 0) <= 0]
+            low_stock_list = [p for p in all_products if 0 < float(p.stock or 0) <= float(p.min_stock or 5)]
+            total_products     = len(all_products)
+            out_of_stock_count = len(out_of_stock)
+            low_stock_count    = len(low_stock_list)
+            stock_value        = sum(float(p.stock or 0) * float(p.price or 0) for p in all_products)
+        except Exception:
+            logger.error("dashboard_data: inventory section failed", exc_info=True)
+            _errors.append({"section": "inventory", "reason": "query failed"})
+
+        # ── FARM / SPOILAGE / PRODUCTION ───────────────────────────────
+        farm_month = batches_month = 0
+        spoilage_month = 0.0
+        try:
+            r = await db.execute(select(func.count(FarmDelivery.id)).where(FarmDelivery.delivery_date >= month_s))
+            farm_month = int(r.scalar() or 0)
+            r = await db.execute(select(func.sum(SpoilageRecord.qty)).where(SpoilageRecord.spoilage_date >= month_s))
+            spoilage_month = float(r.scalar() or 0)
+            r = await db.execute(select(func.count(ProductionBatch.id)).where(ProductionBatch.created_at >= month_s_u, ProductionBatch.created_at <= month_e_u))
+            batches_month = int(r.scalar() or 0)
+        except Exception:
+            logger.error("dashboard_data: farm_spoilage_production section failed", exc_info=True)
+            _errors.append({"section": "farm_spoilage_production", "reason": "query failed"})
+
+        # ── LAST 7 DAYS (POS + B2B) ────────────────────────────────────
+        last7: list = []
+        try:
+            for i in range(6, -1, -1):
+                d = today - timedelta(days=i)
+                d_s, d_e = utc_bounds(d, d)
+                r = await db.execute(select(func.sum(Invoice.total)).where(Invoice.created_at >= d_s, Invoice.created_at <= d_e, Invoice.status == "paid"))
+                pos = float(r.scalar() or 0)
+                r = await db.execute(select(func.sum(RetailRefund.total)).where(RetailRefund.created_at >= d_s, RetailRefund.created_at <= d_e))
+                ref = float(r.scalar() or 0)
+                pos = max(0.0, pos - ref)
+                b2b = await _jrev(d_s, d_e)
+                last7.append({"date": str(d), "pos": round(pos, 2), "b2b": round(b2b, 2), "refunds": round(ref, 2), "total": round(pos + b2b, 2)})
+        except Exception:
+            logger.error("dashboard_data: chart_last7 section failed", exc_info=True)
+            _errors.append({"section": "chart_last7", "reason": "query failed"})
+
+        # ── TOP PRODUCTS ───────────────────────────────────────────────
+        top_products: list = []
+        try:
+            top_result = await db.execute(
+                select(InvoiceItem.name,
+                       func.sum(InvoiceItem.qty).label("qty_sold"),
+                       func.sum(InvoiceItem.total).label("revenue"))
+                .join(Invoice, InvoiceItem.invoice_id == Invoice.id)
+                .where(Invoice.created_at >= month_s_u, Invoice.created_at <= month_e_u, Invoice.status == "paid")
+                .group_by(InvoiceItem.name)
+                .order_by(func.sum(InvoiceItem.total).desc())
+                .limit(10)
+            )
+            top_products = [{"name": r.name, "qty": float(r.qty_sold), "revenue": float(r.revenue)} for r in top_result.all()]
+        except Exception:
+            logger.error("dashboard_data: top_products section failed", exc_info=True)
+            _errors.append({"section": "top_products", "reason": "query failed"})
+
+        # ── PAYMENT METHODS ────────────────────────────────────────────
+        pay_methods: list = []
+        try:
+            pay_result = await db.execute(
+                select(Invoice.payment_method,
+                       func.count(Invoice.id).label("count"),
+                       func.sum(Invoice.total).label("total"))
+                .where(Invoice.created_at >= month_s_u, Invoice.created_at <= month_e_u, Invoice.status == "paid")
+                .group_by(Invoice.payment_method)
+            )
+            pay_methods = [{"method": r.payment_method or "cash", "count": r.count, "total": float(r.total)} for r in pay_result.all()]
+        except Exception:
+            logger.error("dashboard_data: pay_methods section failed", exc_info=True)
+            _errors.append({"section": "pay_methods", "reason": "query failed"})
+
+        # ── RECENT TRANSACTIONS ────────────────────────────────────────
+        recent_sales: list = []
+        try:
+            inv_result = await db.execute(
+                select(Invoice.invoice_number, Invoice.customer_id, Invoice.total,
+                       Invoice.payment_method, Invoice.created_at)
+                .where(Invoice.status == "paid").order_by(Invoice.created_at.desc()).limit(12)
+            )
+            recent_invoices = inv_result.all()
+            ref_result = await db.execute(
+                select(RetailRefund.refund_number, RetailRefund.customer_id, RetailRefund.total,
+                       RetailRefund.refund_method, RetailRefund.created_at)
+                .order_by(RetailRefund.created_at.desc()).limit(6)
+            )
+            recent_refunds = ref_result.all()
+
+            for i in recent_invoices:
+                cust_r = await db.execute(select(Customer).where(Customer.id == i.customer_id))
+                cust   = cust_r.scalar_one_or_none()
+                recent_sales.append({
+                    "type": "sale", "invoice_number": i.invoice_number,
+                    "customer": cust.name if cust else "Walk-in",
+                    "total": float(i.total or 0), "method": i.payment_method or "cash",
+                    "time": i.created_at.strftime("%H:%M") if i.created_at else "—",
+                    "date": i.created_at.strftime("%Y-%m-%d") if i.created_at else "",
+                })
+            for ref in recent_refunds:
+                cust_r = await db.execute(select(Customer).where(Customer.id == ref.customer_id))
+                cust   = cust_r.scalar_one_or_none()
+                recent_sales.append({
+                    "type": "refund", "invoice_number": ref.refund_number,
+                    "customer": cust.name if cust else "—",
+                    "total": -float(ref.total or 0), "method": ref.refund_method,
+                    "time": ref.created_at.strftime("%H:%M") if ref.created_at else "—",
+                    "date": ref.created_at.strftime("%Y-%m-%d") if ref.created_at else "",
+                })
+            recent_sales.sort(key=lambda x: x["date"] + x["time"], reverse=True)
+            recent_sales = recent_sales[:10]
+        except Exception:
+            logger.error("dashboard_data: recent_transactions section failed", exc_info=True)
+            _errors.append({"section": "recent_transactions", "reason": "query failed"})
+
+        return {
+            "pos_today":    round(pos_today, 2),
+            "pos_month":    round(pos_month, 2),
+            "pos_year":     round(pos_year, 2),
+            "b2b_today":    round(b2b_today, 2),
+            "b2b_month":    round(b2b_month, 2),
+            "b2b_year":     round(b2b_year, 2),
+            "total_today":  round(total_today, 2),
+            "total_month":  round(total_month, 2),
+            "total_year":   round(total_year, 2),
+            "expenses_month":      round(expenses_month, 2),
+            "expenses_last_month": round(expenses_last_month, 2),
+            "b2b_outstanding": round(b2b_outstanding, 2),
+            "ref_today":   round(ref_today, 2),
+            "ref_month":   round(ref_month, 2),
+            "ref_count_today": ref_count_today,
+            "ref_count_month": ref_count_month,
+            "invoices_today":   invoices_today,
+            "invoices_month":   invoices_month,
+            "total_customers":  total_customers,
+            "b2b_clients":      b2b_clients,
+            "total_products":   total_products,
+            "out_of_stock_count": out_of_stock_count,
+            "low_stock_count":    low_stock_count,
+            "stock_value":        round(stock_value, 2),
+            "out_of_stock": [{"sku": p.sku, "name": p.name, "stock": float(p.stock or 0)} for p in out_of_stock[:20]],
+            "low_stock":    [{"sku": p.sku, "name": p.name, "stock": float(p.stock or 0)} for p in low_stock_list[:20]],
+            "farm_month":     farm_month,
+            "spoilage_month": round(spoilage_month, 2),
+            "batches_month":  batches_month,
+            "last7":          last7,
+            "top_products":   top_products,
+            "pay_methods":    pay_methods,
+            "recent_sales":   recent_sales,
+            "_errors":        _errors,
+        }
+
+    except Exception:
+        logger.exception("dashboard_data endpoint failed — unhandled exception")
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "error": "dashboard_data_failed",
+                "message": "Internal server error loading dashboard data",
+                "hint": "Check server logs for full traceback",
+            },
         )
-        entries = await db.execute(stmt)
-        return float(entries.scalar() or 0)
-
-    from datetime import datetime as dt
-    today_start = dt.combine(today, dt.min.time())
-    today_end   = dt.combine(today, dt.max.time())
-    month_start_dt = dt.combine(month_s, dt.min.time())
-    year_start_dt  = dt.combine(year_s,  dt.min.time())
-    now_dt = dt.now()
-
-    b2b_today = await journal_revenue(today_start, today_end)
-    b2b_month = await journal_revenue(month_start_dt, now_dt)
-    b2b_year  = await journal_revenue(year_start_dt,  now_dt)
-
-    r = await db.execute(
-        select(func.sum(B2BInvoice.total - B2BInvoice.amount_paid))
-        .where(B2BInvoice.status.in_(["unpaid", "partial"]))
-    )
-    b2b_outstanding = float(r.scalar() or 0)
-    r = await db.execute(select(func.count(B2BClient.id)).where(B2BClient.is_active == True))
-    b2b_clients = r.scalar() or 0
-
-    total_today = pos_today + b2b_today
-    total_month = pos_month + b2b_month
-    total_year  = pos_year  + b2b_year
-
-    expense_summary = await get_expense_summary(db)
-    expenses_month = float(expense_summary["this_month"])
-    expenses_last_month = float(expense_summary["last_month"])
-
-    r = await db.execute(select(func.count(Customer.id)))
-    total_customers = r.scalar() or 0
-    if hasattr(Customer, 'created_at'):
-        r = await db.execute(select(func.count(Customer.id)).where(func.date(Customer.created_at) >= month_s))
-        new_customers_month = r.scalar() or 0
-    else:
-        new_customers_month = 0
-
-    r = await db.execute(select(Product).where(Product.is_active == True))
-    all_products   = r.scalars().all()
-    out_of_stock   = [p for p in all_products if float(p.stock) <= 0]
-    low_stock      = [p for p in all_products if 0 < float(p.stock) <= 5]
-    total_products = len(all_products)
-    stock_value    = sum(float(p.stock) * float(p.price) for p in all_products)
-
-    r = await db.execute(select(func.count(FarmDelivery.id)).where(FarmDelivery.delivery_date >= month_s))
-    farm_month = r.scalar() or 0
-
-    r = await db.execute(select(func.sum(SpoilageRecord.qty)).where(SpoilageRecord.spoilage_date >= month_s))
-    spoilage_month = float(r.scalar() or 0)
-
-    r = await db.execute(select(func.count(ProductionBatch.id)).where(func.date(ProductionBatch.created_at) >= month_s))
-    batches_month = r.scalar() or 0
-
-    # ── LAST 7 DAYS (POS + B2B) ────────────────────────
-    last7 = []
-    for i in range(6, -1, -1):
-        d = today - timedelta(days=i)
-        r = await db.execute(select(func.sum(Invoice.total)).where(func.date(Invoice.created_at) == d, Invoice.status == "paid"))
-        pos = float(r.scalar() or 0)
-        r = await db.execute(select(func.sum(RetailRefund.total)).where(func.date(RetailRefund.created_at) == d))
-        ref = float(r.scalar() or 0)
-        pos = max(0, pos - ref)
-        d_start = dt.combine(d, dt.min.time())
-        d_end   = dt.combine(d, dt.max.time())
-        b2b = await journal_revenue(d_start, d_end)
-        last7.append({"date": str(d), "pos": round(pos,2), "b2b": round(b2b,2), "refunds": round(ref,2), "total": round(pos+b2b,2)})
-
-    top_result = await db.execute(
-        select(InvoiceItem.name,
-               func.sum(InvoiceItem.qty).label("qty_sold"),
-               func.sum(InvoiceItem.total).label("revenue"))
-        .join(Invoice, InvoiceItem.invoice_id == Invoice.id)
-        .where(func.date(Invoice.created_at) >= month_s, Invoice.status == "paid")
-        .group_by(InvoiceItem.name)
-        .order_by(func.sum(InvoiceItem.total).desc())
-        .limit(10)
-    )
-    top_products = top_result.all()
-
-    pay_result = await db.execute(
-        select(Invoice.payment_method,
-               func.count(Invoice.id).label("count"),
-               func.sum(Invoice.total).label("total"))
-        .where(func.date(Invoice.created_at) >= month_s, Invoice.status == "paid")
-        .group_by(Invoice.payment_method)
-    )
-    pay_methods = pay_result.all()
-
-    inv_result = await db.execute(
-        select(
-            Invoice.invoice_number,
-            Invoice.customer_id,
-            Invoice.total,
-            Invoice.payment_method,
-            Invoice.created_at,
-        ).where(Invoice.status == "paid").order_by(Invoice.created_at.desc()).limit(12)
-    )
-    recent_invoices = inv_result.all()
-    ref_result = await db.execute(
-        select(
-            RetailRefund.refund_number,
-            RetailRefund.customer_id,
-            RetailRefund.total,
-            RetailRefund.refund_method,
-            RetailRefund.created_at,
-        ).order_by(RetailRefund.created_at.desc()).limit(6)
-    )
-    recent_refunds = ref_result.all()
-
-    recent_sales = []
-    for i in recent_invoices:
-        cust_result = await db.execute(select(Customer).where(Customer.id == i.customer_id))
-        cust = cust_result.scalar_one_or_none()
-        recent_sales.append({
-            "type":           "sale",
-            "invoice_number": i.invoice_number,
-            "customer":       cust.name if cust else "Walk-in",
-            "total":          float(i.total),
-            "method":         i.payment_method or "cash",
-            "time":           i.created_at.strftime("%H:%M") if i.created_at else "—",
-            "date":           i.created_at.strftime("%Y-%m-%d") if i.created_at else "",
-        })
-    for ref in recent_refunds:
-        cust_result = await db.execute(select(Customer).where(Customer.id == ref.customer_id))
-        cust = cust_result.scalar_one_or_none()
-        recent_sales.append({
-            "type":           "refund",
-            "invoice_number": ref.refund_number,
-            "customer":       cust.name if cust else "—",
-            "total":          -float(ref.total),
-            "method":         ref.refund_method,
-            "time":           ref.created_at.strftime("%H:%M") if ref.created_at else "—",
-            "date":           ref.created_at.strftime("%Y-%m-%d") if ref.created_at else "",
-        })
-    recent_sales.sort(key=lambda x: x["date"] + x["time"], reverse=True)
-    recent_sales = recent_sales[:10]
-
-    r = await db.execute(select(func.count(RetailRefund.id)).where(func.date(RetailRefund.created_at) == today))
-    ref_count_today = r.scalar() or 0
-    r = await db.execute(select(func.count(RetailRefund.id)).where(func.date(RetailRefund.created_at) >= month_s))
-    ref_count_month = r.scalar() or 0
-
-    return {
-        "pos_today":    round(pos_today, 2),
-        "pos_month":    round(pos_month, 2),
-        "pos_year":     round(pos_year, 2),
-        "b2b_today":    round(b2b_today, 2),
-        "b2b_month":    round(b2b_month, 2),
-        "b2b_year":     round(b2b_year, 2),
-        "total_today":  round(total_today, 2),
-        "total_month":  round(total_month, 2),
-        "total_year":   round(total_year, 2),
-        "expenses_month": round(expenses_month, 2),
-        "expenses_last_month": round(expenses_last_month, 2),
-        "b2b_outstanding": round(b2b_outstanding, 2),
-        "ref_today":   round(ref_today, 2),
-        "ref_month":   round(ref_month, 2),
-        "ref_count_today": ref_count_today,
-        "ref_count_month": ref_count_month,
-        "invoices_today":   invoices_today,
-        "invoices_month":   invoices_month,
-        "total_customers":  total_customers,
-        "b2b_clients":      b2b_clients,
-        "total_products":   total_products,
-        "out_of_stock_count": len(out_of_stock),
-        "low_stock_count":    len(low_stock),
-        "stock_value":        round(stock_value, 2),
-        "out_of_stock": [{"sku": p.sku, "name": p.name, "stock": float(p.stock)} for p in out_of_stock[:20]],
-        "low_stock":    [{"sku": p.sku, "name": p.name, "stock": float(p.stock)} for p in low_stock[:20]],
-        "farm_month":     farm_month,
-        "spoilage_month": round(spoilage_month, 2),
-        "batches_month":  batches_month,
-        "last7": last7,
-        "top_products": [{"name":r.name,"qty":float(r.qty_sold),"revenue":float(r.revenue)} for r in top_products],
-        "pay_methods":  [{"method":r.payment_method or "cash","count":r.count,"total":float(r.total)} for r in pay_methods],
-        "recent_sales": recent_sales,
-    }
 
 
 # ── assistant endpoint ─────────────────────────────────────────────────
@@ -310,8 +379,20 @@ async def dashboard_summary(
         redis_client = None
         cache_key    = None
 
+    from app.core.log import logger
     from app.services.dashboard_summary_service import get_summary
-    data = await get_summary(db, range_param, start, end, current_user)
+    try:
+        data = await get_summary(db, range_param, start, end, current_user)
+    except Exception:
+        logger.exception("dashboard_summary service failed")
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "error": "dashboard_summary_failed",
+                "message": "Internal server error loading dashboard summary",
+                "hint": "Check server logs for full traceback",
+            },
+        )
 
     if redis_client and cache_key:
         try:

@@ -682,6 +682,36 @@ function appendChatMsg(role, text) {
   return el;
 }
 
+// ── error display helpers ──────────────────────────────────────────────
+function showLoadError(title, detail, errObj) {
+  if (errObj) console.error("[dashboard]", title, detail, errObj);
+  const el = document.getElementById("loading");
+  if (!el) return;
+  const safeTitle  = String(title  || "").replace(/[<>&"']/g, c => ({"<":"&lt;",">":"&gt;","&":"&amp;",'"':"&quot;","'":"&#39;"}[c]));
+  const safeDetail = String(detail || "").replace(/[<>&"']/g, c => ({"<":"&lt;",">":"&gt;","&":"&amp;",'"':"&quot;","'":"&#39;"}[c]));
+  el.innerHTML = `
+    <div style="max-width:520px;margin:80px auto;padding:24px;border:1px solid rgba(239,68,68,.35);border-radius:12px;background:rgba(239,68,68,.05)">
+      <div style="color:var(--error,#ef4444);font-weight:700;font-size:16px;margin-bottom:8px">⚠ ${safeTitle}</div>
+      <div style="color:var(--sub,#94a3b8);font-size:13px;line-height:1.6;margin-bottom:16px;word-break:break-word">${safeDetail}</div>
+      <div style="display:flex;gap:10px;flex-wrap:wrap">
+        <button onclick="loadSummary()" style="background:var(--accent,#4d9fff);color:#fff;border:none;padding:10px 18px;border-radius:8px;font-weight:700;cursor:pointer">Retry</button>
+        <a href="/home" style="color:var(--sub,#94a3b8);padding:10px 16px;border:1px solid var(--border,rgba(255,255,255,.1));border-radius:8px;text-decoration:none;font-size:13px">Back to home</a>
+      </div>
+      <div style="color:var(--muted,#475569);font-size:11px;margin-top:16px">If this keeps happening, contact your admin with the details above.</div>
+    </div>`;
+}
+
+function renderPartialErrorBanner(errors) {
+  const existing = document.querySelector(".partial-error-banner");
+  if (existing) existing.remove();
+  const sections = errors.map(e => e.section).join(", ");
+  const banner = document.createElement("div");
+  banner.className = "partial-error-banner";
+  banner.style.cssText = "background:rgba(245,158,11,.08);border:1px solid rgba(245,158,11,.3);color:#f59e0b;padding:10px 16px;border-radius:10px;margin-bottom:16px;font-size:13px";
+  banner.textContent = `⚠ Some sections couldn't load: ${sections}. Shown data may be partial.`;
+  document.querySelector(".content")?.prepend(banner);
+}
+
 // ── data fetch + render ────────────────────────────────────────────────
 async function loadSummary() {
   let url = `/dashboard/summary?range=${_currentRange}`;
@@ -689,21 +719,54 @@ async function loadSummary() {
     url += `&start=${_customStart}&end=${_customEnd}`;
   }
 
+  // 1. Network layer
+  let res;
   try {
-    const r = await fetch(url);
-    if (!r.ok) throw new Error("HTTP " + r.status);
-    const data = await r.json();
+    res = await fetch(url, { credentials: "same-origin" });
+  } catch (networkErr) {
+    showLoadError("Can't reach server", "Check your connection and try again.", networkErr);
+    return;
+  }
 
+  // 2. Auth check
+  if (res.status === 401) {
+    window.location.href = "/?next=" + encodeURIComponent(location.pathname);
+    return;
+  }
+
+  // 3. HTTP error
+  if (!res.ok) {
+    const bodyText = await res.text().catch(() => "");
+    let structured = null;
+    try { structured = JSON.parse(bodyText); } catch {}
+    const detail = structured?.detail?.message
+      || (typeof structured?.detail === "string" ? structured.detail : null)
+      || bodyText.slice(0, 300)
+      || "Unknown server error";
+    showLoadError(`Server error (HTTP ${res.status})`, detail, null);
+    return;
+  }
+
+  // 4. JSON parse
+  let data;
+  try {
+    data = await res.json();
+  } catch (parseErr) {
+    showLoadError("Bad server response", "Response wasn't valid JSON.", parseErr);
+    return;
+  }
+
+  // 5. Render
+  try {
     _heroType = data.hero_type || "admin";
     const hero = data.hero || {};
-    if (_heroType === "cashier")      renderHeroCashier(hero);
+    if (_heroType === "cashier")           renderHeroCashier(hero);
     else if (_heroType === "farm_manager") renderHeroFarm(hero);
-    else renderHeroAdmin(hero);
+    else                                   renderHeroAdmin(hero);
 
     renderMainChart(data.chart || {}, data.range?.label);
     renderPanels(data.panels || {});
 
-    // Range label
     const rl = document.getElementById("range-label");
     if (rl) rl.textContent = data.range?.label || "";
 
@@ -712,10 +775,12 @@ async function loadSummary() {
     startElapsedTimer();
 
     document.getElementById("loading")?.remove();
-  } catch (err) {
-    console.error("Dashboard load error:", err);
-    const l = document.getElementById("loading");
-    if (l) l.innerHTML = `<div style="color:var(--error)">Failed to load dashboard. Please refresh.</div>`;
+
+    if (data._errors && data._errors.length) {
+      renderPartialErrorBanner(data._errors);
+    }
+  } catch (renderErr) {
+    showLoadError("Render error", "Dashboard data loaded but couldn't be displayed: " + renderErr.message, renderErr);
   }
 }
 
