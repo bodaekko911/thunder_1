@@ -11,7 +11,6 @@ from zoneinfo import ZoneInfo
 
 from sqlalchemy import func, select, true as sa_true
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import selectinload
 
 from app.core.config import settings
 from app.models.accounting import Account, Journal, JournalEntry
@@ -579,38 +578,51 @@ async def _panels(db: AsyncSession, rng: dict) -> dict:
 
     # Recent activity ───────────────────────────────────────────────────────
     inv_r = await db.execute(
-        select(Invoice)
-        .options(selectinload(Invoice.customer))
+        select(
+            Invoice.invoice_number, Invoice.customer_id, Invoice.total,
+            Invoice.payment_method, Invoice.created_at,
+        )
         .where(Invoice.status == "paid")
         .order_by(Invoice.created_at.desc())
         .limit(10)
     )
-    recent_invoices = inv_r.scalars().all()
+    recent_invoice_rows = inv_r.all()
 
     ref_r = await db.execute(
-        select(RetailRefund)
-        .options(selectinload(RetailRefund.customer))
+        select(
+            RetailRefund.refund_number, RetailRefund.customer_id,
+            RetailRefund.total, RetailRefund.refund_method, RetailRefund.created_at,
+        )
         .order_by(RetailRefund.created_at.desc())
         .limit(5)
     )
-    recent_refunds = ref_r.scalars().all()
+    recent_refund_rows = ref_r.all()
+
+    # Batch-load customer names to avoid N+1
+    all_cust_ids = {r.customer_id for r in recent_invoice_rows} | {r.customer_id for r in recent_refund_rows}
+    cust_map: dict[int, str] = {}
+    if all_cust_ids:
+        cust_r = await db.execute(
+            select(Customer.id, Customer.name).where(Customer.id.in_(all_cust_ids))
+        )
+        cust_map = {r.id: r.name for r in cust_r}
 
     recent: list[dict] = []
-    for inv in recent_invoices:
+    for inv in recent_invoice_rows:
         recent.append({
             "type":     "sale",
             "ref":      inv.invoice_number,
-            "customer": inv.customer.name if inv.customer else "Walk-in",
-            "total":    float(inv.total),
+            "customer": cust_map.get(inv.customer_id, "Walk-in"),
+            "total":    float(inv.total or 0),
             "method":   inv.payment_method or "cash",
             "at":       inv.created_at.isoformat() if inv.created_at else "",
         })
-    for ref in recent_refunds:
+    for ref in recent_refund_rows:
         recent.append({
             "type":     "refund",
             "ref":      ref.refund_number,
-            "customer": ref.customer.name if ref.customer else "—",
-            "total":    -float(ref.total),
+            "customer": cust_map.get(ref.customer_id, "—"),
+            "total":    -float(ref.total or 0),
             "method":   ref.refund_method,
             "at":       ref.created_at.isoformat() if ref.created_at else "",
         })
@@ -637,24 +649,48 @@ async def get_summary(
     custom_end: str | None,
     user: User,
 ) -> dict:
+    from app.core.log import logger
     from app.core.permissions import has_permission
 
+    _errors: list[dict] = []
     rng    = resolve_range(range_param, custom_start, custom_end)
     acc_id = await _rev_account_id(db)
 
     role = getattr(user, "role", "admin")
-    if role == "cashier":
-        hero      = await _hero_cashier(db, user.id)
-        hero_type = "cashier"
-    elif has_permission(user, "page_farm") and not has_permission(user, "page_accounting"):
-        hero      = await _hero_farm(db, rng)
-        hero_type = "farm_manager"
-    else:
-        hero      = await _hero_admin(db, rng, acc_id)
-        hero_type = "admin"
+    hero: dict = {}
+    hero_type = "admin"
+    try:
+        if role == "cashier":
+            hero      = await _hero_cashier(db, user.id)
+            hero_type = "cashier"
+        elif has_permission(user, "page_farm") and not has_permission(user, "page_accounting"):
+            hero      = await _hero_farm(db, rng)
+            hero_type = "farm_manager"
+        else:
+            hero      = await _hero_admin(db, rng, acc_id)
+            hero_type = "admin"
+    except Exception:
+        logger.error("dashboard_summary: hero section failed", exc_info=True)
+        _errors.append({"section": "hero", "reason": "query failed"})
 
-    chart  = await _chart(db, rng, acc_id)
-    panels = await _panels(db, rng)
+    chart: dict = {"buckets": [], "moving_avg_7d": []}
+    try:
+        chart = await _chart(db, rng, acc_id)
+    except Exception:
+        logger.error("dashboard_summary: chart section failed", exc_info=True)
+        _errors.append({"section": "chart", "reason": "query failed"})
+
+    panels: dict = {
+        "top_products":   {"by_revenue": [], "by_qty": [], "by_margin": []},
+        "receivables":    {"b2b": [], "retail": []},
+        "stock_pressure": {"stockout_risk": [], "low_stock": [], "dead_stock": []},
+        "recent_activity": [],
+    }
+    try:
+        panels = await _panels(db, rng)
+    except Exception:
+        logger.error("dashboard_summary: panels section failed", exc_info=True)
+        _errors.append({"section": "panels", "reason": "query failed"})
 
     generated_at = datetime.now(_tz()).isoformat()
 
@@ -672,4 +708,5 @@ async def get_summary(
         "panels":      panels,
         "generated_at": generated_at,
         "timezone":    settings.APP_TIMEZONE,
+        "_errors":     _errors,
     }
