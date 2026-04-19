@@ -35,6 +35,18 @@ _RUNTIME_SCHEMA_PATCHES: tuple[dict[str, str], ...] = (
         "definition": "VARCHAR(64)",
         "backfill": "SELECT 1",
     },
+    {
+        "table": "products",
+        "column": "created_by_import_batch",
+        "definition": "VARCHAR(64)",
+        "backfill": "SELECT 1",
+    },
+    {
+        "table": "customers",
+        "column": "created_by_import_batch",
+        "definition": "VARCHAR(64)",
+        "backfill": "SELECT 1",
+    },
 )
 _CRITICAL_AUTH_TABLES = {"users", "refresh_tokens", "activity_logs"}
 
