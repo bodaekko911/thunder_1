@@ -861,16 +861,16 @@ async function loadSummary() {
     else                                   renderHeroAdmin(hero);
 
     renderMainChart(data.chart || {}, data.range?.label);
-    console.log("Top products:", {
-      range: data.range?.label,
-      by_revenue: data.panels?.top_products?.by_revenue,
-      by_qty: data.panels?.top_products?.by_qty,
-      by_margin: data.panels?.top_products?.by_margin,
-    });
     renderPanels(data.panels || {});
 
+    const rangeLabel = data.range?.label || "";
     const rl = document.getElementById("range-label");
-    if (rl) rl.textContent = data.range?.label || "";
+    if (rl) rl.textContent = rangeLabel;
+
+    const chartTitle = document.querySelector(".chart-panel .panel-title");
+    if (chartTitle) chartTitle.textContent = `Revenue — ${rangeLabel}`;
+    const tpTitle = document.querySelector("[aria-label='Top products'] .panel-title");
+    if (tpTitle) tpTitle.textContent = `Top Products — ${rangeLabel}`;
 
     _lastData  = data;
     _firstLoad = false;

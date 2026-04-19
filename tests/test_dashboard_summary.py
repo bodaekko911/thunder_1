@@ -369,3 +369,60 @@ def test_chart_timezone_march_sale_falls_in_april_not_march():
         f"23:30 UTC Mar 31 (= 01:30 Cairo Apr 1) must NOT be in March's UTC window "
         f"[{utc_s_mar}, {utc_e_mar}]"
     )
+
+
+# ── spec-required regression tests ───────────────────────────────────────────
+
+def test_summary_7d_has_chart_buckets_and_top_products():
+    """Spec test 1: 7d response contains chart.buckets (len=7) AND panels.top_products.by_revenue."""
+    user = SimpleNamespace(id=1, name="Admin", role="admin", permissions="", is_active=True)
+    data = asyncio.run(get_summary(_ScalarDB(), "7d", None, None, user))
+    assert len(data["chart"]["buckets"]) == 7, (
+        f"7d range must produce exactly 7 buckets, got {len(data['chart']['buckets'])}"
+    )
+    assert isinstance(data["panels"]["top_products"]["by_revenue"], list), (
+        "panels.top_products.by_revenue must be a list"
+    )
+
+
+def test_summary_year_is_monthly_not_365_daily():
+    """Spec test 2: year range returns monthly granularity — not 365 daily bars."""
+    user = SimpleNamespace(id=1, name="Admin", role="admin", permissions="", is_active=True)
+    data = asyncio.run(get_summary(_ScalarDB(), "year", None, None, user))
+    chart = data["chart"]
+    assert chart["granularity"] == "month", (
+        f"year range must use monthly granularity, got {chart['granularity']!r}"
+    )
+    assert len(chart["buckets"]) <= 14, (
+        f"year range must not produce 365 daily buckets — got {len(chart['buckets'])}"
+    )
+
+
+def test_summary_today_and_30d_use_different_date_windows():
+    """
+    Spec test 3: today and 30d queries target different UTC windows, so they can
+    return different top-product results when invoices span multiple days.
+    Verified by checking the range boundaries themselves (without a real DB).
+    """
+    rng_today = resolve_range("today")
+    rng_30d   = resolve_range("30d")
+    assert rng_today["utc_start"] != rng_30d["utc_start"], (
+        "today and 30d must have different utc_start so their SQL WHERE differs"
+    )
+    assert rng_today["num_days"] == 1
+    assert rng_30d["num_days"]   == 30
+
+
+@pytest.mark.parametrize("range_param,expected_gran", [
+    ("30d",    "day"),
+    ("90d",    "week"),
+    ("year",   "month"),
+])
+def test_granularity_thresholds(range_param, expected_gran):
+    """Spec test 4: granularity picks correctly for each canonical range."""
+    rng = resolve_range(range_param)
+    got = _pick_granularity(rng)
+    assert got == expected_gran, (
+        f"resolve_range({range_param!r}) → {rng['num_days']} days → "
+        f"expected granularity {expected_gran!r}, got {got!r}"
+    )
