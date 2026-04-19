@@ -665,10 +665,21 @@ async function sendChat(questionOverride) {
       headers: {"Content-Type":"application/json"},
       body:    JSON.stringify({ question: q }),
     });
-    const data = await r.json();
-    typing.textContent = data.answer || data.message || JSON.stringify(data);
+    const raw = await r.text();
+    let data = null;
+    try { data = raw ? JSON.parse(raw) : null; } catch {}
+
+    if (!r.ok) {
+      const detail = data?.message
+        || (typeof data?.detail === "string" ? data.detail : null)
+        || `Request failed (HTTP ${r.status}).`;
+      typing.textContent = detail;
+      return;
+    }
+
+    typing.textContent = data?.answer || data?.message || "I couldn't find a response for that request.";
   } catch (err) {
-    typing.textContent = "Error: " + err.message;
+    typing.textContent = "I couldn't reach the dashboard assistant. Please try again.";
   }
 }
 

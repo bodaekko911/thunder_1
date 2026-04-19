@@ -2,7 +2,7 @@ from datetime import date, datetime, timedelta
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from pydantic import BaseModel
@@ -344,11 +344,57 @@ async def dashboard_assistant(
     db: AsyncSession = Depends(get_async_session),
     current_user: User = Depends(get_current_user),
 ):
-    return await answer_dashboard_question(
-        db,
-        question=data.question,
-        current_user=current_user,
-    )
+    from app.core.log import logger
+    from fastapi import HTTPException
+
+    try:
+        return await answer_dashboard_question(
+            db,
+            question=data.question,
+            current_user=current_user,
+        )
+    except HTTPException as exc:
+        detail = exc.detail if isinstance(exc.detail, str) else "Request failed"
+        logger.warning(
+            "dashboard_assistant request failed",
+            extra={"status_code": exc.status_code, "detail": detail},
+        )
+        return JSONResponse(
+            status_code=exc.status_code,
+            content={
+                "supported": False,
+                "intent": None,
+                "parameters": {},
+                "result": None,
+                "message": detail,
+                "confidence": 0.0,
+                "suggestions": [],
+                "highlights": [],
+                "table": None,
+            },
+        )
+    except Exception:
+        logger.exception("dashboard_assistant request failed")
+        try:
+            await db.rollback()
+        except Exception:
+            pass
+        return JSONResponse(
+            status_code=500,
+            content={
+                "supported": False,
+                "intent": None,
+                "parameters": {},
+                "result": None,
+                "message": "I couldn't answer that because the dashboard assistant hit an internal error. Please try again.",
+                "confidence": 0.0,
+                "suggestions": [],
+                "highlights": [],
+                "table": None,
+            },
+        )
+
+
 
 
 # ── new: /dashboard/summary ────────────────────────────────────────────
