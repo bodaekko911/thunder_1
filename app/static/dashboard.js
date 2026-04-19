@@ -558,16 +558,21 @@ function renderPanels(panels) {
   renderRecentActivity(panels.recent_activity || []);
 }
 
-function clearTable(tbodyId) {
+function resetTable(tbodyId) {
   const tbody = document.getElementById(tbodyId);
-  if (!tbody) return;
-  tbody.innerHTML = "";
+  if (!tbody) return null;
+  const table = tbody.closest("table");
+  const thead = table?.querySelector("thead");
+  const freshTbody = tbody.cloneNode(false);
+  tbody.replaceWith(freshTbody);
+  if (thead) thead.innerHTML = "";
+  return freshTbody;
 }
 
 function renderTopProducts(tp) {
-  clearTable("top-by-revenue");
-  clearTable("top-by-qty");
-  clearTable("top-by-margin");
+  resetTable("top-by-revenue");
+  resetTable("top-by-qty");
+  resetTable("top-by-margin");
 
   const byRev = tp.by_revenue || [];
   renderTable("top-by-revenue", byRev,
@@ -833,7 +838,12 @@ async function loadSummary() {
     else                                   renderHeroAdmin(hero);
 
     renderMainChart(data.chart || {}, data.range?.label);
-    console.log("Top products:", data.panels?.top_products);
+    console.log("Top products:", {
+      range: data.range?.label,
+      by_revenue: data.panels?.top_products?.by_revenue,
+      by_qty: data.panels?.top_products?.by_qty,
+      by_margin: data.panels?.top_products?.by_margin,
+    });
     renderPanels(data.panels || {});
 
     const rl = document.getElementById("range-label");
