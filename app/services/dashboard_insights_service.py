@@ -503,35 +503,47 @@ async def _suggested_chips(db: AsyncSession, today: date, acc_id: int | None) ->
 # ── main entry point ───────────────────────────────────────────────────────
 
 async def get_insights(db: AsyncSession) -> dict:
+    from app.core.log import logger
     from app.models.accounting import Account
+
     r = await db.execute(select(Account.id).where(Account.code == "4000"))
     acc_id = r.scalar_one_or_none()
 
     today = datetime.now(_tz()).date()
 
-    rules = [
-        _rule_revenue_anomaly(db, today, acc_id),
-        _rule_margin_shift(db, today, acc_id),
-        _rule_top_product_surge(db, today),
-        _rule_unpaid_b2b_aging(db, today),
-        _rule_stockout_risk(db, today),
-        _rule_expense_spike(db, today),
-        _rule_spoilage_streak(db, today),
-        _rule_new_clients(db, today),
-        _rule_stale_consignment(db, today),
+    # Rules must run sequentially — asyncio.gather on the same AsyncSession
+    # causes concurrent asyncpg queries (InterfaceError) that corrupt session state.
+    _rules: list[tuple[str, object]] = [
+        ("revenue_anomaly",   _rule_revenue_anomaly(db, today, acc_id)),
+        ("margin_shift",      _rule_margin_shift(db, today, acc_id)),
+        ("top_product_surge", _rule_top_product_surge(db, today)),
+        ("unpaid_b2b_aging",  _rule_unpaid_b2b_aging(db, today)),
+        ("stockout_risk",     _rule_stockout_risk(db, today)),
+        ("expense_spike",     _rule_expense_spike(db, today)),
+        ("spoilage_streak",   _rule_spoilage_streak(db, today)),
+        ("new_clients",       _rule_new_clients(db, today)),
+        ("stale_consignment", _rule_stale_consignment(db, today)),
     ]
 
-    import asyncio
-    results = await asyncio.gather(*rules, return_exceptions=True)
-
+    _errors: list[dict] = []
     cards: list[InsightCard] = []
-    for res in results:
-        if isinstance(res, dict):  # InsightCard is a TypedDict (plain dict at runtime)
-            cards.append(res)
+
+    for rule_name, coro in _rules:
+        try:
+            result = await coro
+            if isinstance(result, dict):
+                cards.append(result)
+        except Exception:
+            logger.error("insight rule '%s' failed", rule_name, exc_info=True)
+            _errors.append({"rule": rule_name, "reason": "query failed"})
 
     cards.sort(key=lambda c: c["z_score"], reverse=True)
     cards = cards[:5]
 
-    chips = await _suggested_chips(db, today, acc_id)
+    chips: list[str] = []
+    try:
+        chips = await _suggested_chips(db, today, acc_id)
+    except Exception:
+        logger.error("insights: suggested_chips failed", exc_info=True)
 
-    return {"cards": cards, "suggested_chips": chips}
+    return {"cards": cards, "suggested_chips": chips, "_errors": _errors}

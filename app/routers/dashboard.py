@@ -408,8 +408,13 @@ async def dashboard_summary(
 
 @router.get("/dashboard/insights")
 async def dashboard_insights(db: AsyncSession = Depends(get_async_session)):
+    from app.core.log import logger
     from app.services.dashboard_insights_service import get_insights
-    return await get_insights(db)
+    try:
+        return await get_insights(db)
+    except Exception:
+        logger.exception("dashboard_insights endpoint failed — unhandled exception")
+        return {"cards": [], "suggested_chips": [], "_errors": [{"rule": "all", "reason": "internal error"}]}
 
 
 # ── UI ─────────────────────────────────────────────────────────────────
