@@ -560,16 +560,21 @@ function renderPanels(panels) {
 
 function resetTable(tbodyId) {
   const tbody = document.getElementById(tbodyId);
-  if (!tbody) return null;
+  if (!tbody) {
+    console.log("Top products target missing:", tbodyId);
+    return null;
+  }
   const table = tbody.closest("table");
   const thead = table?.querySelector("thead");
   const freshTbody = tbody.cloneNode(false);
+  console.log("Resetting top products target:", tbodyId, freshTbody);
   tbody.replaceWith(freshTbody);
   if (thead) thead.innerHTML = "";
   return freshTbody;
 }
 
 function renderTopProducts(tp) {
+  console.log("renderTopProducts()", tp);
   resetTable("top-by-revenue");
   resetTable("top-by-qty");
   resetTable("top-by-margin");
