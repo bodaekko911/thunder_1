@@ -54,10 +54,15 @@ function setGreeting() {
 }
 
 function setTheme(theme) {
+  if (window.__appTheme) {
+    window.__appTheme.set(theme);
+    return;
+  }
   document.documentElement.dataset.theme = theme;
-  localStorage.setItem("dashboard:theme", theme);
+  document.body.classList.toggle("light", theme === "light");
+  localStorage.setItem("colorMode", theme);
   document.getElementById("mode-btn").innerHTML = theme === "light" ? "&#9728;&#65039;" : "&#127769;";
-  if (salesChart) salesChart.update();
+  if (salesChart) salesChart.update("none");
 }
 
 function toggleTheme() {
@@ -65,7 +70,17 @@ function toggleTheme() {
 }
 
 function initTheme() {
-  setTheme(localStorage.getItem("dashboard:theme") || "light");
+  if (window.__appTheme) {
+    window.__appTheme.sync();
+    return;
+  }
+  setTheme(localStorage.getItem("colorMode") || "dark");
+}
+
+function refreshThemeUi() {
+  const theme = window.__appTheme ? window.__appTheme.get() : (document.documentElement.dataset.theme || "dark");
+  document.getElementById("mode-btn").innerHTML = theme === "light" ? "&#9728;&#65039;" : "&#127769;";
+  if (salesChart) salesChart.update("none");
 }
 
 function updateRangeButtons() {
@@ -404,6 +419,7 @@ async function initUser() {
 
 function bindEvents() {
   document.getElementById("mode-btn").addEventListener("click", toggleTheme);
+  window.addEventListener("app:themechange", refreshThemeUi);
   document.getElementById("account-trigger").addEventListener("click", (event) => {
     event.stopPropagation();
     const trigger = document.getElementById("account-trigger");
@@ -466,6 +482,7 @@ function startAutoRefresh() {
 
 async function initDashboard() {
   initTheme();
+  refreshThemeUi();
   updateRangeButtons();
   bindEvents();
   await initUser();

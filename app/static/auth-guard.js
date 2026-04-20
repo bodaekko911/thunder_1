@@ -34,6 +34,104 @@
  * validates the ?next= value before using it (_isSafeReturnUrl).
  */
 
+(function () {
+    if (window.__appTheme) return;
+
+    var THEME_KEY = 'colorMode';
+    var LEGACY_KEYS = ['dashboard:theme', 'expenses-theme', 'refund-theme'];
+
+    function _normalizeTheme(theme) {
+        return theme === 'light' ? 'light' : 'dark';
+    }
+
+    function _storedTheme() {
+        try {
+            var stored = localStorage.getItem(THEME_KEY);
+            if (stored) return _normalizeTheme(stored);
+
+            for (var i = 0; i < LEGACY_KEYS.length; i += 1) {
+                var legacy = localStorage.getItem(LEGACY_KEYS[i]);
+                if (legacy) return _normalizeTheme(legacy);
+            }
+        } catch (_) {}
+
+        var rootTheme = document.documentElement.getAttribute('data-theme');
+        if (rootTheme) return _normalizeTheme(rootTheme);
+        return document.body && document.body.classList.contains('light') ? 'light' : 'dark';
+    }
+
+    function _persistTheme(theme) {
+        try {
+            localStorage.setItem(THEME_KEY, theme);
+            for (var i = 0; i < LEGACY_KEYS.length; i += 1) {
+                localStorage.removeItem(LEGACY_KEYS[i]);
+            }
+        } catch (_) {}
+    }
+
+    function _syncButtons(theme) {
+        var label = theme === 'light' ? '&#9728;&#65039;' : '&#127769;';
+        document.querySelectorAll('#mode-btn').forEach(function (button) {
+            button.innerHTML = label;
+        });
+    }
+
+    function _applyTheme(theme, options) {
+        var settings = Object.assign({ persist: true, dispatch: true }, options);
+        var nextTheme = _normalizeTheme(theme);
+
+        document.documentElement.dataset.theme = nextTheme;
+        document.documentElement.setAttribute('data-theme', nextTheme);
+        if (document.body) {
+            document.body.classList.toggle('light', nextTheme === 'light');
+        }
+
+        _syncButtons(nextTheme);
+
+        if (settings.persist) {
+            _persistTheme(nextTheme);
+        }
+
+        if (settings.dispatch) {
+            window.dispatchEvent(new CustomEvent('app:themechange', { detail: { theme: nextTheme } }));
+        }
+
+        return nextTheme;
+    }
+
+    function _ensureTheme(options) {
+        return _applyTheme(_storedTheme(), options);
+    }
+
+    window.__appTheme = {
+        get: function () {
+            return _normalizeTheme(document.documentElement.dataset.theme || _storedTheme());
+        },
+        set: function (theme) {
+            return _applyTheme(theme);
+        },
+        toggle: function () {
+            return _applyTheme(this.get() === 'light' ? 'dark' : 'light');
+        },
+        sync: function () {
+            return _ensureTheme({ persist: false, dispatch: false });
+        },
+        key: THEME_KEY,
+    };
+
+    _ensureTheme({ dispatch: false });
+
+    document.addEventListener('DOMContentLoaded', function () {
+        _ensureTheme({ persist: false, dispatch: false });
+    });
+
+    window.addEventListener('storage', function (event) {
+        var keys = [THEME_KEY].concat(LEGACY_KEYS);
+        if (keys.indexOf(event.key || '') === -1) return;
+        _ensureTheme({ persist: true, dispatch: true });
+    });
+}());
+
 // Must match ACCESS_TOKEN_EXPIRE_MINUTES - 2 in server config (30 - 2 = 28).
 var PROACTIVE_REFRESH_MS = 28 * 60 * 1000;
 

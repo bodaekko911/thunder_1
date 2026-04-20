@@ -382,6 +382,7 @@ def refunds_ui():
 <html>
 <head>
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
+<script src="/static/theme.js"></script>
 <title>Retail Refunds — Thunder ERP</title>
 <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
 <style>
@@ -935,9 +936,13 @@ document.addEventListener("click", e => {
 });
 
 function toggleMode() {
+    if (window.__appTheme) {
+        window.__appTheme.toggle();
+        return;
+    }
     const light = document.body.classList.toggle("light");
-    localStorage.setItem("refund-theme", light ? "light" : "dark");
-    document.getElementById("mode-btn").innerText = light ? "☀️" : "🌙";
+    localStorage.setItem("colorMode", light ? "light" : "dark");
+    document.getElementById("mode-btn").innerHTML = light ? "&#9728;&#65039;" : "&#127769;";
 }
 
 async function logout() {
@@ -945,9 +950,11 @@ async function logout() {
     window.location.href = "/";
 }
 
-if (localStorage.getItem("refund-theme") === "light") {
+if (window.__appTheme) {
+    window.__appTheme.sync();
+} else if (localStorage.getItem("colorMode") === "light") {
     document.body.classList.add("light");
-    document.getElementById("mode-btn").innerText = "☀️";
+    document.getElementById("mode-btn").innerHTML = "&#9728;&#65039;";
 }
 
 initUser();
