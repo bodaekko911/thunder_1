@@ -8,27 +8,10 @@ let salesChart = null;
 let topProductsTab = "revenue";
 let activityFilter = "all";
 let dashboardData = null;
-let assistantHistory = [];
 let currentUser = null;
-let loadingTimer = null;
 let dashboardAbortController = null;
 let dashboardRequestId = 0;
 let dashboardHasLoaded = false;
-let assistantOpen = false;
-
-const ASSISTANT_CHIPS = [
-  "How much did we sell today?",
-  "Show me revenue this week",
-  "Top products this month",
-  "Which products are running low?",
-  "Product details for olive oil",
-  "What changed compared to yesterday?",
-  "Show recent sales activity",
-  "What are my biggest expenses this month?",
-  "Which invoices are unpaid?",
-  "Which customer owes us the most?",
-  "What is the gross profit this month?",
-];
 
 function escHtml(value) {
   return String(value || "").replace(/[&<>"']/g, (char) => (
@@ -73,7 +56,7 @@ function setGreeting() {
 function setTheme(theme) {
   document.documentElement.dataset.theme = theme;
   localStorage.setItem("dashboard:theme", theme);
-  document.getElementById("mode-btn").textContent = theme === "dark" ? "☾" : "☀";
+  document.getElementById("mode-btn").innerHTML = theme === "light" ? "&#9728;&#65039;" : "&#127769;";
   if (salesChart) salesChart.update();
 }
 
@@ -96,19 +79,6 @@ function openCustomRangePicker() {
   document.getElementById("custom-range-start").value = customStart || "";
   document.getElementById("custom-range-end").value = customEnd || "";
   setCustomRangeError("");
-}
-
-function setAssistantOpen(open) {
-  assistantOpen = open;
-  const drawer = document.getElementById("assistant-drawer");
-  const button = document.getElementById("assistant-fab");
-  drawer.classList.toggle("hidden", !open);
-  drawer.classList.toggle("open", open);
-  button.setAttribute("aria-expanded", open ? "true" : "false");
-  button.classList.toggle("active", open);
-  if (open) {
-    document.getElementById("assistantInput").focus();
-  }
 }
 
 function closeCustomRangePicker() {
@@ -155,12 +125,11 @@ function markUpdated() {
   elapsedTimer = setInterval(tick, 5000);
 }
 
-function numberDeltaText(metric, data) {
+function numberDeltaText(_metric, data) {
   if (data?.delta_pct === null || data?.delta_pct === undefined) return "No comparison yet";
   const rounded = Math.abs(Number(data.delta_pct)).toFixed(1).replace(".0", "");
   const direction = Number(data.delta_pct) >= 0 ? "up" : "down";
-  const suffix = metric === "spent" ? "vs last period" : "vs last period";
-  return `${direction === "up" ? "↑" : "↓"} ${rounded}% ${suffix}`;
+  return `${direction === "up" ? "↑" : "↓"} ${rounded}% vs last period`;
 }
 
 function tooltipForCard(key) {
@@ -168,7 +137,7 @@ function tooltipForCard(key) {
     sales: "Total money coming in from completed sales, after refunds. Does not include unpaid invoices.",
     clients_owe: "B2B clients with unpaid or partially-paid invoices. The overdue number counts those more than 30 days old.",
     spent: "All recorded expenses for the period - electricity, rent, supplies, salaries, and more.",
-    stock_alerts: "Products that are out of stock or nearly out. Click to see the list.",
+    stock_alerts: "Products that are out of stock or nearly out.",
     sales_today: "Money taken by the current cashier today.",
   };
   return tips[key] || "";
@@ -181,9 +150,7 @@ function cardSpec(key) {
       label: dashboardData?.range?.label === "Today" ? "Sales today" : `Sales ${rangeLabel.toLowerCase()}`,
       value: formatMoney(dashboardData?.numbers?.sales?.value || 0),
       meta: numberDeltaText("sales", dashboardData?.numbers?.sales),
-      detail: "",
       sparkline: dashboardData?.numbers?.sales?.sparkline || [],
-      click: () => submitAssistantQuestion(rangeLabel === "Today" ? "show me sales today" : `show me sales ${rangeLabel.toLowerCase()}`),
       tooltip: tooltipForCard("sales"),
     };
   }
@@ -192,9 +159,7 @@ function cardSpec(key) {
       label: "Sales today",
       value: formatMoney(dashboardData?.viewer?.alt_sales_today?.value || 0),
       meta: "Your shift total so far",
-      detail: "",
       sparkline: [],
-      click: () => window.location.assign("/pos"),
       tooltip: tooltipForCard("sales_today"),
     };
   }
@@ -203,9 +168,7 @@ function cardSpec(key) {
       label: "Money clients owe you",
       value: formatMoney(dashboardData?.numbers?.clients_owe?.value || 0),
       meta: `${formatNumber(dashboardData?.numbers?.clients_owe?.overdue_count || 0)} overdue`,
-      detail: "",
       sparkline: [],
-      click: () => window.location.assign("/b2b/?filter=outstanding"),
       tooltip: tooltipForCard("clients_owe"),
     };
   }
@@ -214,9 +177,7 @@ function cardSpec(key) {
       label: dashboardData?.range?.label === "Today" ? "Money you've spent today" : `Money you've spent ${rangeLabel.toLowerCase()}`,
       value: formatMoney(dashboardData?.numbers?.spent?.value || 0),
       meta: numberDeltaText("spent", dashboardData?.numbers?.spent),
-      detail: "",
       sparkline: dashboardData?.numbers?.spent?.sparkline || [],
-      click: () => window.location.assign(`/expenses/?range=${currentRange}`),
       tooltip: tooltipForCard("spent"),
     };
   }
@@ -224,9 +185,7 @@ function cardSpec(key) {
     label: "Stock alerts",
     value: `${formatNumber(dashboardData?.numbers?.stock_alerts?.value || 0)} items`,
     meta: `${formatNumber(dashboardData?.numbers?.stock_alerts?.out_count || 0)} out · ${formatNumber(dashboardData?.numbers?.stock_alerts?.low_count || 0)} low`,
-    detail: "",
     sparkline: [],
-    click: () => window.location.assign("/inventory/?filter=low-stock"),
     tooltip: tooltipForCard("stock_alerts"),
   };
 }
@@ -242,14 +201,13 @@ function renderNumbers() {
     const node = document.querySelector(`[data-card="${key}"]`);
     const spec = cardSpec(key);
     node.innerHTML = `
-      <button type="button" class="number-card-button" data-tooltip="${escHtml(spec.tooltip)}">
+      <div class="number-card-button" data-tooltip="${escHtml(spec.tooltip)}">
         <span class="number-label">${escHtml(spec.label)}</span>
         <strong class="number-value">${escHtml(spec.value)}</strong>
         <span class="number-meta">${escHtml(spec.meta)}</span>
         ${spec.sparkline.length ? `<div class="sparkline-bars">${sparklineBars(spec.sparkline)}</div>` : `<div class="number-breakdown">${escHtml(spec.meta)}</div>`}
-      </button>
+      </div>
     `;
-    node.querySelector("button").addEventListener("click", spec.click);
   });
 }
 
@@ -322,12 +280,6 @@ function renderChart() {
           x: { stacked: true, grid: { display: false } },
           y: { stacked: true, grid: { display: false }, ticks: { display: false }, border: { display: false } },
         },
-        onClick(_event, elements) {
-          if (!elements.length) return;
-          const bucket = buckets[elements[0].index];
-          if (!bucket) return;
-          submitAssistantQuestion(`show me sales on ${bucket.date}`);
-        },
       },
     });
     return;
@@ -340,12 +292,6 @@ function renderChart() {
   salesChart.options.plugins.tooltip.callbacks.afterBody = (items) => {
     const bucket = buckets[items[0]?.dataIndex || 0];
     return [`Transactions: ${bucket?.orders || 0}`];
-  };
-  salesChart.options.onClick = (_event, elements) => {
-    if (!elements.length) return;
-    const bucket = buckets[elements[0].index];
-    if (!bucket) return;
-    submitAssistantQuestion(`show me sales on ${bucket.date}`);
   };
   salesChart.update("none");
 }
@@ -370,18 +316,15 @@ function renderTopProducts() {
     const label = topProductsTab === "revenue" ? formatMoney(value) : `${formatNumber(value)} units`;
     const width = Math.max(8, Math.round((value / maxValue) * 100));
     return `
-      <button type="button" class="list-row top-product-row" data-name="${escHtml(product.name)}">
+      <div class="list-row top-product-row">
         <div class="row-main">
           <span class="row-title">${escHtml(product.name)}</span>
           <span class="row-value">${escHtml(label)}</span>
         </div>
         <span class="row-bar"><span style="width:${width}%"></span></span>
-      </button>
+      </div>
     `;
   }).join("");
-  container.querySelectorAll(".top-product-row").forEach((button) => {
-    button.addEventListener("click", () => submitAssistantQuestion(`show me details for ${button.dataset.name}`));
-  });
 }
 
 function renderRecentActivity() {
@@ -404,148 +347,6 @@ function renderRecentActivity() {
       const link = row.dataset.link;
       if (link && link !== "#") window.location.assign(link);
     });
-  });
-}
-
-function assistantResultParts(response) {
-  const result = response?.result || {};
-  return {
-    message: result.message || response?.message || "No answer returned.",
-    highlights: result.highlights || response?.highlights || [],
-    table: result.table || response?.table || null,
-    suggestions: result.suggestions || response?.suggestions || [],
-  };
-}
-
-function renderHighlights(items) {
-  if (!items?.length) return "";
-  return `<div class="assistant-highlights">${items.map((item) => `
-    <div class="assistant-stat">
-      <span>${escHtml(item.label || "")}</span>
-      <strong>${escHtml(item.value || "")}</strong>
-    </div>
-  `).join("")}</div>`;
-}
-
-function renderTable(table) {
-  if (!table?.columns?.length || !table?.rows?.length) return "";
-  return `
-    <div class="assistant-table-wrap">
-      <table class="assistant-table">
-        <thead><tr>${table.columns.map((column) => `<th class="${column.align === "right" ? "right" : ""}">${escHtml(column.label)}</th>`).join("")}</tr></thead>
-        <tbody>${table.rows.map((row) => `<tr>${table.columns.map((column) => `<td class="${column.align === "right" ? "right" : ""}">${escHtml(row[column.key])}</td>`).join("")}</tr>`).join("")}</tbody>
-      </table>
-    </div>
-  `;
-}
-
-function renderSuggestionChips(items) {
-  if (!items?.length) return "";
-  return `<div class="assistant-followups">${items.map((item) => `<button type="button" class="chip-btn assistant-followup" data-question="${escHtml(item)}">${escHtml(item)}</button>`).join("")}</div>`;
-}
-
-function renderAssistantHistory() {
-  const container = document.getElementById("assistantHistory");
-  if (!assistantHistory.length) {
-    container.innerHTML = `<div class="assistant-placeholder">Your recent questions will appear here.</div>`;
-    return;
-  }
-  container.innerHTML = assistantHistory.map((entry, index) => {
-    if (entry.loading) {
-      return `
-        <article class="assistant-entry">
-          <div class="assistant-entry-head"><strong>${escHtml(entry.question)}</strong></div>
-          <div class="assistant-loading"><span></span><span></span><span></span></div>
-        </article>
-      `;
-    }
-    const parts = assistantResultParts(entry.response);
-    const unsupported = entry.response?.supported === false;
-    const fallback = unsupported ? `<p class="assistant-fallback">I'm not sure how to answer that yet. Try one of these:</p>` : "";
-    return `
-      <article class="assistant-entry" id="assistant-entry-${index}">
-        <div class="assistant-entry-head">
-          <button type="button" class="assistant-jump" data-question="${escHtml(entry.question)}">← jump to question</button>
-          <button type="button" class="assistant-copy" data-copy="${escHtml(parts.message)}">Copy</button>
-        </div>
-        <p class="assistant-question">${escHtml(entry.question)}</p>
-        <div class="assistant-answer">
-          <p class="assistant-message">${escHtml(parts.message)}</p>
-          ${fallback}
-          ${renderHighlights(parts.highlights)}
-          ${renderTable(parts.table)}
-          ${renderSuggestionChips(parts.suggestions)}
-        </div>
-      </article>
-    `;
-  }).join("");
-  container.querySelectorAll(".assistant-jump").forEach((button) => {
-    button.addEventListener("click", () => {
-      document.getElementById("assistantInput").value = button.dataset.question || "";
-      document.getElementById("assistantInput").focus();
-    });
-  });
-  container.querySelectorAll(".assistant-copy").forEach((button) => {
-    button.addEventListener("click", async () => {
-      try {
-        await navigator.clipboard.writeText(button.dataset.copy || "");
-        button.textContent = "Copied";
-        setTimeout(() => { button.textContent = "Copy"; }, 1000);
-      } catch {}
-    });
-  });
-  container.querySelectorAll(".assistant-followup").forEach((button) => {
-    button.addEventListener("click", () => submitAssistantQuestion(button.dataset.question || ""));
-  });
-}
-
-function pushAssistantEntry(question, response, loading = false) {
-  if (loading) {
-    assistantHistory.unshift({ question, loading: true, response: null });
-  } else if (assistantHistory.length && assistantHistory[0].loading && assistantHistory[0].question === question) {
-    assistantHistory[0] = { question, response, loading: false };
-  } else {
-    assistantHistory.unshift({ question, response, loading: false });
-  }
-  assistantHistory = assistantHistory.slice(0, 5);
-  renderAssistantHistory();
-}
-
-async function submitAssistantQuestion(question) {
-  const clean = String(question || "").trim();
-  if (!clean) return;
-  setAssistantOpen(true);
-  document.getElementById("assistantInput").value = clean;
-  pushAssistantEntry(clean, null, true);
-  clearTimeout(loadingTimer);
-  loadingTimer = setTimeout(renderAssistantHistory, 300);
-  try {
-    const response = await fetch("/dashboard/assistant", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        question: clean,
-        range: currentRange,
-        start: currentRange === "custom" ? customStart : null,
-        end: currentRange === "custom" ? customEnd : null,
-      }),
-    });
-    const payload = await response.json();
-    pushAssistantEntry(clean, payload, false);
-  } catch {
-    pushAssistantEntry(clean, {
-      supported: false,
-      message: "I couldn't reach the assistant. Try again.",
-      suggestions: ASSISTANT_CHIPS.slice(0, 3),
-    }, false);
-  }
-}
-
-function renderAssistantChips() {
-  const container = document.getElementById("assistant-chips");
-  container.innerHTML = ASSISTANT_CHIPS.map((question) => `<button type="button" class="chip-btn" data-question="${escHtml(question)}">${escHtml(question)}</button>`).join("");
-  container.querySelectorAll(".chip-btn").forEach((button) => {
-    button.addEventListener("click", () => submitAssistantQuestion(button.dataset.question || ""));
   });
 }
 
@@ -641,28 +442,6 @@ function bindEvents() {
   document.getElementById("custom-range-modal").addEventListener("click", (event) => {
     if (event.target.id === "custom-range-modal") closeCustomRangePicker();
   });
-  document.getElementById("assistant-fab").addEventListener("click", () => {
-    setAssistantOpen(!assistantOpen);
-  });
-  document.getElementById("assistant-close").addEventListener("click", () => {
-    setAssistantOpen(false);
-  });
-  document.getElementById("assistantSend").addEventListener("click", () => submitAssistantQuestion(document.getElementById("assistantInput").value));
-  document.getElementById("assistantInput").addEventListener("keydown", (event) => {
-    if (event.key === "Enter") {
-      event.preventDefault();
-      submitAssistantQuestion(document.getElementById("assistantInput").value);
-    }
-  });
-  document.getElementById("assistant-clear").addEventListener("click", () => {
-    assistantHistory = [];
-    renderAssistantHistory();
-  });
-  document.addEventListener("keydown", (event) => {
-    if (event.key === "Escape" && assistantOpen) {
-      setAssistantOpen(false);
-    }
-  });
   document.querySelectorAll("[data-top-tab]").forEach((button) => {
     button.addEventListener("click", () => {
       topProductsTab = button.dataset.topTab;
@@ -685,18 +464,9 @@ function startAutoRefresh() {
   }, 60000);
 }
 
-setTheme = function setTheme(theme) {
-  document.documentElement.dataset.theme = theme;
-  localStorage.setItem("dashboard:theme", theme);
-  document.getElementById("mode-btn").innerHTML = theme === "light" ? "&#9728;&#65039;" : "&#127769;";
-  if (salesChart) salesChart.update();
-};
-
 async function initDashboard() {
   initTheme();
   updateRangeButtons();
-  renderAssistantChips();
-  renderAssistantHistory();
   bindEvents();
   await initUser();
   await loadDashboard();

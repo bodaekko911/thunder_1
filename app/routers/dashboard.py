@@ -1,15 +1,12 @@
 from datetime import date, datetime, timedelta
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import HTMLResponse
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
-from pydantic import BaseModel
-
 from app.core.config import settings
 from app.core.permissions import require_permission
-from app.core.rate_limit import limiter
 from app.core.security import get_current_user
 from app.database import get_async_session
 from app.models.invoice import Invoice, InvoiceItem
@@ -22,20 +19,11 @@ from app.models.production import ProductionBatch
 from app.models.refund import RetailRefund
 from app.models.user import User
 from app.services.expense_service import get_summary as get_expense_summary
-from app.services.dashboard_assistant_service import answer_dashboard_question
 
 router = APIRouter(
     tags=["Dashboard"],
     dependencies=[Depends(require_permission("page_dashboard"))],
 )
-
-
-class DashboardAssistantQuestion(BaseModel):
-    question: str
-    range: Optional[str] = None
-    start: Optional[str] = None
-    end: Optional[str] = None
-
 
 # ── legacy data endpoint ───────────────────────────────────────────────
 
@@ -339,72 +327,6 @@ async def dashboard_data(db: AsyncSession = Depends(get_async_session)):
 
 # ── assistant endpoint ─────────────────────────────────────────────────
 
-@router.post("/dashboard/assistant")
-@limiter.limit("20/minute")
-async def dashboard_assistant(
-    request: Request,
-    data: DashboardAssistantQuestion,
-    db: AsyncSession = Depends(get_async_session),
-    current_user: User = Depends(get_current_user),
-):
-    from app.core.log import logger
-    from fastapi import HTTPException
-
-    try:
-        return await answer_dashboard_question(
-            db,
-            question=data.question,
-            current_user=current_user,
-            dashboard_context={
-                "range": data.range,
-                "start": data.start,
-                "end": data.end,
-            },
-        )
-    except HTTPException as exc:
-        detail = exc.detail if isinstance(exc.detail, str) else "Request failed"
-        logger.warning(
-            "dashboard_assistant request failed",
-            extra={"status_code": exc.status_code, "detail": detail},
-        )
-        return JSONResponse(
-            status_code=exc.status_code,
-            content={
-                "supported": False,
-                "intent": None,
-                "parameters": {},
-                "result": None,
-                "message": detail,
-                "confidence": 0.0,
-                "suggestions": [],
-                "highlights": [],
-                "table": None,
-            },
-        )
-    except Exception:
-        logger.exception("dashboard_assistant request failed")
-        try:
-            await db.rollback()
-        except Exception:
-            pass
-        return JSONResponse(
-            status_code=500,
-            content={
-                "supported": False,
-                "intent": None,
-                "parameters": {},
-                "result": None,
-                "message": "I couldn't answer that because the dashboard assistant hit an internal error. Please try again.",
-                "confidence": 0.0,
-                "suggestions": [],
-                "highlights": [],
-                "table": None,
-            },
-        )
-
-
-
-
 # ── new: /dashboard/summary ────────────────────────────────────────────
 
 @router.get("/dashboard/summary")
@@ -596,35 +518,6 @@ def dashboard_ui():
     </section>
   </div>
 </main>
-
-<button type="button" class="assistant-fab" id="assistant-fab" aria-label="Open dashboard assistant" aria-expanded="false">
-  <span class="assistant-fab-icon">&#9993;</span>
-  <span class="assistant-fab-label">Assistant</span>
-</button>
-
-<section class="assistant-drawer hidden" id="assistant-drawer" aria-label="Dashboard assistant">
-  <div class="assistant-drawer-header">
-    <div>
-      <h2>Dashboard Assistant</h2>
-      <p>Ask about sales, stock, products, expenses, receivables, activity, and comparisons.</p>
-    </div>
-    <div class="assistant-drawer-actions">
-      <button type="button" class="assistant-clear" id="assistant-clear">Clear</button>
-      <button type="button" class="assistant-close" id="assistant-close" aria-label="Close assistant">&#215;</button>
-    </div>
-  </div>
-  <div class="assistant-helper">
-    <span>top products this month</span>
-    <span>what changed compared to yesterday</span>
-    <span>show recent sales activity</span>
-  </div>
-  <div class="assistant-chips" id="assistant-chips"></div>
-  <div class="assistant-history" id="assistantHistory"></div>
-  <div class="assistant-input-row assistant-drawer-input">
-    <input type="text" id="assistantInput" placeholder="Ask about your business…" autocomplete="off">
-    <button type="button" id="assistantSend">Ask</button>
-  </div>
-</section>
 
 <div id="custom-range-modal" class="range-modal hidden" role="dialog" aria-modal="true" aria-labelledby="crm-title">
   <div class="range-modal-card">
