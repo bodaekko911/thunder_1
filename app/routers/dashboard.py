@@ -474,15 +474,26 @@ def dashboard_ui():
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Dashboard — Thunder ERP</title>
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,300;0,400;0,600;1,300;1,400&family=DM+Sans:wght@300;400;500;600&family=DM+Mono:wght@400;500&family=Outfit:wght@400;500;600;700;800;900&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="/static/dashboard.css">
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
 <script src="/static/auth-guard.js"></script>
 </head>
 <body>
+<div class="bg-layer">
+  <div class="bg-orb"></div>
+  <div class="bg-orb"></div>
+  <div class="bg-orb"></div>
+</div>
+<div class="bg-grain"></div>
 <div id="loading"><div class="spinner"></div></div>
 <nav class="top-nav" aria-label="Primary">
-  <a href="/home" class="logo">Thunder ERP</a>
+  <a href="/home" class="logo">
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+      <polygon points="13,2 4,14 11,14 11,22 20,10 13,10" fill="#f59e0b"></polygon>
+    </svg>
+    <span class="logo-text">Thunder ERP</span>
+  </a>
   <div class="nav-links">
     <a href="/dashboard" class="nav-link active">Dashboard</a>
     <a href="/pos" class="nav-link">POS</a>
@@ -491,8 +502,22 @@ def dashboard_ui():
     <a href="/inventory/" class="nav-link">Inventory</a>
   </div>
   <div class="nav-actions">
-    <button class="mode-btn" id="mode-btn" type="button" aria-label="Toggle color mode">&#9728;</button>
-    <a href="/users/password" class="nav-link">Security</a>
+    <button class="mode-btn" id="mode-btn" type="button" aria-label="Toggle color mode" title="Toggle light/dark mode">&#127769;</button>
+    <div class="account-menu">
+      <button class="user-pill" id="account-trigger" type="button" aria-haspopup="menu" aria-expanded="false">
+        <div class="user-avatar" id="user-avatar">A</div>
+        <span class="user-name" id="user-name">Admin</span>
+        <span class="menu-caret">&#9662;</span>
+      </button>
+      <div class="account-dropdown" id="account-dropdown" role="menu">
+        <div class="account-head">
+          <div class="account-label">Signed in as</div>
+          <div class="account-email" id="user-email">&#8212;</div>
+        </div>
+        <a href="/users/password" class="account-item" role="menuitem">Change Password</a>
+        <button class="account-item danger" id="signout-btn" type="button" role="menuitem">Sign out</button>
+      </div>
+    </div>
   </div>
 </nav>
 <main class="page-shell">

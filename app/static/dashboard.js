@@ -536,11 +536,37 @@ async function initUser() {
     const response = await fetch("/auth/me");
     if (response.ok) currentUser = await response.json();
   } catch {}
+  const name = currentUser?.name || "Admin";
+  const email = currentUser?.email || "-";
+  const avatar = (name.trim()[0] || "A").toUpperCase();
+  document.getElementById("user-name").textContent = name;
+  document.getElementById("user-email").textContent = email;
+  document.getElementById("user-avatar").textContent = avatar;
   setGreeting();
 }
 
 function bindEvents() {
   document.getElementById("mode-btn").addEventListener("click", toggleTheme);
+  document.getElementById("account-trigger").addEventListener("click", (event) => {
+    event.stopPropagation();
+    const trigger = document.getElementById("account-trigger");
+    const dropdown = document.getElementById("account-dropdown");
+    const open = dropdown.classList.toggle("open");
+    trigger.classList.toggle("open", open);
+    trigger.setAttribute("aria-expanded", open ? "true" : "false");
+  });
+  document.getElementById("signout-btn").addEventListener("click", async () => {
+    await fetch("/auth/logout", { method: "POST" });
+    window.location.href = "/";
+  });
+  document.addEventListener("click", (event) => {
+    const dropdown = document.getElementById("account-dropdown");
+    const trigger = document.getElementById("account-trigger");
+    if (dropdown.contains(event.target) || trigger.contains(event.target)) return;
+    dropdown.classList.remove("open");
+    trigger.classList.remove("open");
+    trigger.setAttribute("aria-expanded", "false");
+  });
   document.querySelectorAll(".range-btn").forEach((button) => {
     button.addEventListener("click", () => {
       if (button.dataset.range === "custom") {
@@ -591,6 +617,13 @@ function startAutoRefresh() {
     if (!document.hidden) loadDashboard();
   }, 60000);
 }
+
+setTheme = function setTheme(theme) {
+  document.documentElement.dataset.theme = theme;
+  localStorage.setItem("dashboard:theme", theme);
+  document.getElementById("mode-btn").innerHTML = theme === "light" ? "&#9728;&#65039;" : "&#127769;";
+  if (salesChart) salesChart.update();
+};
 
 async function initDashboard() {
   initTheme();
