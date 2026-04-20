@@ -1,707 +1,606 @@
-/* Thunder ERP Dashboard v3 — executive/calm redesign */
+let currentRange = localStorage.getItem("dashboard:range") || "mtd";
+let customStart = null;
+let customEnd = null;
+let lastUpdatedAt = null;
+let elapsedTimer = null;
+let refreshTimer = null;
+let salesChart = null;
+let topProductsTab = "revenue";
+let activityFilter = "all";
+let dashboardData = null;
+let assistantHistory = [];
+let currentUser = null;
+let loadingTimer = null;
 
-// ── State ─────────────────────────────────────────────────────────────────
-let _currentRange  = localStorage.getItem("dashboard:range") || "mtd";
-let _customStart   = null;
-let _customEnd     = null;
-let _lastData      = null;
-let _refreshTimer  = null;
-let _insightsTimer = null;
-let _elapsedTimer  = null;
-let _lastUpdated   = null;
-let _firstLoad     = true;
-let _revenueChart  = null;
-let _heroType      = "admin";
-let _topTab        = "rev";
-let _drawerOpen    = false;
-let _allInsights   = [];
-let _insightsExpanded = false;
-const _sparkCharts = {};
+const ASSISTANT_CHIPS = [
+  "What did I sell today?",
+  "What did I sell this month?",
+  "Who owes me money?",
+  "Which products are running low?",
+  "Biggest customer this month?",
+  "Best-selling products?",
+  "How much did I spend this month?",
+  "Show me sales this week",
+  "Compare this month to last month",
+  "How much stock do I have in total?",
+];
 
-// ── Formatters ────────────────────────────────────────────────────────────
-function fmt(val) {
-  return "EGP\u00a0" + Number(val || 0).toLocaleString("en-GB", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-}
-function fmtHero(val) {
-  return "EGP\u00a0" + Math.round(Number(val || 0)).toLocaleString("en-GB");
-}
-function fmtNum(val) {
-  return Number(val || 0).toLocaleString("en-GB");
-}
-function pctStr(v) {
-  if (v === null || v === undefined) return "—";
-  return (v > 0 ? "+" : "") + v + "%";
-}
-function relativeTime(isoStr) {
-  if (!isoStr) return "—";
-  const s = Math.floor((Date.now() - new Date(isoStr).getTime()) / 1000);
-  if (s < 60)              return s + "s ago";
-  if (s < 3600)            return Math.floor(s / 60) + "m ago";
-  if (s < 86400)           return Math.floor(s / 3600) + "h ago";
-  return Math.floor(s / 86400) + "d ago";
-}
-function escHtml(str) {
-  return String(str || "").replace(/[&<>"']/g, c =>
-    ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
-}
-function truncate(str, n) {
-  return str.length > n ? str.slice(0, n) + "…" : str;
+function escHtml(value) {
+  return String(value || "").replace(/[&<>"']/g, (char) => (
+    { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[char]
+  ));
 }
 
-// ── Theme ─────────────────────────────────────────────────────────────────
-function toggleMode() {
-  const html = document.documentElement;
-  const isDark = html.dataset.theme === "dark";
-  html.dataset.theme = isDark ? "light" : "dark";
-  localStorage.setItem("dashboard:theme", html.dataset.theme);
-  document.getElementById("mode-btn").textContent = isDark ? "\u2600" : "\u263E";
-  if (_revenueChart) _revenueChart.update();
+function formatMoney(value) {
+  return `EGP ${Math.round(Number(value || 0)).toLocaleString("en-GB")}`;
+}
+
+function formatMoneyPrecise(value) {
+  return `EGP ${Number(value || 0).toLocaleString("en-GB", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+}
+
+function formatNumber(value) {
+  return Number(value || 0).toLocaleString("en-GB");
+}
+
+function longDateLabel() {
+  return new Date().toLocaleDateString("en-GB", {
+    weekday: "long",
+    year: "numeric",
+    month: "long",
+    day: "numeric",
+  });
+}
+
+function greetingForHour(hour) {
+  if (hour < 12) return "Good morning";
+  if (hour < 17) return "Good afternoon";
+  return "Good evening";
+}
+
+function setGreeting() {
+  const name = (currentUser?.name || "there").split(" ")[0];
+  const hour = new Date().getHours();
+  document.getElementById("greeting").textContent = `${greetingForHour(hour)}, ${name}`;
+  document.getElementById("date-display").textContent = longDateLabel();
+}
+
+function setTheme(theme) {
+  document.documentElement.dataset.theme = theme;
+  localStorage.setItem("dashboard:theme", theme);
+  document.getElementById("mode-btn").textContent = theme === "dark" ? "☾" : "☀";
+  if (salesChart) salesChart.update();
+}
+
+function toggleTheme() {
+  setTheme(document.documentElement.dataset.theme === "dark" ? "light" : "dark");
 }
 
 function initTheme() {
-  const saved = localStorage.getItem("dashboard:theme") || "light";
-  document.documentElement.dataset.theme = saved;
-  document.getElementById("mode-btn").textContent = saved === "dark" ? "\u263E" : "\u2600";
+  setTheme(localStorage.getItem("dashboard:theme") || "light");
 }
 
-// ── Account menu ──────────────────────────────────────────────────────────
-function toggleAccountMenu(e) {
-  e.stopPropagation();
-  document.getElementById("account-dropdown").classList.toggle("open");
-}
-document.addEventListener("click", () => {
-  document.getElementById("account-dropdown")?.classList.remove("open");
-});
-async function logout() {
-  await fetch("/auth/logout", { method: "POST" });
-  window.location.href = "/";
-}
-
-// ── User init ─────────────────────────────────────────────────────────────
-async function initUser() {
-  try {
-    const r = await fetch("/auth/me");
-    if (!r.ok) return;
-    const u = await r.json();
-    const name = u.name || "there";
-    document.getElementById("user-name").textContent   = name;
-    document.getElementById("user-avatar").textContent = name[0].toUpperCase();
-    document.getElementById("greeting").textContent    = buildGreeting(name);
-    if (u.role === "cashier" && _firstLoad) _currentRange = "today";
-    updateRangePickerActive();
-  } catch {}
-}
-
-function buildGreeting(name) {
-  const h = new Date().getHours();
-  const g = h < 12 ? "Good morning" : h < 17 ? "Good afternoon" : "Good evening";
-  return g + ", " + name.split(" ")[0];
-}
-
-function updateDateDisplay() {
-  const el = document.getElementById("date-display");
-  if (el) el.textContent = new Date().toLocaleDateString("en-GB", {
-    weekday: "long", year: "numeric", month: "long", day: "numeric",
+function updateRangeButtons() {
+  document.querySelectorAll(".range-btn").forEach((button) => {
+    button.classList.toggle("active", button.dataset.range === currentRange);
   });
 }
-
-// ── Elapsed timer ─────────────────────────────────────────────────────────
-function markUpdated() {
-  clearInterval(_elapsedTimer);
-  _lastUpdated = Date.now();
-  const el = document.getElementById("last-updated");
-  function tick() {
-    const sec = Math.round((Date.now() - _lastUpdated) / 1000);
-    if (el) el.textContent = "\u21bb Updated " + sec + "s ago";
-  }
-  tick();
-  _elapsedTimer = setInterval(tick, 5000);
-}
-
-// ── Range picker ──────────────────────────────────────────────────────────
-function updateRangePickerActive() {
-  document.querySelectorAll(".range-btn").forEach(b => {
-    b.classList.toggle("active", b.dataset.range === _currentRange);
-  });
-}
-
-function onRangeChange(range) {
-  if (range === "custom") { openCustomRangePicker(); return; }
-  _currentRange = range;
-  localStorage.setItem("dashboard:range", range);
-  updateRangePickerActive();
-  loadDashboard();
-}
-
-document.querySelectorAll(".range-btn").forEach(b =>
-  b.addEventListener("click", () => onRangeChange(b.dataset.range))
-);
 
 function openCustomRangePicker() {
-  const modal = document.getElementById("custom-range-modal");
-  if (!modal) return;
-  document.getElementById("custom-range-start").value = _customStart || "";
-  document.getElementById("custom-range-end").value   = _customEnd   || "";
+  document.getElementById("custom-range-modal").classList.remove("hidden");
+  document.getElementById("custom-range-start").value = customStart || "";
+  document.getElementById("custom-range-end").value = customEnd || "";
   setCustomRangeError("");
-  modal.classList.remove("hidden");
 }
+
 function closeCustomRangePicker() {
-  document.getElementById("custom-range-modal")?.classList.add("hidden");
+  document.getElementById("custom-range-modal").classList.add("hidden");
   setCustomRangeError("");
 }
-function setCustomRangeError(msg) {
-  const el = document.getElementById("custom-range-error");
-  if (!el) return;
-  el.textContent = msg || "";
-  el.hidden = !msg;
+
+function setCustomRangeError(message) {
+  const error = document.getElementById("custom-range-error");
+  error.hidden = !message;
+  error.textContent = message;
 }
+
 function applyCustomRange() {
-  const start = document.getElementById("custom-range-start")?.value || "";
-  const end   = document.getElementById("custom-range-end")?.value   || "";
-  if (!start || !end) { setCustomRangeError("Choose both a start and end date."); return; }
-  if (start > end)    { setCustomRangeError("Start must be before or equal to end."); return; }
-  _customStart = start; _customEnd = end;
-  _currentRange = "custom";
-  localStorage.setItem("dashboard:range", "custom");
-  updateRangePickerActive();
+  const start = document.getElementById("custom-range-start").value;
+  const end = document.getElementById("custom-range-end").value;
+  if (!start || !end) {
+    setCustomRangeError("Choose both dates.");
+    return;
+  }
+  if (start > end) {
+    setCustomRangeError("Start date must come first.");
+    return;
+  }
+  customStart = start;
+  customEnd = end;
+  currentRange = "custom";
+  localStorage.setItem("dashboard:range", currentRange);
+  updateRangeButtons();
   closeCustomRangePicker();
   loadDashboard();
 }
 
-// ── Count-up animation ────────────────────────────────────────────────────
-function countUpMoney(el, target, duration = 400) {
-  if (!_firstLoad) { el.textContent = fmtHero(target); return; }
-  let start = null;
-  const step = ts => {
-    if (!start) start = ts;
-    const pct  = Math.min((ts - start) / duration, 1);
-    const ease = 1 - Math.pow(1 - pct, 2);
-    el.textContent = fmtHero(target * ease);
-    if (pct < 1) requestAnimationFrame(step);
+function markUpdated() {
+  clearInterval(elapsedTimer);
+  lastUpdatedAt = Date.now();
+  const node = document.getElementById("last-updated");
+  const tick = () => {
+    if (!node) return;
+    const seconds = Math.max(0, Math.round((Date.now() - lastUpdatedAt) / 1000));
+    node.textContent = `Updated ${seconds}s ago`;
   };
-  requestAnimationFrame(step);
+  tick();
+  elapsedTimer = setInterval(tick, 5000);
 }
-function countUpNum(el, target, suffix, duration = 400) {
-  if (!_firstLoad) { el.textContent = fmtNum(Math.round(target)) + (suffix || ""); return; }
-  let start = null;
-  const step = ts => {
-    if (!start) start = ts;
-    const pct  = Math.min((ts - start) / duration, 1);
-    const ease = 1 - Math.pow(1 - pct, 2);
-    el.textContent = fmtNum(Math.round(target * ease)) + (suffix || "");
-    if (pct < 1) requestAnimationFrame(step);
+
+function numberDeltaText(metric, data) {
+  if (data?.delta_pct === null || data?.delta_pct === undefined) return "No comparison yet";
+  const rounded = Math.abs(Number(data.delta_pct)).toFixed(1).replace(".0", "");
+  const direction = Number(data.delta_pct) >= 0 ? "up" : "down";
+  const suffix = metric === "spent" ? "vs last period" : "vs last period";
+  return `${direction === "up" ? "↑" : "↓"} ${rounded}% ${suffix}`;
+}
+
+function tooltipForCard(key) {
+  const tips = {
+    sales: "Total money coming in from completed sales, after refunds. Does not include unpaid invoices.",
+    clients_owe: "B2B clients with unpaid or partially-paid invoices. The overdue number counts those more than 30 days old.",
+    spent: "All recorded expenses for the period - electricity, rent, supplies, salaries, and more.",
+    stock_alerts: "Products that are out of stock or nearly out. Click to see the list.",
+    sales_today: "Money taken by the current cashier today.",
   };
-  requestAnimationFrame(step);
-}
-function flashTint(el) {
-  if (_firstLoad || !el) return;
-  el.classList.remove("flash-tint");
-  void el.offsetWidth;
-  el.classList.add("flash-tint");
+  return tips[key] || "";
 }
 
-// ── Sparklines ────────────────────────────────────────────────────────────
-function drawSparkline(canvasId, data, color) {
-  const canvas = document.getElementById(canvasId);
-  if (!canvas || !data?.length) return;
-  if (_sparkCharts[canvasId]) { _sparkCharts[canvasId].destroy(); }
-  _sparkCharts[canvasId] = new Chart(canvas.getContext("2d"), {
-    type: "line",
-    data: {
-      labels: data.map((_, i) => i),
-      datasets: [{ data, borderColor: color, borderWidth: 1.5, tension: .3, pointRadius: 0, fill: false }],
-    },
-    options: {
-      responsive: true, maintainAspectRatio: false, animation: false,
-      plugins: { legend: { display: false }, tooltip: { enabled: false } },
-      scales: { x: { display: false }, y: { display: false } },
-    },
-  });
-}
-
-// ── Hero cards ────────────────────────────────────────────────────────────
-function chipClass(dir) {
-  return ({ up:"chip-up", down:"chip-down", bad_up:"chip-bad-up", bad_down:"chip-bad-down" })[dir] || "chip-flat";
-}
-function arrow(dir) {
-  return ({ up:"\u2191", down:"\u2193", bad_up:"\u2191", bad_down:"\u2193", flat:"\u2014" })[dir] || "\u2014";
-}
-
-function setHeroCard(idx, { label, valueFn, chip, subtitle, sparkline, sparkColor }) {
-  const labelEl = document.querySelector(`#hero-${idx} .hero-label`);
-  if (labelEl && label) labelEl.textContent = label;
-
-  const valEl = document.getElementById(`hero-${idx}-value`);
-  if (valEl) {
-    const prev = valEl.dataset.raw !== undefined ? parseFloat(valEl.dataset.raw) : undefined;
-    valueFn(valEl);
-    if (prev !== undefined) flashTint(valEl);
+function cardSpec(key) {
+  const rangeLabel = dashboardData?.range?.label || "this period";
+  if (key === "sales") {
+    return {
+      label: dashboardData?.range?.label === "Today" ? "Sales today" : `Sales ${rangeLabel.toLowerCase()}`,
+      value: formatMoney(dashboardData?.numbers?.sales?.value || 0),
+      meta: numberDeltaText("sales", dashboardData?.numbers?.sales),
+      detail: "",
+      sparkline: dashboardData?.numbers?.sales?.sparkline || [],
+      click: () => submitAssistantQuestion(rangeLabel === "Today" ? "show me sales today" : `show me sales ${rangeLabel.toLowerCase()}`),
+      tooltip: tooltipForCard("sales"),
+    };
   }
-
-  const chipEl = document.getElementById(`hero-${idx}-chip`);
-  if (chipEl) {
-    if (chip && chip.pct !== null && chip.pct !== undefined) {
-      chipEl.className = "hero-chip " + chipClass(chip.dir);
-      chipEl.textContent = arrow(chip.dir) + " " + pctStr(chip.pct);
-      chipEl.setAttribute("aria-label", Math.abs(chip.pct) + "% vs prior period");
-    } else {
-      chipEl.className = "hero-chip chip-flat";
-      chipEl.textContent = "\u2014";
-    }
+  if (key === "clients_owe" && !(dashboardData?.viewer?.can_view_b2b)) {
+    return {
+      label: "Sales today",
+      value: formatMoney(dashboardData?.viewer?.alt_sales_today?.value || 0),
+      meta: "Your shift total so far",
+      detail: "",
+      sparkline: [],
+      click: () => window.location.assign("/pos"),
+      tooltip: tooltipForCard("sales_today"),
+    };
   }
-
-  const subEl = document.getElementById(`hero-${idx}-sub`);
-  if (subEl && subtitle !== undefined) subEl.textContent = subtitle;
-
-  if (sparkline?.length && sparkColor) drawSparkline(`spark-${idx}`, sparkline, sparkColor);
+  if (key === "clients_owe") {
+    return {
+      label: "Money clients owe you",
+      value: formatMoney(dashboardData?.numbers?.clients_owe?.value || 0),
+      meta: `${formatNumber(dashboardData?.numbers?.clients_owe?.overdue_count || 0)} overdue`,
+      detail: "",
+      sparkline: [],
+      click: () => window.location.assign("/b2b/?filter=outstanding"),
+      tooltip: tooltipForCard("clients_owe"),
+    };
+  }
+  if (key === "spent") {
+    return {
+      label: dashboardData?.range?.label === "Today" ? "Money you've spent today" : `Money you've spent ${rangeLabel.toLowerCase()}`,
+      value: formatMoney(dashboardData?.numbers?.spent?.value || 0),
+      meta: numberDeltaText("spent", dashboardData?.numbers?.spent),
+      detail: "",
+      sparkline: dashboardData?.numbers?.spent?.sparkline || [],
+      click: () => window.location.assign(`/expenses/?range=${currentRange}`),
+      tooltip: tooltipForCard("spent"),
+    };
+  }
+  return {
+    label: "Stock alerts",
+    value: `${formatNumber(dashboardData?.numbers?.stock_alerts?.value || 0)} items`,
+    meta: `${formatNumber(dashboardData?.numbers?.stock_alerts?.out_count || 0)} out · ${formatNumber(dashboardData?.numbers?.stock_alerts?.low_count || 0)} low`,
+    detail: "",
+    sparkline: [],
+    click: () => window.location.assign("/inventory/?filter=low-stock"),
+    tooltip: tooltipForCard("stock_alerts"),
+  };
 }
 
-function accentColor() {
-  return getComputedStyle(document.documentElement).getPropertyValue("--accent").trim() || "#1f7a4d";
+function sparklineBars(values) {
+  if (!values?.length) return "";
+  const max = Math.max(...values, 1);
+  return values.map((value) => `<span style="height:${Math.max(6, Math.round((value / max) * 40))}px"></span>`).join("");
 }
 
-function renderHeroAdmin(hero) {
-  if (!hero) return;
-  const green = accentColor();
-
-  setHeroCard(0, {
-    label:      "Revenue",
-    valueFn:    el => { countUpMoney(el, hero.revenue?.value || 0); el.dataset.raw = hero.revenue?.value || 0; },
-    chip:       { dir: hero.revenue?.direction || "flat", pct: hero.revenue?.delta_pct },
-    subtitle:   hero.revenue?.prior !== undefined ? "Prior: " + fmtHero(hero.revenue.prior) : "",
-    sparkline:  hero.revenue?.sparkline,
-    sparkColor: green,
+function renderNumbers() {
+  ["sales", "clients_owe", "spent", "stock_alerts"].forEach((key) => {
+    const node = document.querySelector(`[data-card="${key}"]`);
+    const spec = cardSpec(key);
+    node.innerHTML = `
+      <button type="button" class="number-card-button" data-tooltip="${escHtml(spec.tooltip)}">
+        <span class="number-label">${escHtml(spec.label)}</span>
+        <strong class="number-value">${escHtml(spec.value)}</strong>
+        <span class="number-meta">${escHtml(spec.meta)}</span>
+        ${spec.sparkline.length ? `<div class="sparkline-bars">${sparklineBars(spec.sparkline)}</div>` : `<div class="number-breakdown">${escHtml(spec.meta)}</div>`}
+      </button>
+    `;
+    node.querySelector("button").addEventListener("click", spec.click);
   });
+}
 
-  setHeroCard(1, {
-    label:      "Gross Profit",
-    valueFn:    el => { countUpMoney(el, hero.gross_profit?.value || 0); el.dataset.raw = hero.gross_profit?.value || 0; },
-    chip:       { dir: hero.gross_profit?.direction || "flat", pct: hero.gross_profit?.delta_pct },
-    subtitle:   "Margin: " + (hero.gross_profit?.margin_pct ?? "\u2014") + "%",
-    sparkline:  hero.gross_profit?.sparkline,
-    sparkColor: green,
+function renderBriefing() {
+  const briefing = dashboardData?.briefing || {};
+  document.getElementById("briefing-lead").textContent = briefing.lead || "You haven't recorded any sales yet for this period.";
+  document.getElementById("briefing-body").textContent = briefing.body || "";
+  const actionsNode = document.getElementById("briefing-actions");
+  const actions = briefing.actions || [];
+  if (!actions.length) {
+    actionsNode.innerHTML = "";
+    return;
+  }
+  actionsNode.innerHTML = actions.map((action) => (
+    `<a class="briefing-action" href="${escHtml(action.link)}"><span>${escHtml(action.text)}</span><strong>${escHtml(action.cta)} →</strong></a>`
+  )).join("");
+}
+
+function chartTitle() {
+  const label = dashboardData?.range?.label || "This period";
+  return `Sales over time — ${label}`;
+}
+
+function chartLabels(buckets) {
+  const granularity = dashboardData?.range?.granularity || "day";
+  return buckets.map((bucket) => {
+    const date = new Date(`${bucket.date}T12:00:00`);
+    if (granularity === "month") return date.toLocaleDateString("en-GB", { month: "short", year: "numeric" });
+    if (granularity === "week") return `Week of ${date.toLocaleDateString("en-GB", { day: "numeric", month: "short" })}`;
+    return date.toLocaleDateString("en-GB", { day: "numeric", month: "short" });
   });
-
-  setHeroCard(2, {
-    label:    "Cash Position",
-    valueFn:  el => { countUpMoney(el, hero.cash_position?.value || 0); el.dataset.raw = hero.cash_position?.value || 0; },
-    chip:     { dir: "flat", pct: null },
-    subtitle: hero.cash_position?.ar !== undefined ? "AR: " + fmtHero(hero.cash_position.ar) : "",
-  });
-
-  setHeroCard(3, {
-    label:    "New Customers",
-    valueFn:  el => { countUpNum(el, hero.customer_growth?.value || 0); el.dataset.raw = hero.customer_growth?.value || 0; },
-    chip:     { dir: hero.customer_growth?.direction || "flat", pct: hero.customer_growth?.delta_pct },
-    subtitle: "Active total: " + fmtNum(hero.customer_growth?.total_active),
-  });
 }
 
-function renderHeroCashier(hero) {
-  if (!hero) return;
-  setHeroCard(0, { label: "Shift Sales",   valueFn: el => { countUpMoney(el, hero.shift_sales?.value || 0); el.dataset.raw = 0; }, subtitle: (hero.shift_sales?.count || 0) + " invoices" });
-  setHeroCard(1, { label: "Avg Basket",    valueFn: el => { countUpMoney(el, hero.avg_basket?.value   || 0); el.dataset.raw = 0; }, subtitle: "" });
-  setHeroCard(2, { label: "Top Item",      valueFn: el => { el.textContent = hero.top_item?.name || "\u2014"; el.dataset.raw = 0; }, subtitle: "Most sold today" });
-  setHeroCard(3, { label: "Refunds Today", valueFn: el => { countUpMoney(el, hero.refunds?.value || 0); el.dataset.raw = 0; }, chip: { dir: hero.refunds?.direction || "flat", pct: null }, subtitle: (hero.refunds?.count || 0) + " refund(s)" });
-}
-
-function renderHeroFarm(hero) {
-  if (!hero) return;
-  setHeroCard(0, { label: "Deliveries",  valueFn: el => { countUpNum(el, hero.deliveries?.value || 0); el.dataset.raw = 0; },         subtitle: "This period" });
-  setHeroCard(1, { label: "Spoilage",    valueFn: el => { el.textContent = fmtNum(hero.spoilage?.qty || 0) + " kg"; el.dataset.raw = 0; }, subtitle: "This period" });
-  setHeroCard(2, { label: "Batches",     valueFn: el => { countUpNum(el, hero.production_batches?.value || 0); el.dataset.raw = 0; }, subtitle: "" });
-  setHeroCard(3, { label: "Upcoming",    valueFn: el => { el.textContent = "\u2014"; el.dataset.raw = 0; }, subtitle: hero.upcoming_deliveries?.note || "" });
-}
-
-// ── Chart ─────────────────────────────────────────────────────────────────
-function fmtLabel(dateStr, granularity) {
-  const d = new Date(dateStr + "T12:00:00");
-  if (granularity === "month") return d.toLocaleString("en-GB", { month: "short", year: "2-digit" });
-  return d.toLocaleString("en-GB", { day: "numeric", month: "short" });
-}
-
-function renderChart(chartData, rangeLabel) {
-  const ctx = document.getElementById("main-chart");
-  if (!ctx || !chartData) return;
-
-  const isDark    = document.documentElement.dataset.theme === "dark";
-  const tickColor = isDark ? "#636863" : "#9a9a92";
-  const gran      = chartData.granularity || "day";
-  const buckets   = chartData.buckets || [];
-  const labels    = buckets.map(b => fmtLabel(b.date, gran));
-
-  const title = document.getElementById("chart-title");
-  if (title) title.textContent = "Revenue \u2014 " + (rangeLabel || "");
-
-  if (_revenueChart) { _revenueChart.destroy(); _revenueChart = null; }
-  _revenueChart = new Chart(ctx, {
+function renderChart() {
+  const buckets = dashboardData?.chart?.buckets || [];
+  document.getElementById("chart-title").textContent = chartTitle();
+  document.getElementById("chart-table").innerHTML = `
+    <tr><th>Date</th><th>POS</th><th>B2B</th><th>Refunds</th><th>Orders</th></tr>
+    ${buckets.map((bucket) => `<tr><td>${bucket.date}</td><td>${formatMoneyPrecise(bucket.pos)}</td><td>${formatMoneyPrecise(bucket.b2b)}</td><td>${formatMoneyPrecise(bucket.refunds)}</td><td>${bucket.orders}</td></tr>`).join("")}
+  `;
+  if (salesChart) salesChart.destroy();
+  salesChart = new Chart(document.getElementById("sales-chart"), {
     type: "bar",
     data: {
-      labels,
+      labels: chartLabels(buckets),
       datasets: [
-        { label: "POS",     data: buckets.map(b => b.pos),     backgroundColor: "rgba(31,122,77,.75)", stack: "r", order: 2 },
-        { label: "B2B",     data: buckets.map(b => b.b2b),     backgroundColor: "rgba(59,95,138,.70)", stack: "r", order: 2 },
-        { label: "Refunds", data: buckets.map(b => b.refunds), backgroundColor: "rgba(181,64,64,.55)", stack: "r", order: 2 },
+        { label: "POS", data: buckets.map((bucket) => bucket.pos), backgroundColor: getComputedStyle(document.documentElement).getPropertyValue("--accent").trim(), stack: "sales" },
+        { label: "B2B", data: buckets.map((bucket) => bucket.b2b), backgroundColor: "#3b5f8a", stack: "sales" },
+        { label: "Refunds", data: buckets.map((bucket) => bucket.refunds), backgroundColor: "#b54040", stack: "sales" },
       ],
     },
     options: {
-      responsive: true, maintainAspectRatio: false,
-      animation: { duration: _firstLoad ? 400 : 0 },
+      responsive: true,
+      maintainAspectRatio: false,
+      animation: false,
+      interaction: { mode: "index", intersect: false },
       plugins: {
-        legend: { display: false },
+        legend: { display: true, position: "top", align: "end" },
         tooltip: {
-          mode: "index", intersect: false,
           callbacks: {
-            title: items => items[0]?.label || "",
-            label: item => " " + item.dataset.label + ": " + fmt(item.raw),
-            afterBody: items => {
-              const b = buckets[items[0]?.dataIndex];
-              return b ? ["Orders: " + (b.orders || 0)] : [];
+            afterBody(items) {
+              const bucket = buckets[items[0]?.dataIndex || 0];
+              return [`Transactions: ${bucket?.orders || 0}`];
             },
           },
         },
       },
       scales: {
-        x: { stacked: true, grid: { display: false }, ticks: { color: tickColor, maxTicksLimit: 12, font: { size: 11 } } },
-        y: { stacked: true, grid: { display: false }, ticks: { display: false } },
+        x: { stacked: true, grid: { display: false } },
+        y: { stacked: true, grid: { display: false }, ticks: { display: false }, border: { display: false } },
       },
-      onClick: (_e, elements) => {
+      onClick(_event, elements) {
         if (!elements.length) return;
-        const b = buckets[elements[0].index];
-        if (b) { openDrawer(); setTimeout(() => askAssistant("show me sales on " + b.date), 60); }
+        const bucket = buckets[elements[0].index];
+        if (!bucket) return;
+        submitAssistantQuestion(`show me sales on ${bucket.date}`);
       },
     },
   });
-
-  // Custom inline legend
-  const legendEl = document.getElementById("chart-legend");
-  if (legendEl) {
-    legendEl.innerHTML = [
-      { color: "rgba(31,122,77,.75)", label: "POS" },
-      { color: "rgba(59,95,138,.70)", label: "B2B" },
-      { color: "rgba(181,64,64,.55)", label: "Refunds" },
-    ].map(s =>
-      `<span class="legend-item"><span class="legend-dot" style="background:${s.color}"></span>${s.label}</span>`
-    ).join("");
-  }
-
-  // SR fallback table
-  const tbl = document.getElementById("chart-table");
-  if (tbl) {
-    tbl.innerHTML = "<tr><th>Date</th><th>POS</th><th>B2B</th><th>Refunds</th><th>Orders</th></tr>"
-      + buckets.map(b =>
-        `<tr><td>${b.date}</td><td>${fmt(b.pos)}</td><td>${fmt(b.b2b)}</td><td>${fmt(b.refunds)}</td><td>${b.orders}</td></tr>`
-      ).join("");
-  }
 }
 
-// ── Top Products panel ────────────────────────────────────────────────────
-let _topData = { by_revenue: [], by_qty: [] };
-
-function renderTopProductsPanel(topProducts) {
-  if (!topProducts) return;
-  _topData = {
-    by_revenue: topProducts.by_revenue || [],
-    by_qty:     topProducts.by_qty     || [],
-  };
-  _renderTopList();
+function topProductsTitle() {
+  const label = dashboardData?.range?.label || "This period";
+  return `Best-sellers ${label.toLowerCase()}`;
 }
 
-function _renderTopList() {
-  const data = _topTab === "rev" ? _topData.by_revenue : _topData.by_qty;
-  const container = document.getElementById("top-products-body");
-  if (!container) return;
-
-  if (!data.length) {
-    container.innerHTML = `<div class="panel-empty">No sales data for this period.</div>`;
+function renderTopProducts() {
+  document.getElementById("top-products-title").textContent = topProductsTitle();
+  const key = topProductsTab === "revenue" ? "top_products_by_revenue" : "top_products_by_qty";
+  const products = dashboardData?.panels?.[key] || [];
+  const maxValue = Math.max(...products.map((product) => topProductsTab === "revenue" ? Number(product.revenue || 0) : Number(product.qty || 0)), 1);
+  const container = document.getElementById("top-products-list");
+  if (!products.length) {
+    container.innerHTML = `<div class="empty-state">No products sold in this range.</div>`;
     return;
   }
-
-  const maxVal = _topTab === "rev" ? (data[0]?.revenue || 1) : (data[0]?.qty || 1);
-  container.innerHTML = `<div class="product-list">${data.slice(0, 8).map(r => {
-    const val     = _topTab === "rev" ? (r.revenue || 0) : (r.qty || 0);
-    const display = _topTab === "rev" ? fmt(r.revenue) : fmtNum(r.qty);
-    const pct     = maxVal > 0 ? Math.min(val / maxVal * 100, 100) : 0;
-    const safeName = escHtml(r.name || "");
-    return `<div class="product-row" onclick="askAssistant('show product details for ${safeName}')"
-        tabindex="0" role="button" aria-label="${safeName}: ${escHtml(display)}"
-        onkeydown="if(event.key==='Enter'||event.key===' ')this.click()">
-      <div class="product-info">
-        <div class="product-name" title="${safeName}">${escHtml(truncate(r.name || "", 40))}</div>
-        <div class="product-bar"><div class="product-bar-fill" style="width:${pct.toFixed(1)}%"></div></div>
-      </div>
-      <div class="product-value">${escHtml(display)}</div>
-    </div>`;
-  }).join("")}</div>`;
-}
-
-document.querySelectorAll(".tab-btn[data-tab]").forEach(btn => {
-  btn.addEventListener("click", () => {
-    document.querySelectorAll(".tab-btn[data-tab]").forEach(b => b.classList.remove("active"));
-    btn.classList.add("active");
-    _topTab = btn.dataset.tab;
-    _renderTopList();
-  });
-});
-
-// ── Needs Attention panel ─────────────────────────────────────────────────
-function renderNeedsAttention(cards) {
-  _allInsights      = cards || [];
-  _insightsExpanded = false;
-  _renderAttention();
-}
-
-function _renderAttention() {
-  const container = document.getElementById("needs-attention-body");
-  if (!container) return;
-
-  if (!_allInsights.length) {
-    container.innerHTML = `<div class="panel-empty">Everything looks healthy.</div>`;
-    return;
-  }
-
-  const shown = _insightsExpanded ? _allInsights : _allInsights.slice(0, 5);
-  const extra = _allInsights.length - 5;
-
-  container.innerHTML = shown.map(c => {
-    const text   = c.text || "";
-    const parts  = text.split("**");
-    const title  = parts.length >= 2 ? parts[1] : parts[0];
-    const rest   = parts.length >= 3 ? parts.slice(2).join("").replace(/^\s*[-\u2014]\s*/, "").trim() : "";
-    const link   = c.action_url
-      ? `<a class="attention-link" href="${escHtml(c.action_url)}">View \u2192</a>`
-      : "";
-    return `<div class="attention-item">
-      <span class="attention-icon" aria-hidden="true">\u26a0</span>
-      <div class="attention-content">
-        <div class="attention-title">${escHtml(title)}</div>
-        ${rest ? `<div class="attention-desc">${escHtml(rest)}</div>` : ""}
-        ${link}
-      </div>
-    </div>`;
-  }).join("") + (!_insightsExpanded && extra > 0
-    ? `<button class="attention-more" onclick="_insightsExpanded=true;_renderAttention()">+${extra} more</button>`
-    : "");
-}
-
-// ── Recent Activity ───────────────────────────────────────────────────────
-function renderRecentActivity(items) {
-  const tbody = document.getElementById("recent-activity");
-  if (!tbody) return;
-
-  if (!items?.length) {
-    tbody.innerHTML = `<tr class="empty-row"><td colspan="5">No activity in this period.</td></tr>`;
-    return;
-  }
-
-  tbody.innerHTML = items.slice(0, 10).map(r => {
-    const isRef = r.type === "refund";
-    const tc    = isRef ? "td-neg" : "td-pos";
-    const val   = isRef ? "\u2212" + fmt(Math.abs(r.total)) : fmt(r.total);
-    const ref   = escHtml(r.ref || r.invoice_number || "\u2014");
-    const tag   = isRef ? `<span class="refund-tag">REFUND</span>` : "";
-    const time  = relativeTime(r.at);
-    return `<tr>
-      <td class="td-mono td-bold">${ref}${tag}</td>
-      <td>${escHtml(r.customer || "\u2014")}</td>
-      <td class="${tc}">${val}</td>
-      <td class="text-muted">${escHtml(r.method || "\u2014")}</td>
-      <td class="text-muted">${time}</td>
-    </tr>`;
+  container.innerHTML = products.map((product) => {
+    const value = topProductsTab === "revenue" ? Number(product.revenue || 0) : Number(product.qty || 0);
+    const label = topProductsTab === "revenue" ? formatMoney(value) : `${formatNumber(value)} units`;
+    const width = Math.max(8, Math.round((value / maxValue) * 100));
+    return `
+      <button type="button" class="list-row top-product-row" data-name="${escHtml(product.name)}">
+        <div class="row-main">
+          <span class="row-title">${escHtml(product.name)}</span>
+          <span class="row-value">${escHtml(label)}</span>
+        </div>
+        <span class="row-bar"><span style="width:${width}%"></span></span>
+      </button>
+    `;
   }).join("");
-}
-
-// ── Insights fetch ────────────────────────────────────────────────────────
-async function loadInsights() {
-  try {
-    const r = await fetch("/dashboard/insights");
-    if (!r.ok) { renderNeedsAttention([]); return; }
-    const data = await r.json();
-    renderNeedsAttention(data.cards || []);
-    renderChips(data.suggested_chips || []);
-  } catch {
-    renderNeedsAttention([]);
-  }
-}
-
-function renderChips(chips) {
-  const el = document.getElementById("preset-chips");
-  if (!el || !chips.length) return;
-  el.innerHTML = chips.map(c =>
-    `<button class="preset-chip" onclick="askAssistant(${JSON.stringify(c)})">${escHtml(c)}</button>`
-  ).join("");
-}
-
-// ── Main load ─────────────────────────────────────────────────────────────
-async function loadDashboard() {
-  let url = `/dashboard/summary?range=${_currentRange}`;
-  if (_currentRange === "custom" && _customStart && _customEnd) {
-    url += `&start=${_customStart}&end=${_customEnd}`;
-  }
-
-  let res;
-  try {
-    res = await fetch(url, { credentials: "same-origin" });
-  } catch (err) {
-    showLoadError("Can't reach server", "Check your connection and try again.", err);
-    return;
-  }
-
-  if (res.status === 401) {
-    window.location.href = "/?next=" + encodeURIComponent(location.pathname);
-    return;
-  }
-  if (!res.ok) {
-    const body = await res.text().catch(() => "");
-    let d = null; try { d = JSON.parse(body); } catch {}
-    const msg = d?.detail?.message || (typeof d?.detail === "string" ? d.detail : null)
-      || body.slice(0, 300) || "Unknown server error";
-    showLoadError(`Server error (HTTP ${res.status})`, msg, null);
-    return;
-  }
-
-  let data;
-  try { data = await res.json(); }
-  catch (err) { showLoadError("Bad server response", "Response wasn't valid JSON.", err); return; }
-
-  try {
-    clearPartialErrorBanner();
-    _heroType = data.hero_type || "admin";
-    const hero = data.hero || {};
-    if      (_heroType === "cashier")      renderHeroCashier(hero);
-    else if (_heroType === "farm_manager") renderHeroFarm(hero);
-    else                                   renderHeroAdmin(hero);
-
-    renderChart(data.chart || {}, data.range?.label);
-    renderTopProductsPanel(data.panels?.top_products || {});
-    renderRecentActivity(data.panels?.recent_activity || []);
-
-    _lastData  = data;
-    _firstLoad = false;
-    markUpdated();
-    document.getElementById("loading")?.remove();
-
-    if (data._errors?.length) renderPartialErrorBanner(data._errors);
-  } catch (err) {
-    showLoadError("Render error", "Data loaded but couldn't be displayed: " + err.message, err);
-  }
-}
-
-// ── Error helpers ─────────────────────────────────────────────────────────
-function showLoadError(title, detail, err) {
-  if (err) console.error("[dashboard]", title, err);
-  const el = document.getElementById("loading");
-  if (!el) return;
-  el.innerHTML = `
-    <div style="max-width:520px;margin:80px auto;padding:24px;border:1px solid rgba(181,64,64,.3);border-radius:14px;background:rgba(181,64,64,.04)">
-      <div style="color:var(--negative);font-weight:600;font-size:15px;margin-bottom:8px">\u26a0 ${escHtml(title)}</div>
-      <div style="color:var(--text-sub);font-size:13px;line-height:1.6;margin-bottom:16px">${escHtml(detail)}</div>
-      <div style="display:flex;gap:10px;flex-wrap:wrap">
-        <button onclick="loadDashboard()" style="background:var(--accent);color:#fff;border:none;padding:9px 18px;border-radius:var(--radius);font-weight:600;cursor:pointer;font-size:13px">Retry</button>
-        <a href="/home" style="color:var(--text-sub);padding:9px 16px;border:1px solid var(--border);border-radius:var(--radius);text-decoration:none;font-size:13px">Back to home</a>
-      </div>
-    </div>`;
-}
-
-function renderPartialErrorBanner(errors) {
-  clearPartialErrorBanner();
-  const sections = errors.map(e => e.section).join(", ");
-  const banner = document.createElement("div");
-  banner.className = "partial-error-banner";
-  Object.assign(banner.style, {
-    background: "rgba(166,116,24,.08)", border: "1px solid rgba(166,116,24,.3)",
-    color: "var(--warning)", padding: "10px 16px", borderRadius: "var(--radius)",
-    marginBottom: "4px", fontSize: "13px",
+  container.querySelectorAll(".top-product-row").forEach((button) => {
+    button.addEventListener("click", () => submitAssistantQuestion(`show me details for ${button.dataset.name}`));
   });
-  banner.textContent = `\u26a0 Some sections couldn't load: ${sections}. Shown data may be partial.`;
-  document.querySelector(".content")?.prepend(banner);
-}
-function clearPartialErrorBanner() {
-  document.querySelector(".partial-error-banner")?.remove();
 }
 
-// ── Assistant drawer ──────────────────────────────────────────────────────
-function openDrawer() {
-  _drawerOpen = true;
-  document.getElementById("assistant-drawer").classList.add("open");
-  document.cookie = "drawer_open=1;path=/;max-age=86400";
-}
-function closeDrawer() {
-  _drawerOpen = false;
-  document.getElementById("assistant-drawer").classList.remove("open");
-  document.cookie = "drawer_open=0;path=/;max-age=86400";
-}
-function askAssistant(question) {
-  openDrawer();
-  document.getElementById("chat-input").value = question;
-  sendChat(question);
-}
-async function sendChat(questionOverride) {
-  const input = document.getElementById("chat-input");
-  const q     = questionOverride || input.value.trim();
-  if (!q) return;
-  input.value = "";
-  appendChatMsg("user", q);
-  const typing = appendChatMsg("assistant", "\u2026");
-  try {
-    const r = await fetch("/dashboard/assistant", {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ question: q }),
+function renderRecentActivity() {
+  const rows = (dashboardData?.panels?.recent_activity || []).filter((item) => activityFilter === "all" ? true : item.type === activityFilter);
+  const tbody = document.getElementById("recent-activity");
+  if (!rows.length) {
+    tbody.innerHTML = `<tr><td colspan="4" class="empty-cell">No activity in this range.</td></tr>`;
+    return;
+  }
+  tbody.innerHTML = rows.map((item) => `
+    <tr data-link="${escHtml(item.link || "#")}">
+      <td class="mono">${escHtml(item.invoice_number || "-")}</td>
+      <td>${escHtml(item.customer || "-")}</td>
+      <td class="${item.type === "refund" ? "negative" : "positive"}">${escHtml(item.type === "refund" ? `−${formatMoney(Math.abs(item.total || 0))}` : formatMoney(item.total || 0))}</td>
+      <td>${escHtml(item.time_relative || "-")}</td>
+    </tr>
+  `).join("");
+  tbody.querySelectorAll("tr[data-link]").forEach((row) => {
+    row.addEventListener("click", () => {
+      const link = row.dataset.link;
+      if (link && link !== "#") window.location.assign(link);
     });
-    const raw = await r.text();
-    let data = null; try { data = raw ? JSON.parse(raw) : null; } catch {}
-    if (!r.ok) { typing.textContent = data?.message || `Request failed (HTTP ${r.status}).`; return; }
-    typing.textContent = data?.answer || data?.message || "I couldn't find a response for that.";
-  } catch {
-    typing.textContent = "Couldn't reach the assistant. Please try again.";
-  }
-}
-function appendChatMsg(role, text) {
-  const body = document.getElementById("chat-body");
-  const el   = document.createElement("div");
-  el.className   = "chat-msg " + role;
-  el.textContent = text;
-  body.appendChild(el);
-  body.scrollTop = body.scrollHeight;
-  return el;
-}
-
-// ── Auto-refresh ──────────────────────────────────────────────────────────
-function startAutoRefresh() {
-  _refreshTimer  = setInterval(() => { if (!document.hidden) loadDashboard(); }, 60_000);
-  _insightsTimer = setInterval(() => { if (!document.hidden) loadInsights();  }, 300_000);
-  document.addEventListener("visibilitychange", () => {
-    if (!document.hidden && _lastUpdated && Date.now() - _lastUpdated > 60_000) loadDashboard();
   });
 }
 
-// ── Init ──────────────────────────────────────────────────────────────────
+function assistantResultParts(response) {
+  const result = response?.result || {};
+  return {
+    message: result.message || response?.message || "No answer returned.",
+    highlights: result.highlights || response?.highlights || [],
+    table: result.table || response?.table || null,
+    suggestions: result.suggestions || response?.suggestions || [],
+  };
+}
+
+function renderHighlights(items) {
+  if (!items?.length) return "";
+  return `<div class="assistant-highlights">${items.map((item) => `
+    <div class="assistant-stat">
+      <span>${escHtml(item.label || "")}</span>
+      <strong>${escHtml(item.value || "")}</strong>
+    </div>
+  `).join("")}</div>`;
+}
+
+function renderTable(table) {
+  if (!table?.columns?.length || !table?.rows?.length) return "";
+  return `
+    <div class="assistant-table-wrap">
+      <table class="assistant-table">
+        <thead><tr>${table.columns.map((column) => `<th class="${column.align === "right" ? "right" : ""}">${escHtml(column.label)}</th>`).join("")}</tr></thead>
+        <tbody>${table.rows.map((row) => `<tr>${table.columns.map((column) => `<td class="${column.align === "right" ? "right" : ""}">${escHtml(row[column.key])}</td>`).join("")}</tr>`).join("")}</tbody>
+      </table>
+    </div>
+  `;
+}
+
+function renderSuggestionChips(items) {
+  if (!items?.length) return "";
+  return `<div class="assistant-followups">${items.map((item) => `<button type="button" class="chip-btn assistant-followup" data-question="${escHtml(item)}">${escHtml(item)}</button>`).join("")}</div>`;
+}
+
+function renderAssistantHistory() {
+  const container = document.getElementById("assistantHistory");
+  if (!assistantHistory.length) {
+    container.innerHTML = `<div class="assistant-placeholder">Your recent questions will appear here.</div>`;
+    return;
+  }
+  container.innerHTML = assistantHistory.map((entry, index) => {
+    if (entry.loading) {
+      return `
+        <article class="assistant-entry">
+          <div class="assistant-entry-head"><strong>${escHtml(entry.question)}</strong></div>
+          <div class="assistant-loading"><span></span><span></span><span></span></div>
+        </article>
+      `;
+    }
+    const parts = assistantResultParts(entry.response);
+    const unsupported = entry.response?.supported === false;
+    const fallback = unsupported ? `<p class="assistant-fallback">I'm not sure how to answer that yet. Try one of these:</p>` : "";
+    return `
+      <article class="assistant-entry" id="assistant-entry-${index}">
+        <div class="assistant-entry-head">
+          <button type="button" class="assistant-jump" data-question="${escHtml(entry.question)}">← jump to question</button>
+          <button type="button" class="assistant-copy" data-copy="${escHtml(parts.message)}">Copy</button>
+        </div>
+        <p class="assistant-question">${escHtml(entry.question)}</p>
+        <div class="assistant-answer">
+          <p class="assistant-message">${escHtml(parts.message)}</p>
+          ${fallback}
+          ${renderHighlights(parts.highlights)}
+          ${renderTable(parts.table)}
+          ${renderSuggestionChips(parts.suggestions)}
+        </div>
+      </article>
+    `;
+  }).join("");
+  container.querySelectorAll(".assistant-jump").forEach((button) => {
+    button.addEventListener("click", () => {
+      document.getElementById("assistantInput").value = button.dataset.question || "";
+      document.getElementById("assistantInput").focus();
+    });
+  });
+  container.querySelectorAll(".assistant-copy").forEach((button) => {
+    button.addEventListener("click", async () => {
+      try {
+        await navigator.clipboard.writeText(button.dataset.copy || "");
+        button.textContent = "Copied";
+        setTimeout(() => { button.textContent = "Copy"; }, 1000);
+      } catch {}
+    });
+  });
+  container.querySelectorAll(".assistant-followup").forEach((button) => {
+    button.addEventListener("click", () => submitAssistantQuestion(button.dataset.question || ""));
+  });
+}
+
+function pushAssistantEntry(question, response, loading = false) {
+  if (loading) {
+    assistantHistory.unshift({ question, loading: true, response: null });
+  } else if (assistantHistory.length && assistantHistory[0].loading && assistantHistory[0].question === question) {
+    assistantHistory[0] = { question, response, loading: false };
+  } else {
+    assistantHistory.unshift({ question, response, loading: false });
+  }
+  assistantHistory = assistantHistory.slice(0, 5);
+  renderAssistantHistory();
+}
+
+async function submitAssistantQuestion(question) {
+  const clean = String(question || "").trim();
+  if (!clean) return;
+  document.getElementById("assistantInput").value = clean;
+  pushAssistantEntry(clean, null, true);
+  clearTimeout(loadingTimer);
+  loadingTimer = setTimeout(renderAssistantHistory, 300);
+  try {
+    const response = await fetch("/dashboard/assistant", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ question: clean }),
+    });
+    const payload = await response.json();
+    pushAssistantEntry(clean, payload, false);
+  } catch {
+    pushAssistantEntry(clean, {
+      supported: false,
+      message: "I couldn't reach the assistant. Try again.",
+      suggestions: ASSISTANT_CHIPS.slice(0, 3),
+    }, false);
+  }
+}
+
+function renderAssistantChips() {
+  const container = document.getElementById("assistant-chips");
+  container.innerHTML = ASSISTANT_CHIPS.map((question) => `<button type="button" class="chip-btn" data-question="${escHtml(question)}">${escHtml(question)}</button>`).join("");
+  container.querySelectorAll(".chip-btn").forEach((button) => {
+    button.addEventListener("click", () => submitAssistantQuestion(button.dataset.question || ""));
+  });
+}
+
+function showErrorState(message) {
+  document.getElementById("loading").innerHTML = `<div class="load-error">${escHtml(message)}</div>`;
+}
+
+async function loadDashboard() {
+  let url = `/dashboard/summary?range=${currentRange}`;
+  if (currentRange === "custom" && customStart && customEnd) {
+    url += `&start=${customStart}&end=${customEnd}`;
+  }
+  try {
+    const response = await fetch(url, { credentials: "same-origin" });
+    if (!response.ok) throw new Error(`Dashboard request failed (${response.status})`);
+    dashboardData = await response.json();
+    document.getElementById("loading").style.display = "none";
+    renderBriefing();
+    renderNumbers();
+    renderChart();
+    renderTopProducts();
+    renderRecentActivity();
+    markUpdated();
+  } catch (error) {
+    showErrorState(error.message);
+  }
+}
+
+async function initUser() {
+  try {
+    const response = await fetch("/auth/me");
+    if (response.ok) currentUser = await response.json();
+  } catch {}
+  setGreeting();
+}
+
+function bindEvents() {
+  document.getElementById("mode-btn").addEventListener("click", toggleTheme);
+  document.querySelectorAll(".range-btn").forEach((button) => {
+    button.addEventListener("click", () => {
+      if (button.dataset.range === "custom") {
+        openCustomRangePicker();
+        return;
+      }
+      currentRange = button.dataset.range;
+      localStorage.setItem("dashboard:range", currentRange);
+      updateRangeButtons();
+      loadDashboard();
+    });
+  });
+  document.getElementById("range-modal-close").addEventListener("click", closeCustomRangePicker);
+  document.getElementById("range-cancel").addEventListener("click", closeCustomRangePicker);
+  document.getElementById("range-apply").addEventListener("click", applyCustomRange);
+  document.getElementById("custom-range-modal").addEventListener("click", (event) => {
+    if (event.target.id === "custom-range-modal") closeCustomRangePicker();
+  });
+  document.getElementById("assistantSend").addEventListener("click", () => submitAssistantQuestion(document.getElementById("assistantInput").value));
+  document.getElementById("assistantInput").addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      submitAssistantQuestion(document.getElementById("assistantInput").value);
+    }
+  });
+  document.getElementById("assistant-clear").addEventListener("click", () => {
+    assistantHistory = [];
+    renderAssistantHistory();
+  });
+  document.querySelectorAll("[data-top-tab]").forEach((button) => {
+    button.addEventListener("click", () => {
+      topProductsTab = button.dataset.topTab;
+      document.querySelectorAll("[data-top-tab]").forEach((item) => item.classList.toggle("active", item === button));
+      renderTopProducts();
+    });
+  });
+  document.querySelectorAll("[data-activity-filter]").forEach((button) => {
+    button.addEventListener("click", () => {
+      activityFilter = button.dataset.activityFilter;
+      document.querySelectorAll("[data-activity-filter]").forEach((item) => item.classList.toggle("active", item === button));
+      renderRecentActivity();
+    });
+  });
+}
+
+function startAutoRefresh() {
+  refreshTimer = setInterval(() => {
+    if (!document.hidden) loadDashboard();
+  }, 60000);
+}
+
 async function initDashboard() {
   initTheme();
-
-  if (document.cookie.includes("drawer_open=1")) openDrawer();
-
-  document.getElementById("custom-range-modal")?.addEventListener("click", e => {
-    if (e.target?.id === "custom-range-modal") closeCustomRangePicker();
-  });
-  document.addEventListener("keydown", e => {
-    if (e.key === "Escape") closeCustomRangePicker();
-  });
-
-  updateDateDisplay();
-  updateRangePickerActive();
-
+  updateRangeButtons();
+  renderAssistantChips();
+  renderAssistantHistory();
+  bindEvents();
   await initUser();
-  updateRangePickerActive();
-
-  await Promise.all([loadDashboard(), loadInsights()]);
-
+  await loadDashboard();
   startAutoRefresh();
-
-  document.getElementById("chat-send")?.addEventListener("click", () => sendChat());
-  document.getElementById("chat-input")?.addEventListener("keydown", e => {
-    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendChat(); }
-  });
 }
 
 window.addEventListener("load", initDashboard);

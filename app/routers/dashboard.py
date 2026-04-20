@@ -473,153 +473,118 @@ def dashboard_ui():
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Dashboard \u2014 Thunder ERP</title>
+<title>Dashboard — Thunder ERP</title>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="/static/dashboard.css">
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
 <script src="/static/auth-guard.js"></script>
 </head>
 <body>
-
 <div id="loading"><div class="spinner"></div></div>
-
-<nav>
+<nav class="top-nav" aria-label="Primary">
   <a href="/home" class="logo">Thunder ERP</a>
-  <a href="/dashboard"  class="nav-link active">Dashboard</a>
-  <a href="/pos"        class="nav-link">POS</a>
-  <a href="/b2b/"       class="nav-link">B2B</a>
-  <a href="/reports/"   class="nav-link">Reports</a>
-  <a href="/inventory/" class="nav-link">Inventory</a>
-  <span class="nav-spacer"></span>
-  <button class="mode-btn" id="mode-btn" onclick="toggleMode()" aria-label="Toggle color mode">&#9728;</button>
-  <div class="account-menu">
-    <div class="user-pill" onclick="toggleAccountMenu(event)">
-      <div class="user-avatar" id="user-avatar">A</div>
-      <span class="user-name" id="user-name">Admin</span>
-    </div>
-    <div class="account-dropdown" id="account-dropdown">
-      <a href="/users/password" class="account-item">Security Settings</a>
-      <a href="#" class="account-item" onclick="logout()">Sign Out</a>
-    </div>
+  <div class="nav-links">
+    <a href="/dashboard" class="nav-link active">Dashboard</a>
+    <a href="/pos" class="nav-link">POS</a>
+    <a href="/b2b/" class="nav-link">B2B</a>
+    <a href="/reports/" class="nav-link">Reports</a>
+    <a href="/inventory/" class="nav-link">Inventory</a>
+  </div>
+  <div class="nav-actions">
+    <button class="mode-btn" id="mode-btn" type="button" aria-label="Toggle color mode">&#9728;</button>
+    <a href="/users/password" class="nav-link">Security</a>
   </div>
 </nav>
-
-<div class="content">
-
-  <!-- 1. Header -->
-  <header class="page-header">
-    <div class="header-left">
+<main class="page-shell">
+  <header class="header-strip">
+    <div>
       <h1 class="greeting" id="greeting">Good morning</h1>
       <p class="date-display" id="date-display"></p>
     </div>
-    <div class="header-right">
-      <div class="range-picker" role="group" aria-label="Date range">
-        <button class="range-btn" data-range="today">Today</button>
-        <button class="range-btn" data-range="7d">7d</button>
-        <button class="range-btn" data-range="30d">30d</button>
-        <button class="range-btn active" data-range="mtd">This month</button>
-        <button class="range-btn" data-range="year">This year</button>
-        <button class="range-btn" data-range="custom">Custom&#9662;</button>
+    <div class="header-controls">
+      <div class="range-picker" role="group" aria-label="Choose date range">
+        <button type="button" class="range-btn" data-range="today">Today</button>
+        <button type="button" class="range-btn" data-range="7d">7d</button>
+        <button type="button" class="range-btn" data-range="30d">30d</button>
+        <button type="button" class="range-btn" data-range="mtd">Month</button>
+        <button type="button" class="range-btn" data-range="year">Year</button>
+        <button type="button" class="range-btn" data-range="custom">Custom</button>
       </div>
-      <span class="last-updated-pill" id="last-updated">Loading&#8230;</span>
+      <span class="updated-pill" id="last-updated">Updated just now</span>
     </div>
   </header>
 
-  <!-- 2. Hero row -->
-  <section class="hero-row" aria-label="Key metrics">
-    <article class="hero-card" id="hero-0" role="region" aria-live="polite">
-      <span class="hero-label">&#8212;</span>
-      <div class="hero-value" id="hero-0-value">&#8212;</div>
-      <span class="hero-chip chip-flat" id="hero-0-chip">&#8212;</span>
-      <span class="hero-subtitle" id="hero-0-sub"></span>
-      <div class="hero-sparkline"><canvas id="spark-0" aria-hidden="true"></canvas></div>
-    </article>
-    <article class="hero-card" id="hero-1" role="region" aria-live="polite">
-      <span class="hero-label">&#8212;</span>
-      <div class="hero-value" id="hero-1-value">&#8212;</div>
-      <span class="hero-chip chip-flat" id="hero-1-chip">&#8212;</span>
-      <span class="hero-subtitle" id="hero-1-sub"></span>
-      <div class="hero-sparkline"><canvas id="spark-1" aria-hidden="true"></canvas></div>
-    </article>
-    <article class="hero-card" id="hero-2" role="region" aria-live="polite">
-      <span class="hero-label">&#8212;</span>
-      <div class="hero-value" id="hero-2-value">&#8212;</div>
-      <span class="hero-chip chip-flat" id="hero-2-chip">&#8212;</span>
-      <span class="hero-subtitle" id="hero-2-sub"></span>
-      <div class="hero-sparkline"><canvas id="spark-2" aria-hidden="true"></canvas></div>
-    </article>
-    <article class="hero-card" id="hero-3" role="region" aria-live="polite">
-      <span class="hero-label">&#8212;</span>
-      <div class="hero-value" id="hero-3-value">&#8212;</div>
-      <span class="hero-chip chip-flat" id="hero-3-chip">&#8212;</span>
-      <span class="hero-subtitle" id="hero-3-sub"></span>
-      <div class="hero-sparkline"><canvas id="spark-3" aria-hidden="true"></canvas></div>
-    </article>
+  <article class="card briefing-card" aria-label="Today's briefing">
+    <p class="briefing-lead" id="briefing-lead">Loading today's briefing…</p>
+    <p class="briefing-body" id="briefing-body"></p>
+    <div class="briefing-actions" id="briefing-actions"></div>
+  </article>
+
+  <section class="numbers-grid" aria-label="Key numbers">
+    <article class="card number-card" data-card="sales" aria-live="polite"></article>
+    <article class="card number-card" data-card="clients_owe" aria-live="polite"></article>
+    <article class="card number-card" data-card="spent" aria-live="polite"></article>
+    <article class="card number-card" data-card="stock_alerts" aria-live="polite"></article>
   </section>
 
-  <!-- 3. Primary chart -->
-  <section class="chart-panel" role="region" aria-label="Revenue chart">
-    <div class="panel-header">
-      <span class="panel-title" id="chart-title">Revenue</span>
-      <div class="chart-legend" id="chart-legend"></div>
+  <section class="card assistant-card" aria-label="Ask your data">
+    <div class="assistant-header">
+      <div>
+        <h2>Ask about your business</h2>
+        <p>Click a question or type your own</p>
+      </div>
+      <button type="button" class="assistant-clear" id="assistant-clear">Clear</button>
     </div>
-    <div class="chart-wrap">
-      <canvas id="main-chart" aria-label="Revenue trend chart"></canvas>
+    <div class="assistant-chips" id="assistant-chips"></div>
+    <div class="assistant-input-row">
+      <input type="text" id="assistantInput" placeholder="Or type a question in your own words…" autocomplete="off">
+      <button type="button" id="assistantSend">Ask</button>
     </div>
-    <table class="sr-only" id="chart-table" aria-label="Revenue data table"></table>
+    <div class="assistant-history" id="assistantHistory"></div>
   </section>
 
-  <!-- 4. Two-column row -->
-  <div class="two-col-row">
+  <section class="card chart-card" aria-label="Sales over time">
+    <div class="panel-head"><h2 id="chart-title">Sales over time</h2></div>
+    <div class="chart-wrap"><canvas id="sales-chart" aria-label="Sales over time chart"></canvas></div>
+    <table class="sr-only" id="chart-table" aria-label="Sales over time table"></table>
+  </section>
 
-    <section class="panel" role="region" aria-label="Top products">
-      <div class="panel-header">
-        <span class="panel-title" id="top-products-title">Top Products</span>
-        <div class="tab-bar">
-          <button class="tab-btn active" data-tab="rev">By revenue</button>
-          <button class="tab-btn" data-tab="qty">By qty</button>
+  <div class="panel-grid">
+    <section class="card panel-card" aria-label="Best sellers">
+      <div class="panel-head">
+        <h2 id="top-products-title">Best-sellers</h2>
+        <div class="panel-tabs" role="tablist" aria-label="Best seller mode">
+          <button type="button" class="tab-btn active" data-top-tab="revenue">By revenue</button>
+          <button type="button" class="tab-btn" data-top-tab="qty">By quantity</button>
         </div>
       </div>
-      <div id="top-products-body" class="panel-body"></div>
+      <div id="top-products-list" class="panel-body"></div>
     </section>
 
-    <section class="panel" role="region" aria-label="Needs attention">
-      <div class="panel-header">
-        <span class="panel-title">Needs Attention</span>
+    <section class="card panel-card" aria-label="Recent transactions">
+      <div class="panel-head">
+        <h2>Recent transactions</h2>
+        <div class="panel-tabs" role="tablist" aria-label="Recent activity filter">
+          <button type="button" class="tab-btn active" data-activity-filter="all">All</button>
+          <button type="button" class="tab-btn" data-activity-filter="sale">Sales</button>
+          <button type="button" class="tab-btn" data-activity-filter="refund">Refunds</button>
+        </div>
       </div>
-      <div id="needs-attention-body" class="panel-body">
-        <div class="skeleton" style="height:60px;margin:12px 20px"></div>
-        <div class="skeleton" style="height:60px;margin:8px 20px"></div>
-        <div class="skeleton" style="height:60px;margin:8px 20px 12px"></div>
+      <div class="panel-body">
+        <table class="activity-table">
+          <thead><tr><th>Invoice</th><th>Customer</th><th>Amount</th><th>Time</th></tr></thead>
+          <tbody id="recent-activity"></tbody>
+        </table>
       </div>
     </section>
-
   </div>
-
-  <!-- 5. Recent Activity -->
-  <section class="panel" role="region" aria-label="Recent activity">
-    <div class="panel-header">
-      <span class="panel-title">Recent Activity</span>
-    </div>
-    <div class="panel-body">
-      <table>
-        <thead>
-          <tr>
-            <th>Invoice</th><th>Customer</th><th>Total</th><th>Method</th><th>Time</th>
-          </tr>
-        </thead>
-        <tbody id="recent-activity"></tbody>
-      </table>
-    </div>
-  </section>
-
-</div>
+</main>
 
 <div id="custom-range-modal" class="range-modal hidden" role="dialog" aria-modal="true" aria-labelledby="crm-title">
   <div class="range-modal-card">
     <div class="range-modal-header">
       <h3 id="crm-title">Custom Range</h3>
-      <button type="button" class="range-modal-close" onclick="closeCustomRangePicker()" aria-label="Close">&#215;</button>
+      <button type="button" class="range-modal-close" id="range-modal-close" aria-label="Close">&#215;</button>
     </div>
     <div class="range-modal-body">
       <label class="range-field"><span>Start date</span><input id="custom-range-start" type="date"></label>
@@ -627,31 +592,11 @@ def dashboard_ui():
       <p id="custom-range-error" class="range-error" hidden></p>
     </div>
     <div class="range-modal-actions">
-      <button type="button" class="range-secondary-btn" onclick="closeCustomRangePicker()">Cancel</button>
-      <button type="button" class="range-primary-btn" onclick="applyCustomRange()">Apply</button>
+      <button type="button" class="range-secondary-btn" id="range-cancel">Cancel</button>
+      <button type="button" class="range-primary-btn" id="range-apply">Apply</button>
     </div>
   </div>
 </div>
-
-<aside id="assistant-drawer" aria-label="AI Assistant" role="complementary">
-  <div class="drawer-header">
-    <span class="drawer-title">AI Assistant</span>
-    <button class="drawer-close" onclick="closeDrawer()" aria-label="Close assistant">&#10005;</button>
-  </div>
-  <div class="drawer-body" id="chat-body">
-    <div class="preset-chips" id="preset-chips"></div>
-  </div>
-  <div class="drawer-footer">
-    <div class="chat-input-wrap">
-      <input class="chat-input" id="chat-input" type="text"
-             placeholder="Ask anything about your business&#8230;" autocomplete="off">
-      <button class="chat-send" id="chat-send" aria-label="Send">&#8594;</button>
-    </div>
-  </div>
-</aside>
-
-<button class="fab" onclick="openDrawer()" aria-label="Open AI assistant">&#128172;</button>
-
 <script src="/static/dashboard.js"></script>
 </body>
 </html>"""

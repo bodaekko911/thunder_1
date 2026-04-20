@@ -1,7 +1,14 @@
 """
 Range-based aggregations for GET /dashboard/summary.
-All "today" / range boundaries are computed in APP_TIMEZONE (default Africa/Cairo).
-Queries use UTC datetimes converted from local midnight boundaries.
+
+The summary payload is intentionally shaped for the dashboard UI:
+- one briefing block
+- four plain-language numbers
+- one chart payload
+- two panel payloads
+
+Each major section is isolated so a single failed query does not break the whole
+response.
 """
 from __future__ import annotations
 
@@ -9,19 +16,20 @@ from datetime import date, datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import func, select, true as sa_true
+from sqlalchemy import case, cast, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.sql.sqltypes import Date as SQLDate
 
 from app.core.config import settings
-from app.models.accounting import Account, Journal, JournalEntry
-from app.models.b2b import B2BClient, B2BInvoice
+from app.core.permissions import has_permission
+from app.core.time_utils import now_local
+from app.models.b2b import B2BInvoice
 from app.models.customer import Customer
+from app.models.expense import Expense
 from app.models.invoice import Invoice, InvoiceItem
 from app.models.product import Product
 from app.models.refund import RetailRefund
 from app.models.user import User
-
-_B2B_REF_TYPES = ("b2b", "b2b_invoice", "consignment_payment", "consignment")
 
 
 def _tz() -> ZoneInfo:
@@ -32,12 +40,43 @@ def _utc_range(local_start: date, local_end: date) -> tuple[datetime, datetime]:
     tz = _tz()
     utc = ZoneInfo("UTC")
     start = datetime(local_start.year, local_start.month, local_start.day, 0, 0, 0, tzinfo=tz).astimezone(utc)
-    end   = datetime(local_end.year,   local_end.month,   local_end.day,   23, 59, 59, 999999, tzinfo=tz).astimezone(utc)
+    end = datetime(local_end.year, local_end.month, local_end.day, 23, 59, 59, 999999, tzinfo=tz).astimezone(utc)
     return start, end
 
 
-def _local_day_expr(column):
-    return func.date(func.timezone(settings.APP_TIMEZONE, column))
+def _local_bucket_expr(column, part: str = "day"):
+    localized = func.timezone(settings.APP_TIMEZONE, column)
+    return cast(func.date_trunc(part, localized), SQLDate)
+
+
+def _safe_float(value: Any) -> float:
+    try:
+        return float(value or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _safe_int(value: Any) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _period_label(range_param: str, rs: date, re: date) -> str:
+    if range_param == "today":
+        return "Today"
+    if range_param == "7d":
+        return "Last 7 days"
+    if range_param == "30d":
+        return "Last 30 days"
+    if range_param in {"mtd", "month"}:
+        return "This month"
+    if range_param in {"year", "ytd"}:
+        return "This year"
+    if range_param == "custom":
+        return f"{rs.isoformat()} to {re.isoformat()}"
+    return "Today"
 
 
 def resolve_range(
@@ -45,53 +84,62 @@ def resolve_range(
     custom_start: str | None = None,
     custom_end: str | None = None,
 ) -> dict[str, Any]:
-    today = datetime.now(_tz()).date()
+    today = now_local().date()
 
     if range_param == "7d":
-        rs, re, label = today - timedelta(days=6), today, "Last 7 days"
+        rs, re = today - timedelta(days=6), today
     elif range_param == "30d":
-        rs, re, label = today - timedelta(days=29), today, "Last 30 days"
-    elif range_param == "90d":
-        rs, re, label = today - timedelta(days=89), today, "Last 90 days"
-    elif range_param in ("year", "ytd"):
-        rs, re, label = today - timedelta(days=364), today, "Last 12 months"
-    elif range_param == "mtd":
-        rs, re, label = today.replace(day=1), today, "Month to date"
-    elif range_param == "qtd":
-        qm = ((today.month - 1) // 3) * 3 + 1
-        rs, re, label = today.replace(month=qm, day=1), today, "Quarter to date"
+        rs, re = today - timedelta(days=29), today
+    elif range_param in {"mtd", "month"}:
+        rs, re = today.replace(day=1), today
+    elif range_param in {"year", "ytd"}:
+        rs, re = today.replace(month=1, day=1), today
     elif range_param == "custom" and custom_start and custom_end:
-        rs = date.fromisoformat(custom_start)
-        re = date.fromisoformat(custom_end)
-        label = f"{rs} – {re}"
+        rs, re = date.fromisoformat(custom_start), date.fromisoformat(custom_end)
     else:
-        rs, re, label = today, today, "Today"
+        rs, re = today, today
 
+    label = _period_label(range_param, rs, re)
     num_days = (re - rs).days + 1
-    prior_end   = rs - timedelta(days=1)
-    prior_start = prior_end - timedelta(days=num_days - 1)
 
-    utc_s, utc_e         = _utc_range(rs, re)
-    p_utc_s, p_utc_e     = _utc_range(prior_start, prior_end)
+    if range_param == "7d":
+        prior_start = rs - timedelta(days=7)
+        prior_end = rs - timedelta(days=1)
+    elif range_param in {"mtd", "month"}:
+        prior_month_end = rs - timedelta(days=1)
+        prior_month_start = prior_month_end.replace(day=1)
+        span = (re - rs).days
+        prior_start = prior_month_start
+        prior_end = min(prior_month_end, prior_month_start + timedelta(days=span))
+    elif range_param in {"year", "ytd"}:
+        prior_start = rs.replace(year=rs.year - 1)
+        prior_end = re.replace(year=re.year - 1)
+    else:
+        prior_end = rs - timedelta(days=1)
+        prior_start = prior_end - timedelta(days=num_days - 1)
+
+    utc_s, utc_e = _utc_range(rs, re)
+    prior_utc_s, prior_utc_e = _utc_range(prior_start, prior_end)
 
     return {
-        "label":         label,
-        "start":         str(rs),
-        "end":           str(re),
-        "prior_start":   str(prior_start),
-        "prior_end":     str(prior_end),
-        "utc_start":     utc_s,
-        "utc_end":       utc_e,
-        "prior_utc_start": p_utc_s,
-        "prior_utc_end":   p_utc_e,
-        "num_days":      num_days,
+        "key": range_param,
+        "label": label,
+        "start": rs.isoformat(),
+        "end": re.isoformat(),
+        "days": num_days,
+        "prior_start": prior_start.isoformat(),
+        "prior_end": prior_end.isoformat(),
+        "utc_start": utc_s,
+        "utc_end": utc_e,
+        "prior_utc_start": prior_utc_s,
+        "prior_utc_end": prior_utc_e,
     }
 
 
-# ── chart granularity helpers ──────────────────────────────────────────────
-
-def _pick_granularity(rng: dict) -> str:
-    days = rng["num_days"]
+def _pick_granularity(rng: dict[str, Any]) -> str:
+    if rng.get("key") in {"year", "ytd"}:
+        return "month"
+    days = rng["days"]
     if days <= 31:
         return "day"
     if days <= 180:
@@ -99,665 +147,397 @@ def _pick_granularity(rng: dict) -> str:
     return "month"
 
 
-def _aggregate_buckets(daily: list[dict], granularity: str) -> list[dict]:
+def _aggregate_buckets(daily: list[dict[str, Any]], granularity: str) -> list[dict[str, Any]]:
     if granularity == "day":
         return daily
-    groups: dict[str, dict] = {}
-    for b in daily:
-        d = date.fromisoformat(b["date"])
+
+    groups: dict[str, dict[str, Any]] = {}
+    for bucket in daily:
+        bucket_date = date.fromisoformat(bucket["date"])
         if granularity == "week":
-            key = str(d - timedelta(days=d.weekday()))  # Monday of the ISO week
+            group_key = (bucket_date - timedelta(days=bucket_date.weekday())).isoformat()
         else:
-            key = f"{d.year}-{d.month:02d}-01"
-        if key not in groups:
-            groups[key] = {"date": key, "pos": 0.0, "b2b": 0.0, "refunds": 0.0, "orders": 0}
-        g = groups[key]
-        g["pos"]     = round(g["pos"]     + b["pos"],     2)
-        g["b2b"]     = round(g["b2b"]     + b["b2b"],     2)
-        g["refunds"] = round(g["refunds"] + b["refunds"], 2)
-        g["orders"]  += b["orders"]
+            group_key = f"{bucket_date.year}-{bucket_date.month:02d}-01"
+
+        if group_key not in groups:
+            groups[group_key] = {"date": group_key, "pos": 0.0, "b2b": 0.0, "refunds": 0.0, "orders": 0}
+
+        row = groups[group_key]
+        row["pos"] = round(row["pos"] + _safe_float(bucket["pos"]), 2)
+        row["b2b"] = round(row["b2b"] + _safe_float(bucket["b2b"]), 2)
+        row["refunds"] = round(row["refunds"] + _safe_float(bucket["refunds"]), 2)
+        row["orders"] += _safe_int(bucket["orders"])
+
     return list(groups.values())
 
 
-# ── helpers ────────────────────────────────────────────────────────────────
-
-def _delta_pct(cur: float, prior: float) -> float | None:
-    if prior == 0:
+def _delta_pct(current: float, prior: float) -> float | None:
+    if abs(prior) < 0.0001:
         return None
-    return round((cur - prior) / abs(prior) * 100, 1)
+    return round(((current - prior) / abs(prior)) * 100, 1)
 
 
-def _direction(delta: float | None, higher_is_better: bool) -> str:
-    if delta is None or abs(delta) <= 1:
+def _delta_direction(delta_pct: float | None, *, higher_is_better: bool) -> str:
+    if delta_pct is None or abs(delta_pct) <= 1:
         return "flat"
-    if delta > 1:
-        return "up" if higher_is_better else "bad_up"
-    return "down" if higher_is_better else "bad_down"
+    if delta_pct > 0:
+        return "up" if higher_is_better else "down"
+    return "down" if higher_is_better else "up"
 
 
-async def _rev_account_id(db: AsyncSession) -> int | None:
-    r = await db.execute(select(Account.id).where(Account.code == "4000"))
-    return r.scalar_one_or_none()
-
-
-async def _pos_net(db: AsyncSession, utc_s: datetime, utc_e: datetime) -> float:
-    r = await db.execute(
-        select(func.sum(Invoice.total))
-        .where(Invoice.created_at >= utc_s, Invoice.created_at <= utc_e, Invoice.status == "paid")
-    )
-    pos = float(r.scalar() or 0)
-    r = await db.execute(
-        select(func.sum(RetailRefund.total))
-        .where(RetailRefund.created_at >= utc_s, RetailRefund.created_at <= utc_e)
-    )
-    return max(0.0, pos - float(r.scalar() or 0))
-
-
-async def _b2b_net(db: AsyncSession, utc_s: datetime, utc_e: datetime, acc_id: int | None) -> float:
-    if not acc_id:
-        return 0.0
-    r = await db.execute(
-        select(func.sum(JournalEntry.credit))
-        .join(Journal, JournalEntry.journal_id == Journal.id)
-        .where(
-            JournalEntry.account_id == acc_id,
-            Journal.created_at >= utc_s,
-            Journal.created_at <= utc_e,
-            Journal.ref_type.in_(_B2B_REF_TYPES),
-        )
-    )
-    return float(r.scalar() or 0)
-
-
-async def _cogs(db: AsyncSession, utc_s: datetime, utc_e: datetime) -> float:
-    r = await db.execute(
-        select(func.sum(InvoiceItem.qty * Product.cost))
-        .join(Invoice, InvoiceItem.invoice_id == Invoice.id)
-        .join(Product,  InvoiceItem.product_id == Product.id)
-        .where(Invoice.created_at >= utc_s, Invoice.created_at <= utc_e, Invoice.status == "paid")
-    )
-    return float(r.scalar() or 0)
-
-
-async def _daily_sparkline(
-    db: AsyncSession,
-    utc_s: datetime,
-    utc_e: datetime,
-    acc_id: int | None,
-) -> list[float]:
-    tz = _tz()
-    invoice_daily = (
-        select(
-            _local_day_expr(Invoice.created_at).label("day"),
-            Invoice.total.label("amount"),
-        )
-        .where(Invoice.created_at >= utc_s, Invoice.created_at <= utc_e, Invoice.status == "paid")
-        .subquery("invoice_daily")
-    )
-
-    pos_rows = await db.execute(
-        select(
-            invoice_daily.c.day,
-            func.sum(invoice_daily.c.amount).label("total"),
-        )
-        .select_from(invoice_daily)
-        .group_by(invoice_daily.c.day)
-    )
-    pos_by_day = {str(r.day): float(r.total) for r in pos_rows}
-
-    refund_daily = (
-        select(
-            _local_day_expr(RetailRefund.created_at).label("day"),
-            RetailRefund.total.label("amount"),
-        )
-        .where(RetailRefund.created_at >= utc_s, RetailRefund.created_at <= utc_e)
-        .subquery("refund_daily")
-    )
-    ref_rows = await db.execute(
-        select(
-            refund_daily.c.day,
-            func.sum(refund_daily.c.amount).label("total"),
-        )
-        .select_from(refund_daily)
-        .group_by(refund_daily.c.day)
-    )
-    ref_by_day = {str(r.day): float(r.total) for r in ref_rows}
-
-    b2b_by_day: dict[str, float] = {}
-    if acc_id:
-        journal_daily = (
-            select(
-                _local_day_expr(Journal.created_at).label("day"),
-                JournalEntry.credit.label("amount"),
-            )
-            .join(JournalEntry, JournalEntry.journal_id == Journal.id)
-            .where(
-                JournalEntry.account_id == acc_id,
-                Journal.created_at >= utc_s,
-                Journal.created_at <= utc_e,
-                Journal.ref_type.in_(_B2B_REF_TYPES),
-            )
-            .subquery("journal_daily")
-        )
-        b2b_rows = await db.execute(
-            select(
-                journal_daily.c.day,
-                func.sum(journal_daily.c.amount).label("total"),
-            )
-            .select_from(journal_daily)
-            .group_by(journal_daily.c.day)
-        )
-        b2b_by_day = {str(r.day): float(r.total) for r in b2b_rows}
-
-    local_s = utc_s.astimezone(tz).date()
-    local_e = utc_e.astimezone(tz).date()
-    result, d = [], local_s
-    while d <= local_e:
-        ds  = str(d)
-        pos = max(0.0, pos_by_day.get(ds, 0.0) - ref_by_day.get(ds, 0.0))
-        result.append(round(pos + b2b_by_day.get(ds, 0.0), 2))
-        d += timedelta(days=1)
-    return result
-
-
-# ── hero sections ──────────────────────────────────────────────────────────
-
-async def _hero_admin(db: AsyncSession, rng: dict, acc_id: int | None) -> dict:
-    utc_s, utc_e   = rng["utc_start"], rng["utc_end"]
-    p_utc_s, p_utc_e = rng["prior_utc_start"], rng["prior_utc_end"]
-
-    rev_cur   = await _pos_net(db, utc_s, utc_e)   + await _b2b_net(db, utc_s, utc_e, acc_id)
-    rev_prior = await _pos_net(db, p_utc_s, p_utc_e) + await _b2b_net(db, p_utc_s, p_utc_e, acc_id)
-    rev_spark = await _daily_sparkline(db, utc_s, utc_e, acc_id)
-
-    cogs_cur  = await _cogs(db, utc_s, utc_e)
-    gp_cur    = rev_cur - cogs_cur
-    cogs_pri  = await _cogs(db, p_utc_s, p_utc_e)
-    gp_prior  = rev_prior - cogs_pri
-    margin    = (gp_cur / rev_cur * 100) if rev_cur > 0 else 0.0
-
-    r = await db.execute(select(Account.balance).where(Account.code == "1000"))
-    cash = float(r.scalar() or 0)
-    r = await db.execute(
-        select(func.sum(B2BInvoice.total - B2BInvoice.amount_paid))
-        .where(B2BInvoice.status.in_(["unpaid", "partial"]))
-    )
-    ar = float(r.scalar() or 0)
-
-    r = await db.execute(
-        select(func.count(Customer.id))
-        .where(Customer.created_at >= utc_s, Customer.created_at <= utc_e)
-    )
-    new_cust = int(r.scalar() or 0)
-    r = await db.execute(
-        select(func.count(B2BClient.id))
-        .where(B2BClient.created_at >= utc_s, B2BClient.created_at <= utc_e)
-    )
-    new_b2b = int(r.scalar() or 0)
-    r = await db.execute(select(func.count(Customer.id)))
-    total_cust = int(r.scalar() or 0)
-
-    r = await db.execute(
-        select(func.count(Customer.id))
-        .where(Customer.created_at >= p_utc_s, Customer.created_at <= p_utc_e)
-    )
-    p_new_cust = int(r.scalar() or 0)
-    r = await db.execute(
-        select(func.count(B2BClient.id))
-        .where(B2BClient.created_at >= p_utc_s, B2BClient.created_at <= p_utc_e)
-    )
-    p_new_b2b = int(r.scalar() or 0)
-
-    cg_cur   = new_cust + new_b2b
-    cg_prior = p_new_cust + p_new_b2b
-    rev_d    = _delta_pct(rev_cur, rev_prior)
-    gp_d     = _delta_pct(gp_cur,  gp_prior)
-    cg_d     = _delta_pct(cg_cur,  cg_prior)
-
-    return {
-        "revenue": {
-            "value":     round(rev_cur,  2), "prior": round(rev_prior, 2),
-            "delta_pct": rev_d, "sparkline": rev_spark,
-            "direction": _direction(rev_d, True),
-        },
-        "gross_profit": {
-            "value":      round(gp_cur,  2), "prior": round(gp_prior, 2),
-            "delta_pct":  gp_d, "sparkline": rev_spark,
-            "direction":  _direction(gp_d, True), "margin_pct": round(margin, 1),
-        },
-        "cash_position": {"value": round(cash, 2), "ar": round(ar, 2)},
-        "customer_growth": {
-            "value":      cg_cur,  "prior": cg_prior,
-            "delta_pct":  cg_d,   "total_active": total_cust,
-            "direction":  _direction(cg_d, True),
-        },
-    }
-
-
-async def _hero_cashier(db: AsyncSession, user_id: int) -> dict:
-    tz = _tz()
-    today = datetime.now(tz).date()
-    utc_s, utc_e = _utc_range(today, today)
-
-    r = await db.execute(
-        select(func.count(Invoice.id), func.sum(Invoice.total))
-        .where(Invoice.user_id == user_id, Invoice.created_at >= utc_s,
-               Invoice.created_at <= utc_e, Invoice.status == "paid")
-    )
-    cnt, tot = r.one()
-    cnt = int(cnt or 0)
-    tot = float(tot or 0)
-    avg = tot / cnt if cnt > 0 else 0.0
-
-    r2 = await db.execute(
-        select(InvoiceItem.name, func.sum(InvoiceItem.qty).label("qty"))
-        .join(Invoice, InvoiceItem.invoice_id == Invoice.id)
-        .where(Invoice.user_id == user_id, Invoice.created_at >= utc_s,
-               Invoice.created_at <= utc_e, Invoice.status == "paid")
-        .group_by(InvoiceItem.name)
-        .order_by(func.sum(InvoiceItem.qty).desc())
-        .limit(1)
-    )
-    top = r2.one_or_none()
-
-    r3 = await db.execute(
-        select(func.count(RetailRefund.id), func.sum(RetailRefund.total))
-        .where(RetailRefund.user_id == user_id,
-               RetailRefund.created_at >= utc_s, RetailRefund.created_at <= utc_e)
-    )
-    rc, rt = r3.one()
-    rc = int(rc or 0)
-    rt = float(rt or 0)
-
-    return {
-        "shift_sales":  {"count": cnt, "value": round(tot, 2)},
-        "avg_basket":   {"value": round(avg, 2)},
-        "top_item":     {"name": top.name if top else "—"},
-        "refunds":      {"count": rc, "value": round(rt, 2), "direction": "bad_up" if rc > 0 else "flat"},
-    }
-
-
-async def _hero_farm(db: AsyncSession, rng: dict) -> dict:
-    from app.models.farm import FarmDelivery
-    from app.models.production import ProductionBatch
-    from app.models.spoilage import SpoilageRecord
-
-    utc_s, utc_e = rng["utc_start"], rng["utc_end"]
-    tz = _tz()
-    rs = datetime.fromisoformat(rng["start"])
-    re = datetime.fromisoformat(rng["end"])
-    rs_date = rs.date()
-    re_date = re.date()
-
-    r = await db.execute(
-        select(func.count(FarmDelivery.id))
-        .where(FarmDelivery.delivery_date >= rs_date, FarmDelivery.delivery_date <= re_date)
-    )
-    deliveries = int(r.scalar() or 0)
-
-    r = await db.execute(
-        select(func.sum(SpoilageRecord.qty))
-        .where(SpoilageRecord.spoilage_date >= rs_date, SpoilageRecord.spoilage_date <= re_date)
-    )
-    spoilage_qty = float(r.scalar() or 0)
-
-    r = await db.execute(
-        select(func.count(ProductionBatch.id))
-        .where(ProductionBatch.created_at >= utc_s, ProductionBatch.created_at <= utc_e)
-    )
-    batches = int(r.scalar() or 0)
-
-    return {
-        "deliveries":         {"value": deliveries},
-        "spoilage":           {"qty": round(spoilage_qty, 2)},
-        "production_batches": {"value": batches},
-        "upcoming_deliveries": {"value": 0, "note": "Scheduling coming soon"},
-    }
-
-
-# ── chart data ─────────────────────────────────────────────────────────────
-
-async def _chart(db: AsyncSession, rng: dict, acc_id: int | None) -> dict:
-    tz     = _tz()
-    utc_s, utc_e = rng["utc_start"], rng["utc_end"]
-    invoice_daily = (
-        select(
-            _local_day_expr(Invoice.created_at).label("day"),
-            Invoice.total.label("amount"),
-            Invoice.id.label("invoice_id"),
-        )
-        .where(Invoice.created_at >= utc_s, Invoice.created_at <= utc_e, Invoice.status == "paid")
-        .subquery("chart_invoice_daily")
-    )
-
-    pos_rows = await db.execute(
-        select(
-            invoice_daily.c.day,
-            func.sum(invoice_daily.c.amount).label("pos"),
-            func.count(invoice_daily.c.invoice_id).label("orders"),
-        )
-        .select_from(invoice_daily)
-        .group_by(invoice_daily.c.day)
-    )
-    pos_by_day: dict[str, tuple[float, int]] = {
-        str(r.day): (float(r.pos), int(r.orders)) for r in pos_rows
-    }
-
-    refund_daily = (
-        select(
-            _local_day_expr(RetailRefund.created_at).label("day"),
-            RetailRefund.total.label("amount"),
-        )
-        .where(RetailRefund.created_at >= utc_s, RetailRefund.created_at <= utc_e)
-        .subquery("chart_refund_daily")
-    )
-    ref_rows = await db.execute(
-        select(
-            refund_daily.c.day,
-            func.sum(refund_daily.c.amount).label("refunds"),
-        )
-        .select_from(refund_daily)
-        .group_by(refund_daily.c.day)
-    )
-    ref_by_day = {str(r.day): float(r.refunds) for r in ref_rows}
-
-    b2b_by_day: dict[str, float] = {}
-    if acc_id:
-        journal_daily = (
-            select(
-                _local_day_expr(Journal.created_at).label("day"),
-                JournalEntry.credit.label("amount"),
-            )
-            .join(JournalEntry, JournalEntry.journal_id == Journal.id)
-            .where(
-                JournalEntry.account_id == acc_id,
-                Journal.created_at >= utc_s,
-                Journal.created_at <= utc_e,
-                Journal.ref_type.in_(_B2B_REF_TYPES),
-            )
-            .subquery("chart_journal_daily")
-        )
-        b2b_rows = await db.execute(
-            select(
-                journal_daily.c.day,
-                func.sum(journal_daily.c.amount).label("b2b"),
-            )
-            .select_from(journal_daily)
-            .group_by(journal_daily.c.day)
-        )
-        b2b_by_day = {str(r.day): float(r.b2b) for r in b2b_rows}
-
-    local_s = utc_s.astimezone(tz).date()
-    local_e = utc_e.astimezone(tz).date()
-    buckets, totals = [], []
-    d = local_s
-    while d <= local_e:
-        ds    = str(d)
-        pos, orders = pos_by_day.get(ds, (0.0, 0))
-        ref   = ref_by_day.get(ds, 0.0)
-        b2b   = b2b_by_day.get(ds, 0.0)
-        day_total = pos + b2b
-        buckets.append({
-            "date":    ds,
-            "pos":     round(pos, 2),
-            "b2b":     round(b2b, 2),
-            "refunds": round(-ref, 2),
-            "orders":  orders,
-        })
-        totals.append(day_total)
-        d += timedelta(days=1)
-
-    granularity = _pick_granularity(rng)
-    agg_buckets = _aggregate_buckets(buckets, granularity)
-
-    agg_totals = [b["pos"] + b["b2b"] for b in agg_buckets]
-    moving_avg = []
-    for i in range(len(agg_buckets)):
-        window = agg_totals[max(0, i - 6): i + 1]
-        moving_avg.append(round(sum(window) / len(window), 2))
-
-    return {"buckets": agg_buckets, "moving_avg_7d": moving_avg, "granularity": granularity}
-
-
-# ── panels ─────────────────────────────────────────────────────────────────
-
-async def _panels(db: AsyncSession, rng: dict) -> dict:
-    tz     = _tz()
-    utc_s, utc_e = rng["utc_start"], rng["utc_end"]
-    period_end = utc_e.astimezone(tz).date()
-
-    # Top products ──────────────────────────────────────────────────────────
-    sales_items = (
-        select(
-            InvoiceItem.name.label("name"),
-            InvoiceItem.qty.label("qty"),
-            InvoiceItem.total.label("total"),
-            InvoiceItem.product_id.label("product_id"),
-        )
-        .join(Invoice, InvoiceItem.invoice_id == Invoice.id)
-        .where(
+async def _sales_total(db: AsyncSession, utc_s: datetime, utc_e: datetime) -> float:
+    pos_result = await db.execute(
+        select(func.coalesce(func.sum(Invoice.total), 0)).where(
             Invoice.created_at >= utc_s,
             Invoice.created_at <= utc_e,
             Invoice.status == "paid",
         )
-        .subquery()
     )
-
-    r_total = await db.execute(
-        select(func.coalesce(func.sum(Invoice.total), 0))
-        .where(Invoice.created_at >= utc_s, Invoice.created_at <= utc_e, Invoice.status == "paid")
-    )
-    total_rev = float(r_total.scalar() or 1)
-
-    by_rev_rows = await db.execute(
-        select(
-            sales_items.c.name,
-            func.sum(sales_items.c.total).label("rev"),
-            func.sum(sales_items.c.qty).label("qty"),
-        )
-        .group_by(sales_items.c.name)
-        .order_by(func.sum(sales_items.c.total).desc())
-        .limit(8)
-    )
-    by_revenue = [
-        {"name": r.name, "revenue": round(float(r.rev), 2),
-         "qty": round(float(r.qty), 2), "share": round(float(r.rev) / total_rev * 100, 1)}
-        for r in by_rev_rows
-    ]
-
-    by_qty_rows = await db.execute(
-        select(
-            sales_items.c.name,
-            func.sum(sales_items.c.qty).label("qty"),
-            func.sum(sales_items.c.total).label("rev"),
-        )
-        .group_by(sales_items.c.name)
-        .order_by(func.sum(sales_items.c.qty).desc())
-        .limit(8)
-    )
-    by_qty = [{"name": r.name, "qty": round(float(r.qty), 2), "revenue": round(float(r.rev), 2)}
-              for r in by_qty_rows]
-
-    by_margin_rows = await db.execute(
-        select(
-            sales_items.c.name,
-            func.sum(sales_items.c.total).label("rev"),
-            func.sum(sales_items.c.qty * Product.cost).label("cogs"),
-        )
-        .join(Product, sales_items.c.product_id == Product.id)
-        .group_by(sales_items.c.name)
-        .order_by((func.sum(sales_items.c.total) - func.sum(sales_items.c.qty * Product.cost)).desc())
-        .limit(8)
-    )
-    by_margin = []
-    for r in by_margin_rows:
-        rev  = float(r.rev)
-        cogs = float(r.cogs or 0)
-        gp   = rev - cogs
-        by_margin.append({
-            "name":       r.name,
-            "revenue":    round(rev, 2),
-            "margin":     round(gp, 2),
-            "margin_pct": round(gp / rev * 100, 1) if rev > 0 else 0.0,
-        })
-
-    # Receivables ───────────────────────────────────────────────────────────
-    b2b_rows = await db.execute(
-        select(
-            B2BClient.name,
-            B2BClient.id,
-            func.sum(B2BInvoice.total - B2BInvoice.amount_paid).label("outstanding"),
-            func.min(B2BInvoice.due_date).label("oldest_due"),
-        )
-        .join(B2BInvoice, B2BInvoice.client_id == B2BClient.id)
-        .where(
-            B2BInvoice.status.in_(["unpaid", "partial"]),
-            B2BInvoice.created_at <= utc_e,
-        )
-        .group_by(B2BClient.id, B2BClient.name)
-        .order_by(func.sum(B2BInvoice.total - B2BInvoice.amount_paid).desc())
-        .limit(8)
-    )
-    receivables_b2b = []
-    for r in b2b_rows:
-        days_overdue = max(0, (period_end - r.oldest_due).days) if r.oldest_due else 0
-        receivables_b2b.append({
-            "name":        r.name,
-            "client_id":   r.id,
-            "outstanding": round(float(r.outstanding), 2),
-            "days_overdue": days_overdue,
-        })
-
-    # Stock pressure ────────────────────────────────────────────────────────
-    d14_s, d14_e = _utc_range(period_end - timedelta(days=13), period_end)
-    sales_rows = await db.execute(
-        select(InvoiceItem.product_id, func.sum(InvoiceItem.qty).label("qty"))
-        .join(Invoice, InvoiceItem.invoice_id == Invoice.id)
-        .where(Invoice.created_at >= d14_s, Invoice.created_at <= d14_e, Invoice.status == "paid")
-        .group_by(InvoiceItem.product_id)
-    )
-    avg_daily: dict[int, float] = {r.product_id: float(r.qty) / 14.0 for r in sales_rows}
-
-    prod_rows = await db.execute(
-        select(Product.id, Product.name, Product.sku, Product.stock, Product.min_stock)
-        .where(Product.is_active == True, Product.stock > 0)
-    )
-    all_active = prod_rows.all()
-
-    stockout_risk = []
-    for p in all_active:
-        ad = avg_daily.get(p.id, 0.0)
-        if ad > 0:
-            days_left = float(p.stock) / ad
-            if days_left < 7:
-                stockout_risk.append({
-                    "product_id": p.id, "name": p.name, "sku": p.sku,
-                    "stock": float(p.stock), "days_left": round(days_left, 1),
-                    "avg_daily": round(ad, 2),
-                })
-    stockout_risk.sort(key=lambda x: x["days_left"])
-
-    low_stock_rows = await db.execute(
-        select(Product.id, Product.name, Product.sku, Product.stock, Product.min_stock)
-        .where(Product.is_active == True, Product.stock > 0, Product.stock <= Product.min_stock)
-        .order_by(Product.stock.asc())
-        .limit(8)
-    )
-    low_stock = [
-        {"name": r.name, "sku": r.sku, "stock": float(r.stock), "min_stock": float(r.min_stock)}
-        for r in low_stock_rows
-    ]
-
-    d60_s, d60_e = _utc_range(period_end - timedelta(days=59), period_end)
-    sold_ids_r = await db.execute(
-        select(InvoiceItem.product_id.distinct())
-        .join(Invoice, InvoiceItem.invoice_id == Invoice.id)
-        .where(Invoice.created_at >= d60_s, Invoice.created_at <= d60_e, Invoice.status == "paid")
-    )
-    sold_ids = {row[0] for row in sold_ids_r}
-
-    dead_rows = await db.execute(
-        select(Product.id, Product.name, Product.sku, Product.stock)
-        .where(Product.is_active == True, Product.stock > 0,
-               Product.id.notin_(sold_ids) if sold_ids else sa_true())
-        .order_by(Product.stock.desc())
-        .limit(8)
-    )
-    dead_stock = [{"name": r.name, "sku": r.sku, "stock": float(r.stock)} for r in dead_rows]
-
-    # Recent activity ───────────────────────────────────────────────────────
-    inv_r = await db.execute(
-        select(
-            Invoice.invoice_number, Invoice.customer_id, Invoice.total,
-            Invoice.payment_method, Invoice.created_at,
-        )
-        .where(
-            Invoice.status == "paid",
-            Invoice.created_at >= utc_s,
-            Invoice.created_at <= utc_e,
-        )
-        .order_by(Invoice.created_at.desc())
-        .limit(10)
-    )
-    recent_invoice_rows = inv_r.all()
-
-    ref_r = await db.execute(
-        select(
-            RetailRefund.refund_number, RetailRefund.customer_id,
-            RetailRefund.total, RetailRefund.refund_method, RetailRefund.created_at,
-        )
-        .where(
+    refund_result = await db.execute(
+        select(func.coalesce(func.sum(RetailRefund.total), 0)).where(
             RetailRefund.created_at >= utc_s,
             RetailRefund.created_at <= utc_e,
         )
-        .order_by(RetailRefund.created_at.desc())
-        .limit(5)
     )
-    recent_refund_rows = ref_r.all()
-
-    # Batch-load customer names to avoid N+1
-    all_cust_ids = {r.customer_id for r in recent_invoice_rows} | {r.customer_id for r in recent_refund_rows}
-    cust_map: dict[int, str] = {}
-    if all_cust_ids:
-        cust_r = await db.execute(
-            select(Customer.id, Customer.name).where(Customer.id.in_(all_cust_ids))
+    b2b_result = await db.execute(
+        select(func.coalesce(func.sum(B2BInvoice.total), 0)).where(
+            B2BInvoice.created_at >= utc_s,
+            B2BInvoice.created_at <= utc_e,
+            B2BInvoice.status == "paid",
         )
-        cust_map = {r.id: r.name for r in cust_r}
+    )
+    return round(
+        max(0.0, _safe_float(pos_result.scalar()) - _safe_float(refund_result.scalar())) + _safe_float(b2b_result.scalar()),
+        2,
+    )
 
-    recent: list[dict] = []
-    for inv in recent_invoice_rows:
-        recent.append({
-            "type":     "sale",
-            "ref":      inv.invoice_number,
-            "customer": cust_map.get(inv.customer_id, "Walk-in"),
-            "total":    float(inv.total or 0),
-            "method":   inv.payment_method or "cash",
-            "at":       inv.created_at.isoformat() if inv.created_at else "",
-        })
-    for ref in recent_refund_rows:
-        recent.append({
-            "type":     "refund",
-            "ref":      ref.refund_number,
-            "customer": cust_map.get(ref.customer_id, "—"),
-            "total":    -float(ref.total or 0),
-            "method":   ref.refund_method,
-            "at":       ref.created_at.isoformat() if ref.created_at else "",
-        })
-    recent.sort(key=lambda x: x["at"], reverse=True)
+
+async def _sales_count(db: AsyncSession, utc_s: datetime, utc_e: datetime) -> int:
+    pos_count = await db.execute(
+        select(func.count(Invoice.id)).where(
+            Invoice.created_at >= utc_s,
+            Invoice.created_at <= utc_e,
+            Invoice.status == "paid",
+        )
+    )
+    b2b_count = await db.execute(
+        select(func.count(B2BInvoice.id)).where(
+            B2BInvoice.created_at >= utc_s,
+            B2BInvoice.created_at <= utc_e,
+            B2BInvoice.status == "paid",
+        )
+    )
+    return _safe_int(pos_count.scalar()) + _safe_int(b2b_count.scalar())
+
+
+async def _expense_total(db: AsyncSession, utc_s: datetime, utc_e: datetime) -> float:
+    result = await db.execute(
+        select(func.coalesce(func.sum(Expense.amount), 0)).where(
+            Expense.created_at >= utc_s,
+            Expense.created_at <= utc_e,
+        )
+    )
+    return round(_safe_float(result.scalar()), 2)
+
+
+async def _sparkline_sales(db: AsyncSession, rng: dict[str, Any]) -> list[float]:
+    daily = await _daily_sales_rows(db, rng["utc_start"], rng["utc_end"])
+    return [round(_safe_float(row["pos"]) + _safe_float(row["b2b"]), 2) for row in daily[-14:]]
+
+
+async def _sparkline_expenses(db: AsyncSession, rng: dict[str, Any]) -> list[float]:
+    local_end = date.fromisoformat(rng["end"])
+    start = local_end - timedelta(days=13)
+    utc_s, utc_e = _utc_range(start, local_end)
+    bucket_expr = _local_bucket_expr(Expense.created_at, "day")
+    rows = await db.execute(
+        select(
+            bucket_expr.label("bucket_date"),
+            func.coalesce(func.sum(Expense.amount), 0).label("amount"),
+        )
+        .where(Expense.created_at >= utc_s, Expense.created_at <= utc_e)
+        .group_by(bucket_expr)
+        .order_by(bucket_expr)
+    )
+    by_day = {str(row.bucket_date): _safe_float(row.amount) for row in rows}
+
+    values: list[float] = []
+    current = start
+    while current <= local_end:
+        values.append(round(by_day.get(current.isoformat(), 0.0), 2))
+        current += timedelta(days=1)
+    return values
+
+
+async def _daily_sales_rows(db: AsyncSession, utc_s: datetime, utc_e: datetime) -> list[dict[str, Any]]:
+    tz = _tz()
+
+    pos_rows = await db.execute(
+        select(
+            _local_bucket_expr(Invoice.created_at, "day").label("bucket_date"),
+            func.coalesce(func.sum(Invoice.total), 0).label("total"),
+            func.count(Invoice.id).label("orders"),
+        )
+        .where(Invoice.created_at >= utc_s, Invoice.created_at <= utc_e, Invoice.status == "paid")
+        .group_by(_local_bucket_expr(Invoice.created_at, "day"))
+        .order_by(_local_bucket_expr(Invoice.created_at, "day"))
+    )
+    pos_by_day = {str(row.bucket_date): (_safe_float(row.total), _safe_int(row.orders)) for row in pos_rows}
+
+    refund_rows = await db.execute(
+        select(
+            _local_bucket_expr(RetailRefund.created_at, "day").label("bucket_date"),
+            func.coalesce(func.sum(RetailRefund.total), 0).label("total"),
+            func.count(RetailRefund.id).label("orders"),
+        )
+        .where(RetailRefund.created_at >= utc_s, RetailRefund.created_at <= utc_e)
+        .group_by(_local_bucket_expr(RetailRefund.created_at, "day"))
+        .order_by(_local_bucket_expr(RetailRefund.created_at, "day"))
+    )
+    refund_by_day = {str(row.bucket_date): (_safe_float(row.total), _safe_int(row.orders)) for row in refund_rows}
+
+    b2b_rows = await db.execute(
+        select(
+            _local_bucket_expr(B2BInvoice.created_at, "day").label("bucket_date"),
+            func.coalesce(func.sum(B2BInvoice.total), 0).label("total"),
+            func.count(B2BInvoice.id).label("orders"),
+        )
+        .where(B2BInvoice.created_at >= utc_s, B2BInvoice.created_at <= utc_e, B2BInvoice.status == "paid")
+        .group_by(_local_bucket_expr(B2BInvoice.created_at, "day"))
+        .order_by(_local_bucket_expr(B2BInvoice.created_at, "day"))
+    )
+    b2b_by_day = {str(row.bucket_date): (_safe_float(row.total), _safe_int(row.orders)) for row in b2b_rows}
+
+    local_start = utc_s.astimezone(tz).date()
+    local_end = utc_e.astimezone(tz).date()
+    buckets: list[dict[str, Any]] = []
+    current = local_start
+    while current <= local_end:
+        key = current.isoformat()
+        pos_total, pos_orders = pos_by_day.get(key, (0.0, 0))
+        refund_total, refund_orders = refund_by_day.get(key, (0.0, 0))
+        b2b_total, b2b_orders = b2b_by_day.get(key, (0.0, 0))
+        buckets.append(
+            {
+                "date": key,
+                "pos": round(max(0.0, pos_total - refund_total), 2),
+                "b2b": round(b2b_total, 2),
+                "refunds": round(-refund_total, 2),
+                "orders": pos_orders + refund_orders + b2b_orders,
+            }
+        )
+        current += timedelta(days=1)
+    return buckets
+
+
+async def _build_numbers(db: AsyncSession, rng: dict[str, Any], user: User) -> dict[str, Any]:
+    can_view_b2b = has_permission(user, "page_b2b")
+    can_view_pos = has_permission(user, "page_pos")
+
+    sales_value = await _sales_total(db, rng["utc_start"], rng["utc_end"])
+    sales_prior = await _sales_total(db, rng["prior_utc_start"], rng["prior_utc_end"])
+    spent_value = await _expense_total(db, rng["utc_start"], rng["utc_end"])
+    spent_prior = await _expense_total(db, rng["prior_utc_start"], rng["prior_utc_end"])
+
+    clients_owe_result = await db.execute(
+        select(
+            func.coalesce(func.sum(B2BInvoice.total - func.coalesce(B2BInvoice.amount_paid, 0)), 0).label("value"),
+        ).where(B2BInvoice.status.in_(["unpaid", "partial"]))
+    )
+    overdue_cutoff = now_local().astimezone(ZoneInfo("UTC")) - timedelta(days=30)
+    overdue_result = await db.execute(
+        select(
+            func.coalesce(
+                func.sum(case((B2BInvoice.created_at <= overdue_cutoff, 1), else_=0)),
+                0,
+            )
+        ).where(B2BInvoice.status.in_(["unpaid", "partial"]))
+    )
+    clients_owe_value = _safe_float(clients_owe_result.scalar())
+    overdue_count = _safe_int(overdue_result.scalar())
+
+    out_result = await db.execute(
+        select(func.count(Product.id)).where(Product.is_active == True, Product.stock <= 0)
+    )
+    low_result = await db.execute(
+        select(func.count(Product.id)).where(Product.is_active == True, Product.stock > 0, Product.stock <= 5)
+    )
+    out_count = _safe_int(out_result.scalar())
+    low_count = _safe_int(low_result.scalar())
+
+    sales_today_value = 0.0
+    if not can_view_b2b and can_view_pos:
+        today = now_local().date()
+        utc_s, utc_e = _utc_range(today, today)
+        user_sales = await db.execute(
+            select(func.coalesce(func.sum(Invoice.total), 0)).where(
+                Invoice.user_id == user.id,
+                Invoice.created_at >= utc_s,
+                Invoice.created_at <= utc_e,
+                Invoice.status == "paid",
+            )
+        )
+        sales_today_value = _safe_float(user_sales.scalar())
 
     return {
-        "top_products": {"by_revenue": by_revenue, "by_qty": by_qty, "by_margin": by_margin},
-        "receivables":  {"b2b": receivables_b2b, "retail": []},
-        "stock_pressure": {
-            "stockout_risk": stockout_risk[:8],
-            "low_stock":     low_stock,
-            "dead_stock":    dead_stock,
+        "sales": {
+            "value": round(sales_value, 2),
+            "delta_pct": _delta_pct(sales_value, sales_prior),
+            "direction": _delta_direction(_delta_pct(sales_value, sales_prior), higher_is_better=True),
+            "sparkline": await _sparkline_sales(db, rng),
         },
-        "recent_activity": recent[:10],
+        "clients_owe": {
+            "value": round(clients_owe_value, 2),
+            "overdue_count": overdue_count,
+        },
+        "spent": {
+            "value": round(spent_value, 2),
+            "delta_pct": _delta_pct(spent_value, spent_prior),
+            "direction": _delta_direction(_delta_pct(spent_value, spent_prior), higher_is_better=False),
+            "sparkline": await _sparkline_expenses(db, rng),
+        },
+        "stock_alerts": {
+            "value": out_count + low_count,
+            "out_count": out_count,
+            "low_count": low_count,
+        },
+        "alt_sales_today": {"value": round(sales_today_value, 2)},
     }
 
 
-# ── main entry point ───────────────────────────────────────────────────────
+async def _build_chart(db: AsyncSession, rng: dict[str, Any]) -> dict[str, Any]:
+    daily = await _daily_sales_rows(db, rng["utc_start"], rng["utc_end"])
+    granularity = _pick_granularity(rng)
+    return {"buckets": _aggregate_buckets(daily, granularity)}
+
+
+async def _top_products(db: AsyncSession, rng: dict[str, Any], metric: str) -> list[dict[str, Any]]:
+    order_expr = func.sum(InvoiceItem.total).desc() if metric == "revenue" else func.sum(InvoiceItem.qty).desc()
+    rows = await db.execute(
+        select(
+            InvoiceItem.name.label("name"),
+            func.coalesce(func.sum(InvoiceItem.qty), 0).label("qty"),
+            func.coalesce(func.sum(InvoiceItem.total), 0).label("revenue"),
+        )
+        .join(Invoice, InvoiceItem.invoice_id == Invoice.id)
+        .where(
+            Invoice.created_at >= rng["utc_start"],
+            Invoice.created_at <= rng["utc_end"],
+            Invoice.status == "paid",
+        )
+        .group_by(InvoiceItem.name)
+        .order_by(order_expr, InvoiceItem.name.asc())
+        .limit(8)
+    )
+    return [
+        {
+            "name": row.name,
+            "qty": round(_safe_float(row.qty), 2),
+            "revenue": round(_safe_float(row.revenue), 2),
+        }
+        for row in rows.all()
+    ]
+
+
+def _relative_time(iso_timestamp: str) -> str:
+    if not iso_timestamp:
+        return "-"
+    timestamp = datetime.fromisoformat(iso_timestamp)
+    delta = now_local().astimezone(timestamp.tzinfo or _tz()) - timestamp
+    seconds = max(0, int(delta.total_seconds()))
+    if seconds < 60:
+        return f"{seconds} sec ago"
+    if seconds < 3600:
+        return f"{seconds // 60} min ago"
+    if seconds < 86400:
+        return f"{seconds // 3600} hr ago"
+    return f"{seconds // 86400} day ago" if seconds < 172800 else f"{seconds // 86400} days ago"
+
+
+async def _recent_activity(db: AsyncSession, rng: dict[str, Any]) -> list[dict[str, Any]]:
+    invoice_result = await db.execute(
+        select(
+            Invoice.id,
+            Invoice.invoice_number,
+            Invoice.customer_id,
+            Invoice.total,
+            Invoice.payment_method,
+            Invoice.created_at,
+        )
+        .where(Invoice.created_at >= rng["utc_start"], Invoice.created_at <= rng["utc_end"], Invoice.status == "paid")
+        .order_by(Invoice.created_at.desc())
+        .limit(10)
+    )
+    refund_result = await db.execute(
+        select(
+            RetailRefund.id,
+            RetailRefund.refund_number,
+            RetailRefund.customer_id,
+            RetailRefund.total,
+            RetailRefund.refund_method,
+            RetailRefund.created_at,
+            RetailRefund.invoice_id,
+        )
+        .where(RetailRefund.created_at >= rng["utc_start"], RetailRefund.created_at <= rng["utc_end"])
+        .order_by(RetailRefund.created_at.desc())
+        .limit(10)
+    )
+    invoice_rows = invoice_result.all()
+    refund_rows = refund_result.all()
+
+    customer_ids = {
+        row.customer_id
+        for row in invoice_rows + refund_rows
+        if getattr(row, "customer_id", None) is not None
+    }
+
+    customer_map: dict[int, str] = {}
+    if customer_ids:
+        customer_names = await db.execute(select(Customer.id, Customer.name).where(Customer.id.in_(customer_ids)))
+        customer_map = {row.id: row.name for row in customer_names.all()}
+
+    activity: list[dict[str, Any]] = []
+    for row in invoice_rows:
+        iso_value = row.created_at.astimezone(_tz()).isoformat() if row.created_at else ""
+        activity.append(
+            {
+                "type": "sale",
+                "invoice_id": row.id,
+                "invoice_number": row.invoice_number,
+                "customer": customer_map.get(row.customer_id, "Walk-in"),
+                "total": round(_safe_float(row.total), 2),
+                "method": row.payment_method or "cash",
+                "time_relative": _relative_time(iso_value),
+                "timestamp": iso_value,
+                "link": f"/pos/?invoice={row.id}",
+            }
+        )
+    for row in refund_rows:
+        iso_value = row.created_at.astimezone(_tz()).isoformat() if row.created_at else ""
+        activity.append(
+            {
+                "type": "refund",
+                "invoice_id": row.invoice_id,
+                "invoice_number": row.refund_number,
+                "customer": customer_map.get(row.customer_id, "-"),
+                "total": round(-_safe_float(row.total), 2),
+                "method": row.refund_method or "cash",
+                "time_relative": _relative_time(iso_value),
+                "timestamp": iso_value,
+                "link": f"/refunds/?invoice={row.invoice_id}" if row.invoice_id else "/refunds/",
+            }
+        )
+    activity.sort(key=lambda item: item["timestamp"], reverse=True)
+    return activity[:10]
+
+
+async def _build_panels(db: AsyncSession, rng: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "top_products_by_revenue": await _top_products(db, rng, "revenue"),
+        "top_products_by_qty": await _top_products(db, rng, "qty"),
+        "recent_activity": await _recent_activity(db, rng),
+    }
+
 
 async def get_summary(
     db: AsyncSession,
@@ -765,68 +545,93 @@ async def get_summary(
     custom_start: str | None,
     custom_end: str | None,
     user: User,
-) -> dict:
+) -> dict[str, Any]:
     from app.core.log import logger
-    from app.core.permissions import has_permission
+    from app.services.dashboard_briefing_service import build_briefing
 
-    _errors: list[dict] = []
-    rng    = resolve_range(range_param, custom_start, custom_end)
-    acc_id = await _rev_account_id(db)
+    rng = resolve_range(range_param, custom_start, custom_end)
+    _errors: list[dict[str, str]] = []
 
-    role = getattr(user, "role", "admin")
-    hero: dict = {}
-    hero_type = "admin"
+    briefing: dict[str, Any] = {"lead": "You haven't recorded any sales yet for this period.", "actions": [], "body": ""}
     try:
-        if role == "cashier":
-            hero      = await _hero_cashier(db, user.id)
-            hero_type = "cashier"
-        elif has_permission(user, "page_farm") and not has_permission(user, "page_accounting"):
-            hero      = await _hero_farm(db, rng)
-            hero_type = "farm_manager"
-        else:
-            hero      = await _hero_admin(db, rng, acc_id)
-            hero_type = "admin"
+        briefing = await build_briefing(db, user, range_param, rng["utc_start"], rng["utc_end"])
     except Exception:
-        logger.error("dashboard_summary: hero section failed", exc_info=True)
-        await db.rollback()
-        _errors.append({"section": "hero", "reason": "query failed"})
+        logger.error("dashboard_summary: briefing section failed", exc_info=True)
+        try:
+            await db.rollback()
+        except Exception:
+            pass
+        _errors.append({"section": "briefing", "reason": "query failed"})
 
-    chart: dict = {"buckets": [], "moving_avg_7d": []}
+    numbers: dict[str, Any] = {
+        "sales": {"value": 0, "delta_pct": None, "direction": "flat", "sparkline": []},
+        "clients_owe": {"value": 0, "overdue_count": 0},
+        "spent": {"value": 0, "delta_pct": None, "direction": "flat", "sparkline": []},
+        "stock_alerts": {"value": 0, "out_count": 0, "low_count": 0},
+    }
     try:
-        chart = await _chart(db, rng, acc_id)
+        number_payload = await _build_numbers(db, rng, user)
+        numbers = {key: number_payload[key] for key in ("sales", "clients_owe", "spent", "stock_alerts")}
+        alt_sales_today = number_payload.get("alt_sales_today", {"value": 0})
+    except Exception:
+        logger.error("dashboard_summary: numbers section failed", exc_info=True)
+        try:
+            await db.rollback()
+        except Exception:
+            pass
+        alt_sales_today = {"value": 0}
+        _errors.append({"section": "numbers", "reason": "query failed"})
+
+    chart: dict[str, Any] = {"buckets": []}
+    try:
+        chart = await _build_chart(db, rng)
     except Exception:
         logger.error("dashboard_summary: chart section failed", exc_info=True)
-        await db.rollback()
+        try:
+            await db.rollback()
+        except Exception:
+            pass
         _errors.append({"section": "chart", "reason": "query failed"})
 
-    panels: dict = {
-        "top_products":   {"by_revenue": [], "by_qty": [], "by_margin": []},
-        "receivables":    {"b2b": [], "retail": []},
-        "stock_pressure": {"stockout_risk": [], "low_stock": [], "dead_stock": []},
-        "recent_activity": [],
-    }
+    panels: dict[str, Any] = {"top_products_by_revenue": [], "top_products_by_qty": [], "recent_activity": []}
     try:
-        panels = await _panels(db, rng)
+        panels = await _build_panels(db, rng)
     except Exception:
         logger.error("dashboard_summary: panels section failed", exc_info=True)
-        await db.rollback()
-        _errors.append({"section": "panels", "reason": "query failed"})
+        try:
+            await db.rollback()
+        except Exception:
+            pass
+        _errors.append({"section": "top_products", "reason": "query failed"})
 
-    generated_at = datetime.now(_tz()).isoformat()
+    generated_at = now_local().isoformat()
 
-    return {
+    response = {
         "range": {
-            "label":       rng["label"],
-            "start":       rng["start"],
-            "end":         rng["end"],
-            "prior_start": rng["prior_start"],
-            "prior_end":   rng["prior_end"],
+            "label": rng["label"],
+            "start": rng["start"],
+            "end": rng["end"],
+            "days": rng["days"],
+            "granularity": _pick_granularity(rng),
         },
-        "hero":        hero,
-        "hero_type":   hero_type,
-        "chart":       chart,
-        "panels":      panels,
+        "briefing": briefing,
+        "numbers": numbers,
+        "chart": chart,
+        "panels": panels,
         "generated_at": generated_at,
-        "timezone":    settings.APP_TIMEZONE,
-        "_errors":     _errors,
+        "viewer": {
+            "role": getattr(user, "role", "user"),
+            "can_view_b2b": has_permission(user, "page_b2b"),
+            "can_view_expenses": has_permission(user, "page_expenses") or has_permission(user, "page_accounting"),
+            "can_view_inventory": has_permission(user, "page_inventory") or has_permission(user, "page_products"),
+            "can_view_pos": has_permission(user, "page_pos"),
+            "alt_sales_today": alt_sales_today,
+        },
+        "timezone": settings.APP_TIMEZONE,
     }
+    if _errors:
+        response["_errors"] = _errors
+    return response
+
+
+__all__ = ["_pick_granularity", "_utc_range", "get_summary", "resolve_range"]
