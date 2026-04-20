@@ -11,6 +11,10 @@ let dashboardData = null;
 let assistantHistory = [];
 let currentUser = null;
 let loadingTimer = null;
+let dashboardAbortController = null;
+let dashboardRequestId = 0;
+let dashboardHasLoaded = false;
+let assistantOpen = false;
 
 const ASSISTANT_CHIPS = [
   "How much did we sell today?",
@@ -92,6 +96,19 @@ function openCustomRangePicker() {
   document.getElementById("custom-range-start").value = customStart || "";
   document.getElementById("custom-range-end").value = customEnd || "";
   setCustomRangeError("");
+}
+
+function setAssistantOpen(open) {
+  assistantOpen = open;
+  const drawer = document.getElementById("assistant-drawer");
+  const button = document.getElementById("assistant-fab");
+  drawer.classList.toggle("hidden", !open);
+  drawer.classList.toggle("open", open);
+  button.setAttribute("aria-expanded", open ? "true" : "false");
+  button.classList.toggle("active", open);
+  if (open) {
+    document.getElementById("assistantInput").focus();
+  }
 }
 
 function closeCustomRangePicker() {
@@ -273,45 +290,64 @@ function renderChart() {
     <tr><th>Date</th><th>POS</th><th>B2B</th><th>Refunds</th><th>Orders</th></tr>
     ${buckets.map((bucket) => `<tr><td>${bucket.date}</td><td>${formatMoneyPrecise(bucket.pos)}</td><td>${formatMoneyPrecise(bucket.b2b)}</td><td>${formatMoneyPrecise(bucket.refunds)}</td><td>${bucket.orders}</td></tr>`).join("")}
   `;
-  if (salesChart) salesChart.destroy();
-  salesChart = new Chart(document.getElementById("sales-chart"), {
-    type: "bar",
-    data: {
-      labels: chartLabels(buckets),
-      datasets: [
-        { label: "POS", data: buckets.map((bucket) => bucket.pos), backgroundColor: getComputedStyle(document.documentElement).getPropertyValue("--accent").trim(), stack: "sales" },
-        { label: "B2B", data: buckets.map((bucket) => bucket.b2b), backgroundColor: "#3b5f8a", stack: "sales" },
-        { label: "Refunds", data: buckets.map((bucket) => bucket.refunds), backgroundColor: "#b54040", stack: "sales" },
-      ],
-    },
-    options: {
-      responsive: true,
-      maintainAspectRatio: false,
-      animation: false,
-      interaction: { mode: "index", intersect: false },
-      plugins: {
-        legend: { display: true, position: "top", align: "end" },
-        tooltip: {
-          callbacks: {
-            afterBody(items) {
-              const bucket = buckets[items[0]?.dataIndex || 0];
-              return [`Transactions: ${bucket?.orders || 0}`];
+  const chartData = {
+    labels: chartLabels(buckets),
+    datasets: [
+      { label: "POS", data: buckets.map((bucket) => bucket.pos), backgroundColor: getComputedStyle(document.documentElement).getPropertyValue("--accent").trim(), stack: "sales" },
+      { label: "B2B", data: buckets.map((bucket) => bucket.b2b), backgroundColor: "#3b5f8a", stack: "sales" },
+      { label: "Refunds", data: buckets.map((bucket) => bucket.refunds), backgroundColor: "#b54040", stack: "sales" },
+    ],
+  };
+  if (!salesChart) {
+    salesChart = new Chart(document.getElementById("sales-chart"), {
+      type: "bar",
+      data: chartData,
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        animation: false,
+        interaction: { mode: "index", intersect: false },
+        plugins: {
+          legend: { display: true, position: "top", align: "end" },
+          tooltip: {
+            callbacks: {
+              afterBody(items) {
+                const bucket = buckets[items[0]?.dataIndex || 0];
+                return [`Transactions: ${bucket?.orders || 0}`];
+              },
             },
           },
         },
+        scales: {
+          x: { stacked: true, grid: { display: false } },
+          y: { stacked: true, grid: { display: false }, ticks: { display: false }, border: { display: false } },
+        },
+        onClick(_event, elements) {
+          if (!elements.length) return;
+          const bucket = buckets[elements[0].index];
+          if (!bucket) return;
+          submitAssistantQuestion(`show me sales on ${bucket.date}`);
+        },
       },
-      scales: {
-        x: { stacked: true, grid: { display: false } },
-        y: { stacked: true, grid: { display: false }, ticks: { display: false }, border: { display: false } },
-      },
-      onClick(_event, elements) {
-        if (!elements.length) return;
-        const bucket = buckets[elements[0].index];
-        if (!bucket) return;
-        submitAssistantQuestion(`show me sales on ${bucket.date}`);
-      },
-    },
+    });
+    return;
+  }
+  salesChart.data.labels = chartData.labels;
+  salesChart.data.datasets.forEach((dataset, index) => {
+    dataset.data = chartData.datasets[index].data;
+    dataset.backgroundColor = chartData.datasets[index].backgroundColor;
   });
+  salesChart.options.plugins.tooltip.callbacks.afterBody = (items) => {
+    const bucket = buckets[items[0]?.dataIndex || 0];
+    return [`Transactions: ${bucket?.orders || 0}`];
+  };
+  salesChart.options.onClick = (_event, elements) => {
+    if (!elements.length) return;
+    const bucket = buckets[elements[0].index];
+    if (!bucket) return;
+    submitAssistantQuestion(`show me sales on ${bucket.date}`);
+  };
+  salesChart.update("none");
 }
 
 function topProductsTitle() {
@@ -478,6 +514,7 @@ function pushAssistantEntry(question, response, loading = false) {
 async function submitAssistantQuestion(question) {
   const clean = String(question || "").trim();
   if (!clean) return;
+  setAssistantOpen(true);
   document.getElementById("assistantInput").value = clean;
   pushAssistantEntry(clean, null, true);
   clearTimeout(loadingTimer);
@@ -513,19 +550,31 @@ function renderAssistantChips() {
 }
 
 function showErrorState(message) {
+  document.getElementById("loading").classList.remove("hidden");
   document.getElementById("loading").innerHTML = `<div class="load-error">${escHtml(message)}</div>`;
 }
 
 async function loadDashboard() {
+  if (dashboardAbortController) dashboardAbortController.abort();
+  dashboardAbortController = new AbortController();
+  const requestId = ++dashboardRequestId;
   let url = `/dashboard/summary?range=${currentRange}`;
   if (currentRange === "custom" && customStart && customEnd) {
     url += `&start=${customStart}&end=${customEnd}`;
   }
   try {
-    const response = await fetch(url, { credentials: "same-origin" });
+    const response = await fetch(url, {
+      credentials: "same-origin",
+      signal: dashboardAbortController.signal,
+    });
     if (!response.ok) throw new Error(`Dashboard request failed (${response.status})`);
-    dashboardData = await response.json();
-    document.getElementById("loading").style.display = "none";
+    const nextData = await response.json();
+    if (requestId !== dashboardRequestId) return;
+    dashboardData = nextData;
+    if (!dashboardHasLoaded) {
+      document.getElementById("loading").classList.add("hidden");
+      dashboardHasLoaded = true;
+    }
     renderBriefing();
     renderNumbers();
     renderChart();
@@ -533,6 +582,7 @@ async function loadDashboard() {
     renderRecentActivity();
     markUpdated();
   } catch (error) {
+    if (error.name === "AbortError") return;
     showErrorState(error.message);
   }
 }
@@ -591,6 +641,12 @@ function bindEvents() {
   document.getElementById("custom-range-modal").addEventListener("click", (event) => {
     if (event.target.id === "custom-range-modal") closeCustomRangePicker();
   });
+  document.getElementById("assistant-fab").addEventListener("click", () => {
+    setAssistantOpen(!assistantOpen);
+  });
+  document.getElementById("assistant-close").addEventListener("click", () => {
+    setAssistantOpen(false);
+  });
   document.getElementById("assistantSend").addEventListener("click", () => submitAssistantQuestion(document.getElementById("assistantInput").value));
   document.getElementById("assistantInput").addEventListener("keydown", (event) => {
     if (event.key === "Enter") {
@@ -601,6 +657,11 @@ function bindEvents() {
   document.getElementById("assistant-clear").addEventListener("click", () => {
     assistantHistory = [];
     renderAssistantHistory();
+  });
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && assistantOpen) {
+      setAssistantOpen(false);
+    }
   });
   document.querySelectorAll("[data-top-tab]").forEach((button) => {
     button.addEventListener("click", () => {

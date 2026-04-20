@@ -560,28 +560,6 @@ def dashboard_ui():
     <article class="card number-card" data-card="stock_alerts" aria-live="polite"></article>
   </section>
 
-  <section class="card assistant-card" aria-label="Ask your data">
-    <div class="assistant-header">
-      <div>
-        <h2>Ask about your business</h2>
-        <p>Ask about the selected period or use explicit dates. I can help with sales, stock, products, expenses, receivables, activity, and comparisons.</p>
-      </div>
-      <button type="button" class="assistant-clear" id="assistant-clear">Clear</button>
-    </div>
-    <div class="assistant-helper">
-      <span>Try:</span>
-      <span>top products this month</span>
-      <span>what changed compared to yesterday</span>
-      <span>show recent sales activity</span>
-    </div>
-    <div class="assistant-chips" id="assistant-chips"></div>
-    <div class="assistant-input-row">
-      <input type="text" id="assistantInput" placeholder="Or type a question in your own words…" autocomplete="off">
-      <button type="button" id="assistantSend">Ask</button>
-    </div>
-    <div class="assistant-history" id="assistantHistory"></div>
-  </section>
-
   <section class="card chart-card" aria-label="Sales over time">
     <div class="panel-head"><h2 id="chart-title">Sales over time</h2></div>
     <div class="chart-wrap"><canvas id="sales-chart" aria-label="Sales over time chart"></canvas></div>
@@ -618,6 +596,35 @@ def dashboard_ui():
     </section>
   </div>
 </main>
+
+<button type="button" class="assistant-fab" id="assistant-fab" aria-label="Open dashboard assistant" aria-expanded="false">
+  <span class="assistant-fab-icon">&#9993;</span>
+  <span class="assistant-fab-label">Assistant</span>
+</button>
+
+<section class="assistant-drawer hidden" id="assistant-drawer" aria-label="Dashboard assistant">
+  <div class="assistant-drawer-header">
+    <div>
+      <h2>Dashboard Assistant</h2>
+      <p>Ask about sales, stock, products, expenses, receivables, activity, and comparisons.</p>
+    </div>
+    <div class="assistant-drawer-actions">
+      <button type="button" class="assistant-clear" id="assistant-clear">Clear</button>
+      <button type="button" class="assistant-close" id="assistant-close" aria-label="Close assistant">&#215;</button>
+    </div>
+  </div>
+  <div class="assistant-helper">
+    <span>top products this month</span>
+    <span>what changed compared to yesterday</span>
+    <span>show recent sales activity</span>
+  </div>
+  <div class="assistant-chips" id="assistant-chips"></div>
+  <div class="assistant-history" id="assistantHistory"></div>
+  <div class="assistant-input-row assistant-drawer-input">
+    <input type="text" id="assistantInput" placeholder="Ask about your business…" autocomplete="off">
+    <button type="button" id="assistantSend">Ask</button>
+  </div>
+</section>
 
 <div id="custom-range-modal" class="range-modal hidden" role="dialog" aria-modal="true" aria-labelledby="crm-title">
   <div class="range-modal-card">
