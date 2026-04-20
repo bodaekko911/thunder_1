@@ -29,7 +29,8 @@ from decimal import Decimal
 from typing import Optional
 
 import openpyxl
-from sqlalchemy import Date as SADate, cast, insert, or_, select, text
+from sqlalchemy import Date as SADate, cast, insert, select, text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import defer
 from sqlalchemy.sql import func as sa_func
@@ -138,6 +139,37 @@ async def _column_exists(db: AsyncSession, table_name: str, column_name: str) ->
         {"table_name": table_name, "column_name": column_name},
     )
     return bool(result.scalar())
+
+
+async def _find_existing_product_by_norm_sku(db: AsyncSession, norm_sku: str) -> Product | None:
+    if not norm_sku:
+        return None
+
+    result = await db.execute(
+        select(Product).options(defer(Product.created_by_import_batch))
+    )
+    for product in result.scalars().all():
+        if normalize_barcode_value(product.sku) == norm_sku:
+            return product
+    return None
+
+
+async def _next_unique_reference(
+    db: AsyncSession,
+    model,
+    field_name: str,
+    prefix: str,
+    start_number: int,
+    width: int,
+) -> tuple[str, int]:
+    number = max(1, start_number)
+    field = getattr(model, field_name)
+    while True:
+        candidate = f"{prefix}{str(number).zfill(width)}"
+        existing = await db.execute(select(model.id).where(field == candidate))
+        if existing.scalar_one_or_none() is None:
+            return candidate, number
+        number += 1
 
 
 # ── Main entry point ──────────────────────────────────────────────────────────
@@ -375,9 +407,7 @@ async def import_b2b_sales(
         })
 
     _all_p = await db.execute(
-        select(Product)
-        .options(defer(Product.created_by_import_batch))
-        .where(or_(Product.is_active.is_(True), Product.is_active.is_(None)))
+        select(Product).options(defer(Product.created_by_import_batch))
     )
     all_products = _all_p.scalars().all()
     products_by_norm_sku = {normalize_barcode_value(p.sku): p for p in all_products}
@@ -474,9 +504,7 @@ async def import_b2b_sales(
 
     # Fetch all active products once
     _all_p = await db.execute(
-        select(Product)
-        .options(defer(Product.created_by_import_batch))
-        .where(or_(Product.is_active.is_(True), Product.is_active.is_(None)))
+        select(Product).options(defer(Product.created_by_import_batch))
     )
     all_products = _all_p.scalars().all()
     products_by_norm_sku = {normalize_barcode_value(p.sku): p for p in all_products}
@@ -600,30 +628,46 @@ async def import_b2b_sales(
                     "item_type": "finished",
                 }
 
-                if product_import_batch_supported:
-                    product = Product(**product_payload, created_by_import_batch=batch_id)
-                    db.add(product)
-                    await db.flush()
+                existing_product = await _find_existing_product_by_norm_sku(db, norm_sku)
+                if existing_product:
+                    product = existing_product
+                    if product.is_active is False:
+                        product.is_active = True
                 else:
-                    product_insert = await db.execute(
-                        insert(Product.__table__).values(**product_payload).returning(Product.id)
-                    )
-                    product_id = product_insert.scalar_one()
-                    fetched_product = await db.execute(
-                        select(Product)
-                        .options(defer(Product.created_by_import_batch))
-                        .where(Product.id == product_id)
-                    )
-                    product = fetched_product.scalar_one()
+                    try:
+                        async with db.begin_nested():
+                            if product_import_batch_supported:
+                                product = Product(**product_payload, created_by_import_batch=batch_id)
+                                db.add(product)
+                                await db.flush()
+                            else:
+                                product_insert = await db.execute(
+                                    insert(Product.__table__).values(**product_payload).returning(Product.id)
+                                )
+                                product_id = product_insert.scalar_one()
+                                fetched_product = await db.execute(
+                                    select(Product)
+                                    .options(defer(Product.created_by_import_batch))
+                                    .where(Product.id == product_id)
+                                )
+                                product = fetched_product.scalar_one()
+                    except IntegrityError:
+                        existing_product = await _find_existing_product_by_norm_sku(db, norm_sku)
+                        if not existing_product:
+                            raise
+                        product = existing_product
+                        if product.is_active is False:
+                            product.is_active = True
 
                 newly_created_by_norm_sku[norm_sku] = product
-                group_created_norm_skus.append(norm_sku)
-                group_created_products_count += 1
-                products_auto_created += 1
-                auto_created_products_list.append({
-                    "sku": raw_sku_str,
-                    "name": item_name,
-                })
+                if existing_product is None:
+                    group_created_norm_skus.append(norm_sku)
+                    group_created_products_count += 1
+                    products_auto_created += 1
+                    auto_created_products_list.append({
+                        "sku": raw_sku_str,
+                        "name": item_name,
+                    })
 
             disc = r["discount_pct"]
             line_total = round(float(r["qty"]) * float(r["price"]) * (1 - disc / 100), 2)
@@ -652,7 +696,10 @@ async def import_b2b_sales(
         amount_paid  = total_inv if payment_type == "cash" else 0.0
 
         b2b_counter += 1
-        invoice_number = f"HB2B-{str(max_b2b_id + b2b_counter).zfill(5)}"
+        invoice_number, next_b2b_number = await _next_unique_reference(
+            db, B2BInvoice, "invoice_number", "HB2B-", max_b2b_id + b2b_counter, 5
+        )
+        b2b_counter = max(0, next_b2b_number - max_b2b_id)
 
         try:
             invoice_payload = {
@@ -731,7 +778,10 @@ async def import_b2b_sales(
             # ── Consignment record ───────────────────────────────────────────
             if payment_type == "consignment":
                 cons_counter += 1
-                cons_ref = f"HCONS-{str(max_cons_id + cons_counter).zfill(4)}"
+                cons_ref, next_cons_number = await _next_unique_reference(
+                    db, Consignment, "ref_number", "HCONS-", max_cons_id + cons_counter, 4
+                )
+                cons_counter = max(0, next_cons_number - max_cons_id)
                 consignment_payload = {
                     "ref_number": cons_ref,
                     "client_id": client.id,
