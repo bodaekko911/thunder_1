@@ -1475,11 +1475,29 @@ async function doImportB2B() {
     fd.append('mode',    mode);
     fd.append('force',   force ? 'true' : 'false');
 
-    const res  = await fetch('/import/api/b2b-sales', { method: 'POST', body: fd });
-    const data = await res.json();
+    let res, data;
+    try {
+        res = await fetch('/import/api/b2b-sales', { method: 'POST', body: fd });
+        data = await res.json();
+    } catch (e) {
+        showProg('b2b-sales', 100);
+        btn.disabled = false;
+        btn.innerHTML = '⬆ Import B2B Sales';
+        showResult('b2b-sales', '✗ Network error: ' + e.message, 'err');
+        return;
+    }
     showProg('b2b-sales', 100);
     btn.disabled = false;
     btn.innerHTML = '⬆ Import B2B Sales';
+
+    if (!res.ok) {
+        const detail = data?.detail;
+        const msg = Array.isArray(detail)
+            ? detail.map(e => e.msg || JSON.stringify(e)).join('; ')
+            : (detail || data?.error || `HTTP ${res.status}`);
+        showResult('b2b-sales', '✗ ' + msg, 'err');
+        return;
+    }
 
     if (data.error) { showResult('b2b-sales', '✗ ' + data.error, 'err'); return; }
 
@@ -1488,27 +1506,58 @@ async function doImportB2B() {
 }
 
 function renderB2BResult(data) {
-    const s    = data.summary || {};
-    const isDry = data.dry_run;
-    const created = isDry ? s.invoices_would_create : s.invoices_created;
+    const isDry = !!data?.dry_run;
+    const s = data?.summary || {};
+    const pick = (...values) => values.find(v => v !== undefined && v !== null);
+    const n = (...values) => {
+        const value = pick(...values);
+        const parsed = Number(value);
+        return Number.isFinite(parsed) ? parsed : 0;
+    };
+    const text = (...values) => {
+        const value = pick(...values);
+        return value === undefined || value === null || value === '' ? '–' : String(value);
+    };
+
+    const rowsRead = n(s.rows_read, data.rows_read, data.rowsRead);
+    const invoicesCreated = n(s.invoices_created, s.invoices_would_create, data.invoices_created, data.invoices_would_create);
+    const lineItems = n(s.line_items, data.line_items, data.lineItems);
+    const rowsSkipped = n(s.rows_skipped, data.rows_skipped, data.skipped);
+    const clientsAutoCreated = n(s.clients_auto_created, data.clients_auto_created);
+    const productsAutoCreated = n(s.products_auto_created, data.products_auto_created);
+    const consignmentsCount = isDry
+        ? n(s.consignments_would_create, data.consignments_would_create)
+        : n(s.consignments_created, data.consignments_created);
+    const earliestDate = text(s.earliest_date, data.earliest_date);
+    const latestDate = text(s.latest_date, data.latest_date);
+    const totalSubtotal = n(s.total_subtotal, data.total_subtotal);
+    const totalDiscount = n(s.total_discount, data.total_discount);
+    const totalInvoiced = n(s.total_invoiced, data.total_invoiced);
+
+    if (!data || (!data.summary && !data.error && !data.errors)) {
+        showResult('b2b-sales', '✗ Unexpected response from server — no summary returned.', 'err');
+        return;
+    }
+
+    const created = invoicesCreated;
     const label   = isDry ? 'would create' : 'created';
 
     let html = `<div style="font-size:13px">
         ${isDry ? '<span style="color:var(--warn)">⚠ DRY RUN — nothing was saved</span><br>' : ''}
-        <b>${s.rows_read}</b> rows read &nbsp;·&nbsp;
+        <b>${rowsRead}</b> rows read &nbsp;·&nbsp;
         <b>${created}</b> invoices ${label} &nbsp;·&nbsp;
-        <b>${s.line_items}</b> line items &nbsp;·&nbsp;
-        <b>${s.rows_skipped}</b> skipped<br>
+        <b>${lineItems}</b> line items &nbsp;·&nbsp;
+        <b>${rowsSkipped}</b> skipped<br>
         <span style="color:var(--sub);font-size:12px">
-            Clients auto-created: <b>${s.clients_auto_created || 0}</b> &nbsp;·&nbsp;
-            Products ${isDry ? 'would create' : 'created'}: <b>${s.products_auto_created || 0}</b> &nbsp;·&nbsp;
-            Consignments: <b>${isDry ? (s.consignments_would_create||0) : (s.consignments_created||0)}</b> &nbsp;·&nbsp;
-            Date range: ${s.earliest_date||'–'} → ${s.latest_date||'–'}
+            Clients auto-created: <b>${clientsAutoCreated}</b> &nbsp;·&nbsp;
+            Products ${isDry ? 'would create' : 'created'}: <b>${productsAutoCreated}</b> &nbsp;·&nbsp;
+            Consignments: <b>${consignmentsCount}</b> &nbsp;·&nbsp;
+            Date range: ${earliestDate} → ${latestDate}
         </span><br>
         <span style="color:var(--sub);font-size:12px">
-            Subtotal: <b>${(s.total_subtotal||0).toFixed(2)}</b> &nbsp;·&nbsp;
-            Discount: <b>${(s.total_discount||0).toFixed(2)}</b> &nbsp;·&nbsp;
-            Invoiced: <b>${(s.total_invoiced||0).toFixed(2)}</b>
+            Subtotal: <b>${totalSubtotal.toFixed(2)}</b> &nbsp;·&nbsp;
+            Discount: <b>${totalDiscount.toFixed(2)}</b> &nbsp;·&nbsp;
+            Invoiced: <b>${totalInvoiced.toFixed(2)}</b>
         </span>`;
 
     if (data.batch_id) {
