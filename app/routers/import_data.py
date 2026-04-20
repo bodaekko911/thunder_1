@@ -576,8 +576,8 @@ async def download_b2b_sales_template(_=Depends(get_current_user)):
     readme["A1"].font = Font(bold=True)
     readme["B1"].font = Font(bold=True)
     rules = [
-        ("SKU",          "Required. Must match a product SKU in the ERP (whitespace stripped). Numeric-looking SKUs normalised."),
-        ("Item",         "Optional. Product description — used only in error messages. Not stored."),
+        ("SKU",          "Required. Matched by normalised SKU. If not found, the product is auto-created for this import."),
+        ("Item",         "Optional. Used for auto-created product name when SKU is new; otherwise a placeholder Imported Product <SKU> is used."),
         ("QTY",          "Required. Numeric, must be > 0. Decimals accepted."),
         ("Price",        "Required. Unit price BEFORE discount. Must be >= 0."),
         ("Discount",     "Optional. Per-line discount PERCENTAGE (e.g. 10 = 10%). Blank/null = 0. Range 0–100."),
@@ -1501,6 +1501,7 @@ function renderB2BResult(data) {
         <b>${s.rows_skipped}</b> skipped<br>
         <span style="color:var(--sub);font-size:12px">
             Clients auto-created: <b>${s.clients_auto_created || 0}</b> &nbsp;·&nbsp;
+            Products ${isDry ? 'would create' : 'created'}: <b>${s.products_auto_created || 0}</b> &nbsp;·&nbsp;
             Consignments: <b>${isDry ? (s.consignments_would_create||0) : (s.consignments_created||0)}</b> &nbsp;·&nbsp;
             Date range: ${s.earliest_date||'–'} → ${s.latest_date||'–'}
         </span><br>
@@ -1556,6 +1557,28 @@ function renderB2BResult(data) {
             `${c.name} · ${c.payment_terms} · discount ${c.discount_pct}%`
         ).join('<br>')}
         </div></details>`;
+    }
+
+    if (data.auto_created_products && data.auto_created_products.length) {
+        html += `<br><details style="margin-top:4px" ${isDry ? 'open' : ''}><summary style="font-size:12px;cursor:pointer;color:var(--sub)">
+            Auto-created products (${data.auto_created_products.length})
+        </summary><div style="margin-top:4px">
+        <table style="font-size:11px;width:100%">
+            <thead><tr><th>SKU</th><th>Name</th></tr></thead>
+            <tbody>${data.auto_created_products.slice(0,10).map(p=>`<tr>
+                <td style="font-family:var(--mono)">${p.sku}</td>
+                <td>${p.name}</td>
+            </tr>`).join('')}</tbody>
+        </table>
+        ${data.auto_created_products.length > 10 ? `<div style="font-size:11px;color:var(--muted);padding-top:4px">…and ${data.auto_created_products.length - 10} more</div>` : ''}
+        </div></details>`;
+    }
+
+    if (data.warnings && data.warnings.length) {
+        html += `<br><div style="margin-top:6px;padding:8px 12px;background:rgba(255,181,71,.08);
+            border:1px solid rgba(255,181,71,.2);border-radius:8px;font-size:12px;color:var(--warn)">
+            ${data.warnings.map(w=>`⚠ ${w}`).join('<br>')}
+        </div>`;
     }
 
     if (data.errors && data.errors.length) {

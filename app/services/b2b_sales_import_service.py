@@ -44,6 +44,8 @@ from app.services.barcode_service import normalize_barcode_value
 
 MIN_IMPORT_DATE = date(2026, 1, 1)
 VALID_MODES = frozenset({"history_only", "with_stock_adjustment"})
+_SKU_MAX = 80
+_NAME_MAX = 200
 
 # ── Payment type normalisation ────────────────────────────────────────────────
 
@@ -102,6 +104,13 @@ def _normalize_sku(val) -> str:
         except (ValueError, TypeError):
             pass
     return str(val).strip()
+
+
+def _build_imported_product_name(item_hint: str, sku: str) -> str:
+    candidate = (item_hint or "").strip()
+    if not candidate:
+        candidate = f"Imported Product {sku}"
+    return candidate[:_NAME_MAX]
 
 
 def _find_col(headers: list[str], candidates: list[str]) -> Optional[int]:
@@ -342,6 +351,53 @@ async def import_b2b_sales(
             "discount_pct": mode_disc,
         })
 
+    _all_p = await db.execute(
+        select(Product).where(or_(Product.is_active.is_(True), Product.is_active.is_(None)))
+    )
+    all_products = _all_p.scalars().all()
+    products_by_norm_sku = {normalize_barcode_value(p.sku): p for p in all_products}
+
+    products_auto_created_preview = 0
+    auto_created_products_preview: list[dict] = []
+    product_warnings_preview: list[str] = []
+    preview_created_skus: set[str] = set()
+    preview_name_registry: dict[str, str] = {}
+    for r in valid_rows:
+        raw_sku_str = r["sku"]
+        if len(raw_sku_str) > _SKU_MAX:
+            raw_sku_str = raw_sku_str[:_SKU_MAX]
+        norm_sku = normalize_barcode_value(raw_sku_str)
+        if not norm_sku or norm_sku in products_by_norm_sku or norm_sku in preview_created_skus:
+            continue
+
+        item_name = _build_imported_product_name(r["item"], raw_sku_str)
+        if norm_sku in preview_name_registry:
+            first_name = preview_name_registry[norm_sku]
+            if first_name.lower() != item_name.lower():
+                warn_msg = (
+                    f"SKU '{raw_sku_str}' had conflicting item names: "
+                    f"'{first_name}' vs '{item_name}' — used the first."
+                )
+                if warn_msg not in product_warnings_preview:
+                    product_warnings_preview.append(warn_msg)
+            item_name = first_name
+        else:
+            preview_name_registry[norm_sku] = item_name
+
+        preview_created_skus.add(norm_sku)
+        products_auto_created_preview += 1
+        auto_created_products_preview.append({
+            "sku": raw_sku_str,
+            "name": item_name,
+        })
+
+    if products_auto_created_preview > 0:
+        product_warnings_preview.insert(
+            0,
+            f"{products_auto_created_preview} products would be auto-created with cost = 0. "
+            "Review Products and set costs if needed."
+        )
+
     # ── Dry-run: return preview without touching DB ─────────────────────────
     if dry_run:
         return {
@@ -354,7 +410,8 @@ async def import_b2b_sales(
                 "invoices_created":      0,
                 "invoices_would_create": len(valid_groups),
                 "line_items":            len(valid_rows),
-                "clients_auto_created":  0,
+                "clients_auto_created":  len(auto_created_preview),
+                "products_auto_created": products_auto_created_preview,
                 "consignments_created":  0,
                 "consignments_would_create": consignments_would_create,
                 "rows_skipped":          rows_skipped,
@@ -372,6 +429,8 @@ async def import_b2b_sales(
             },
             "discount_pct_suggestions": discount_pct_suggestions,
             "auto_created_clients":     auto_created_preview,
+            "auto_created_products":    auto_created_products_preview[:50],
+            "warnings":                 product_warnings_preview,
             "errors":                   errors_report,
         }
 
@@ -382,7 +441,10 @@ async def import_b2b_sales(
     invoices_created         = 0
     consignments_created     = 0
     clients_auto_created     = 0
+    products_auto_created    = 0
     auto_created_client_names: list[dict] = []
+    auto_created_products_list: list[dict] = []
+    warnings_list: list[str] = []
     today_str                = date.today().isoformat()
 
     # Fetch all active products once
@@ -391,6 +453,8 @@ async def import_b2b_sales(
     )
     all_products = _all_p.scalars().all()
     products_by_norm_sku = {normalize_barcode_value(p.sku): p for p in all_products}
+    newly_created_by_norm_sku: dict[str, Product] = {}
+    sku_name_registry: dict[str, str] = {}
 
     # Fetch starting MAX ids for bulk-safe invoice numbering
     _r = await db.execute(select(sa_func.max(B2BInvoice.id)))
@@ -456,24 +520,84 @@ async def import_b2b_sales(
         # ── Resolve products ───────────────────────────────────────────────
         line_items: list[tuple] = []  # (product, qty, unit_price, discount_pct, line_total)
         line_errors: list[dict] = []
+        group_created_norm_skus: list[str] = []
+        group_created_products_count = 0
 
         for r in rows:
-            norm_sku = normalize_barcode_value(r["sku"])
-            product  = products_by_norm_sku.get(norm_sku)
-            if not product:
+            raw_sku_str = r["sku"]
+            if len(raw_sku_str) > _SKU_MAX:
+                truncated_sku = raw_sku_str[:_SKU_MAX]
+                line_errors.append({
+                    "row": r["row"], "sku": raw_sku_str,
+                    "client": client_name, "date": str(sale_date),
+                    "reason": f"SKU truncated from {len(raw_sku_str)} to {_SKU_MAX} chars: '{truncated_sku}'",
+                })
+                raw_sku_str = truncated_sku
+
+            norm_sku = normalize_barcode_value(raw_sku_str)
+            if not norm_sku:
                 line_errors.append({
                     "row": r["row"], "sku": r["sku"],
                     "client": client_name, "date": str(sale_date),
-                    "reason": f"Product SKU '{r['sku']}' not found",
+                    "reason": "SKU is blank or invalid after normalization",
                 })
-            else:
-                disc = r["discount_pct"]
-                line_total = round(float(r["qty"]) * float(r["price"]) * (1 - disc / 100), 2)
-                line_items.append((product, float(r["qty"]), float(r["price"]), disc, line_total))
+                continue
+
+            product = products_by_norm_sku.get(norm_sku) or newly_created_by_norm_sku.get(norm_sku)
+            if not product:
+                item_name = _build_imported_product_name(r["item"], raw_sku_str)
+
+                if norm_sku in sku_name_registry:
+                    first_name = sku_name_registry[norm_sku]
+                    if first_name.lower() != item_name.lower():
+                        warn_msg = (
+                            f"SKU '{raw_sku_str}' had conflicting item names: "
+                            f"'{first_name}' vs '{item_name}' — used the first."
+                        )
+                        if warn_msg not in warnings_list:
+                            warnings_list.append(warn_msg)
+                    item_name = first_name
+                else:
+                    sku_name_registry[norm_sku] = item_name
+
+                product = Product(
+                    sku=raw_sku_str,
+                    name=item_name,
+                    price=round(float(r["price"]), 2),
+                    cost=0,
+                    stock=0,
+                    min_stock=5,
+                    unit="pcs",
+                    is_active=True,
+                    category="Imported - Historical B2B",
+                    item_type="finished",
+                    created_by_import_batch=batch_id,
+                )
+                db.add(product)
+                await db.flush()
+
+                newly_created_by_norm_sku[norm_sku] = product
+                group_created_norm_skus.append(norm_sku)
+                group_created_products_count += 1
+                products_auto_created += 1
+                auto_created_products_list.append({
+                    "sku": raw_sku_str,
+                    "name": item_name,
+                })
+
+            disc = r["discount_pct"]
+            line_total = round(float(r["qty"]) * float(r["price"]) * (1 - disc / 100), 2)
+            line_items.append((product, float(r["qty"]), float(r["price"]), disc, line_total))
 
         if line_errors:
             errors_report.extend(line_errors)
             rows_skipped += len(rows)
+            if group_created_norm_skus:
+                await db.rollback()
+                for norm_sku in group_created_norm_skus:
+                    newly_created_by_norm_sku.pop(norm_sku, None)
+                products_auto_created -= group_created_products_count
+                del auto_created_products_list[-group_created_products_count:]
             continue
 
         # ── Build Invoice ──────────────────────────────────────────────────
@@ -590,6 +714,11 @@ async def import_b2b_sales(
 
         except Exception as exc:
             await db.rollback()
+            for norm_sku in group_created_norm_skus:
+                newly_created_by_norm_sku.pop(norm_sku, None)
+            products_auto_created -= group_created_products_count
+            if group_created_products_count:
+                del auto_created_products_list[-group_created_products_count:]
             errors_report.append({
                 "row": rows[0]["row"], "sku": "",
                 "client": client_name, "date": str(sale_date),
@@ -597,6 +726,9 @@ async def import_b2b_sales(
             })
             rows_skipped += len(rows)
             continue
+
+        for norm_sku in group_created_norm_skus:
+            products_by_norm_sku[norm_sku] = newly_created_by_norm_sku[norm_sku]
 
     # ── Discount propagation + B2BClientPrice (post-all-commits) ──────────
     client_prices_created = 0
@@ -654,6 +786,13 @@ async def import_b2b_sales(
     except Exception:
         await db.rollback()
 
+    if products_auto_created > 0:
+        warnings_list.insert(
+            0,
+            f"{products_auto_created} products were auto-created with cost = 0. "
+            "Review Products and set costs if needed."
+        )
+
     return {
         "dry_run": False,
         "mode": mode,
@@ -664,6 +803,7 @@ async def import_b2b_sales(
             "invoices_created":      invoices_created,
             "line_items":            sum(len(rows) for rows in valid_groups.values()),
             "clients_auto_created":  clients_auto_created,
+            "products_auto_created": products_auto_created,
             "consignments_created":  consignments_created,
             "rows_skipped":          rows_skipped,
             "earliest_date":         earliest_date,
@@ -680,5 +820,7 @@ async def import_b2b_sales(
         },
         "discount_pct_suggestions": discount_pct_suggestions,
         "auto_created_clients":     auto_created_client_names[:50],
+        "auto_created_products":    auto_created_products_list[:50],
+        "warnings":                 warnings_list,
         "errors":                   errors_report,
     }
