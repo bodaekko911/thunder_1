@@ -9,6 +9,11 @@ def _build_provider():
     return InternalCopilotProvider()
 
 
-async def answer_question(db, *, question: str, current_user) -> dict:
+async def answer_question(db, *, question: str, current_user, dashboard_context: dict | None = None) -> dict:
     provider = _build_provider()
-    return await provider.answer(db, question=question, current_user=current_user)
+    return await provider.answer(
+        db,
+        question=question,
+        current_user=current_user,
+        dashboard_context=dashboard_context,
+    )

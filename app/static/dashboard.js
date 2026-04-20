@@ -13,16 +13,17 @@ let currentUser = null;
 let loadingTimer = null;
 
 const ASSISTANT_CHIPS = [
-  "What did I sell today?",
+  "How much did we sell today?",
   "Show me revenue this week",
   "Top products this month",
   "Which products are running low?",
   "Product details for olive oil",
-  "Stock levels for olive oil",
-  "How much did I spend this month?",
-  "Show unpaid invoices",
-  "Who owes me the most?",
-  "Show customer balances",
+  "What changed compared to yesterday?",
+  "Show recent sales activity",
+  "What are my biggest expenses this month?",
+  "Which invoices are unpaid?",
+  "Which customer owes us the most?",
+  "What is the gross profit this month?",
 ];
 
 function escHtml(value) {
@@ -485,7 +486,12 @@ async function submitAssistantQuestion(question) {
     const response = await fetch("/dashboard/assistant", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ question: clean }),
+      body: JSON.stringify({
+        question: clean,
+        range: currentRange,
+        start: currentRange === "custom" ? customStart : null,
+        end: currentRange === "custom" ? customEnd : null,
+      }),
     });
     const payload = await response.json();
     pushAssistantEntry(clean, payload, false);

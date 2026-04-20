@@ -47,6 +47,11 @@ _DEFAULT_SUGGESTIONS: dict[str, list[str]] = {
     "unpaid_invoices": ["Overdue customers", "Who owes me the most"],
     "profit_loss_summary": ["Expense breakdown", "Sales this month", "Compare to previous week"],
     "product_stock_value": ["Low-stock items", "Stock levels", "Top products"],
+    "recent_activity": ["How much did we sell today?", "Which invoices are unpaid?", "What changed compared to yesterday?"],
+    "customer_growth": ["Which customer owes us the most?", "Show recent sales activity"],
+    "b2b_performance": ["Which customer owes us the most?", "Which invoices are unpaid?"],
+    "change_summary": ["Show me revenue this week", "Top products this month", "Show recent sales activity"],
+    "kpi_explanation": ["How much did we sell today?", "Which items are low in stock?"],
     "help": [],
     "export_placeholder": [],
 }
@@ -74,6 +79,12 @@ def build_suggestions(
         names = [_trunc(item.get("name", "")) for item in items[:3] if item.get("name")]
         if names:
             return ([f"Tell me about {n}" for n in names] + defaults)[:4]
+
+    if intent == "recent_activity":
+        items = result.get("items") or []
+        invoice_numbers = [item.get("invoice_number") for item in items[:2] if item.get("invoice_number")]
+        if invoice_numbers:
+            return ([f"Show recent sales activity", f"How much did we sell today?"] + defaults)[:4]
 
     if intent in {"overdue_customers", "customer_balances_top"}:
         key = "customers" if intent == "overdue_customers" else "clients"
@@ -133,6 +144,17 @@ def build_highlights(intent: str | None, result: dict | None) -> list[dict]:
         return [
             {"label": "Total Revenue", "value": _fmt_money(total),    "tone": _money_tone(total)},
             {"label": "Periods",       "value": _fmt_count(len(data)), "tone": "neutral"},
+        ]
+
+    if intent == "top_products":
+        items = result.get("items") or []
+        if not items:
+            return []
+        leader = items[0]
+        return [
+            {"label": "Top Product", "value": leader.get("name", "—"), "tone": "neutral"},
+            {"label": "Revenue", "value": _fmt_money(leader.get("revenue", 0)), "tone": "good"},
+            {"label": "Qty", "value": _fmt_count(leader.get("qty", 0)), "tone": "neutral"},
         ]
 
     if intent == "profit_loss_summary":
@@ -250,6 +272,67 @@ def build_highlights(intent: str | None, result: dict | None) -> list[dict]:
         return [
             {"label": "Out of Stock", "value": _fmt_count(out_count), "tone": "bad" if oc > 0 else "neutral"},
             {"label": "Low Stock",    "value": _fmt_count(low_count), "tone": "bad" if lc > 0 else "neutral"},
+        ]
+
+    if intent == "product_details":
+        selected = result.get("selected") or {}
+        if not selected:
+            return []
+        return [
+            {"label": "Price", "value": _fmt_money(selected.get("price", 0)), "tone": "neutral"},
+            {"label": "Stock", "value": _fmt_count(selected.get("stock", 0)), "tone": "neutral"},
+            {"label": "Min Stock", "value": _fmt_count(selected.get("min_stock", 0)), "tone": "neutral"},
+        ]
+
+    if intent == "customer_balance":
+        selected = result.get("selected") or {}
+        if not selected:
+            return []
+        outstanding = selected.get("outstanding", 0)
+        return [
+            {"label": "Outstanding", "value": _fmt_money(outstanding), "tone": "bad" if float(outstanding or 0) > 0 else "neutral"},
+            {"label": "Open Invoices", "value": _fmt_count(selected.get("open_invoice_count", 0)), "tone": "neutral"},
+        ]
+
+    if intent == "recent_activity":
+        items = result.get("items") or []
+        sales_total = sum(float(item.get("total", 0)) for item in items if item.get("type") == "sale")
+        refund_total = sum(abs(float(item.get("total", 0))) for item in items if item.get("type") == "refund")
+        return [
+            {"label": "Transactions", "value": _fmt_count(len(items)), "tone": "neutral"},
+            {"label": "Sales", "value": _fmt_money(sales_total), "tone": _money_tone(sales_total)},
+            {"label": "Refunds", "value": _fmt_money(refund_total), "tone": _money_tone(refund_total, bad_if_positive=True)},
+        ]
+
+    if intent == "customer_growth":
+        return [
+            {"label": "New Customers", "value": _fmt_count(result.get("new_customers", 0)), "tone": "good"},
+            {"label": "Prior Period", "value": _fmt_count(result.get("prior_new_customers", 0)), "tone": "neutral"},
+            {"label": "Total Customers", "value": _fmt_count(result.get("total_customers", 0)), "tone": "neutral"},
+        ]
+
+    if intent == "b2b_performance":
+        return [
+            {"label": "Paid Sales", "value": _fmt_money(result.get("paid_sales", 0)), "tone": "good"},
+            {"label": "Outstanding", "value": _fmt_money(result.get("outstanding", 0)), "tone": "bad"},
+            {"label": "Clients With Balance", "value": _fmt_count(result.get("clients_with_balance", 0)), "tone": "neutral"},
+        ]
+
+    if intent == "change_summary":
+        current = result.get("current") or {}
+        comparison = result.get("comparison") or {}
+        focus = result.get("focus", "sales")
+        if focus == "profit":
+            current_value = current.get("gross_profit", 0)
+            comparison_value = comparison.get("gross_profit", 0)
+        else:
+            current_value = current.get("total", 0)
+            comparison_value = comparison.get("total", 0)
+        delta = float(current_value or 0) - float(comparison_value or 0)
+        return [
+            {"label": "Current", "value": _fmt_money(current_value), "tone": "neutral"},
+            {"label": "Compared To", "value": _fmt_money(comparison_value), "tone": "neutral"},
+            {"label": "Delta", "value": _fmt_money(delta), "tone": "good" if delta >= 0 else "bad"},
         ]
 
     return []
@@ -397,6 +480,46 @@ def build_table(intent: str | None, result: dict | None) -> dict | None:
         rows = [
             {"category": item.get("name", ""), "total": _fmt_money(item.get("total", 0))}
             for item in breakdown
+        ]
+        return _make_table(columns, rows, total_count=len(rows))
+
+    if intent == "product_details":
+        items = result.get("matches") or []
+        if not items:
+            return None
+        columns = [
+            {"key": "sku", "label": "SKU", "align": "left"},
+            {"key": "name", "label": "Product", "align": "left"},
+            {"key": "price", "label": "Price", "align": "right"},
+            {"key": "stock", "label": "Stock", "align": "right"},
+        ]
+        rows = [
+            {
+                "sku": item.get("sku", ""),
+                "name": item.get("name", ""),
+                "price": _fmt_money(item.get("price", 0)),
+                "stock": _fmt_count(item.get("stock", 0)),
+            }
+            for item in items
+        ]
+        return _make_table(columns, rows, total_count=len(rows))
+
+    if intent == "recent_activity":
+        items = result.get("items") or []
+        columns = [
+            {"key": "invoice_number", "label": "Reference", "align": "left"},
+            {"key": "customer", "label": "Customer", "align": "left"},
+            {"key": "type", "label": "Type", "align": "left"},
+            {"key": "total", "label": "Amount", "align": "right"},
+        ]
+        rows = [
+            {
+                "invoice_number": item.get("invoice_number", ""),
+                "customer": item.get("customer", ""),
+                "type": item.get("type", ""),
+                "total": _fmt_money(item.get("total", 0)),
+            }
+            for item in items
         ]
         return _make_table(columns, rows, total_count=len(rows))
 

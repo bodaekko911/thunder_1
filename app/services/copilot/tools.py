@@ -56,6 +56,17 @@ TOOL_DEFINITIONS = [
         "input_schema": {"type": "object", "properties": {}},
     },
     {
+        "name": "get_expenses_range_summary",
+        "description": "Get total expenses for a specific date range. Requires accounting permission.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "date_from": {"type": "string", "description": "Start date YYYY-MM-DD"},
+                "date_to": {"type": "string", "description": "End date YYYY-MM-DD"},
+            },
+        },
+    },
+    {
         "name": "get_unpaid_invoices_summary",
         "description": (
             "Get count and outstanding amounts for unpaid POS and B2B invoices. "
@@ -166,19 +177,57 @@ TOOL_DEFINITIONS = [
             "required": ["period", "date_from", "date_to"],
         },
     },
+    {
+        "name": "get_recent_activity",
+        "description": "Get recent paid sales and refunds for a date range.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "date_from": {"type": "string", "description": "Start date YYYY-MM-DD"},
+                "date_to": {"type": "string", "description": "End date YYYY-MM-DD"},
+                "limit": {"type": "integer", "description": "Maximum number of records to return"},
+            },
+        },
+    },
+    {
+        "name": "get_customer_growth_summary",
+        "description": "Get total customers and new-customer growth for a period.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "date_from": {"type": "string", "description": "Start date YYYY-MM-DD"},
+                "date_to": {"type": "string", "description": "End date YYYY-MM-DD"},
+            },
+        },
+    },
+    {
+        "name": "get_b2b_performance_summary",
+        "description": "Get B2B paid sales and outstanding balances for a period. Requires page_b2b permission.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "date_from": {"type": "string", "description": "Start date YYYY-MM-DD"},
+                "date_to": {"type": "string", "description": "End date YYYY-MM-DD"},
+            },
+        },
+    },
 ]
 
 
 async def execute_tool(db, *, current_user, name: str, input_data: dict) -> dict:
     from app.services.assistant_tools import (
+        get_b2b_performance_summary as _get_b2b_performance_summary,
         get_customer_balance as _get_customer_balance,
         get_customer_balances as _get_customer_balances,
+        get_customer_growth_summary as _get_customer_growth_summary,
         get_expense_breakdown as _get_expense_breakdown,
+        get_expenses_range_summary as _get_expenses_range_summary,
         get_expenses_summary as _get_expenses_summary,
         get_low_stock_items as _get_low_stock_items,
         get_overdue_customers as _get_overdue_customers,
         get_product_details as _get_product_details,
         get_profit_loss_summary as _get_profit_loss_summary,
+        get_recent_activity as _get_recent_activity,
         get_sales_by_period as _get_sales_by_period,
         get_sales_summary as _get_sales_summary,
         get_stock_levels as _get_stock_levels,
@@ -211,6 +260,15 @@ async def execute_tool(db, *, current_user, name: str, input_data: dict) -> dict
         if not (has_permission(current_user, "page_accounting") or has_permission(current_user, "page_expenses")):
             return {"error": "Permission denied: page_accounting or page_expenses is required to view expenses."}
         return await _get_expenses_summary(db)
+
+    if name == "get_expenses_range_summary":
+        if not (has_permission(current_user, "page_accounting") or has_permission(current_user, "page_expenses")):
+            return {"error": "Permission denied: page_accounting or page_expenses is required to view expenses."}
+        return await _get_expenses_range_summary(
+            db,
+            date_from=input_data.get("date_from"),
+            date_to=input_data.get("date_to"),
+        )
 
     if name == "get_unpaid_invoices_summary":
         if not (has_permission(current_user, "page_pos") or has_permission(current_user, "page_b2b")):
@@ -280,5 +338,31 @@ async def execute_tool(db, *, current_user, name: str, input_data: dict) -> dict
         if not (has_permission(current_user, "page_inventory") or has_permission(current_user, "page_products")):
             return {"error": "Permission denied: page_inventory or page_products is required to view stock value."}
         return await _get_stock_value_summary(db)
+
+    if name == "get_recent_activity":
+        if not has_permission(current_user, "page_pos"):
+            return {"error": "Permission denied: page_pos is required to view recent activity."}
+        return await _get_recent_activity(
+            db,
+            date_from=input_data.get("date_from"),
+            date_to=input_data.get("date_to"),
+            limit=int(input_data.get("limit", 10)),
+        )
+
+    if name == "get_customer_growth_summary":
+        return await _get_customer_growth_summary(
+            db,
+            date_from=input_data.get("date_from"),
+            date_to=input_data.get("date_to"),
+        )
+
+    if name == "get_b2b_performance_summary":
+        if not has_permission(current_user, "page_b2b"):
+            return {"error": "Permission denied: page_b2b is required to view B2B performance."}
+        return await _get_b2b_performance_summary(
+            db,
+            date_from=input_data.get("date_from"),
+            date_to=input_data.get("date_to"),
+        )
 
     return {"error": f"Unknown tool: {name}"}

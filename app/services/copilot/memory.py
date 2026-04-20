@@ -48,6 +48,10 @@ async def get_latest_session(db, *, user_id: int, channel: str = "dashboard") ->
     try:
         return await _load_latest_session(db, user_id=user_id, channel=channel)
     except Exception:
+        try:
+            await db.rollback()
+        except Exception:
+            pass
         return None
 
 
@@ -62,6 +66,10 @@ async def get_or_create_session(db, *, user_id: int, channel: str = "dashboard")
         await db.flush()
         return session
     except Exception:
+        try:
+            await db.rollback()
+        except Exception:
+            pass
         return None
 
 

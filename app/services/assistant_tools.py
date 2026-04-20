@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.b2b import B2BClient, B2BInvoice
 from app.models.accounting import Account, Journal, JournalEntry
+from app.models.customer import Customer
 from app.models.expense import Expense, ExpenseCategory
 from app.models.invoice import Invoice, InvoiceItem
 from app.models.product import Product
@@ -208,6 +209,30 @@ async def get_low_stock_items(db: AsyncSession, *, threshold: int = 5) -> dict:
 async def get_expenses_summary(db: AsyncSession) -> dict:
     """Expense totals for the current and previous month with category breakdown."""
     return await _expense_summary(db)
+
+
+async def get_expenses_range_summary(
+    db: AsyncSession,
+    *,
+    date_from: str | None = None,
+    date_to: str | None = None,
+) -> dict:
+    """Expense total for any explicit date range."""
+    today = date_type.today()
+    start_date = _as_date(date_from, fallback=today.replace(day=1))
+    end_date = _as_date(date_to, fallback=today)
+
+    result = await db.execute(
+        select(func.coalesce(func.sum(Expense.amount), 0)).where(
+            Expense.expense_date >= start_date,
+            Expense.expense_date <= end_date,
+        )
+    )
+    return {
+        "date_from": start_date.isoformat(),
+        "date_to": end_date.isoformat(),
+        "total": round(float(result.scalar() or 0), 2),
+    }
 
 
 async def get_unpaid_invoices_summary(db: AsyncSession) -> dict:
@@ -605,4 +630,173 @@ async def get_profit_loss_summary(
         "expenses": expenses,
         "gross_profit": gross_profit,
         "margin_pct": margin_pct,
+    }
+
+
+async def get_recent_activity(
+    db: AsyncSession,
+    *,
+    date_from: str | None = None,
+    date_to: str | None = None,
+    limit: int = 10,
+) -> dict:
+    """Recent paid sales and refunds in the requested period."""
+    today = date_type.today()
+    start_date = _as_date(date_from, fallback=today)
+    end_date = _as_date(date_to, fallback=start_date)
+
+    invoice_result = await db.execute(
+        select(
+            Invoice.id,
+            Invoice.invoice_number,
+            Invoice.customer_id,
+            Invoice.total,
+            Invoice.payment_method,
+            Invoice.created_at,
+        )
+        .where(
+            func.date(Invoice.created_at).between(start_date, end_date),
+            Invoice.status == "paid",
+        )
+        .order_by(Invoice.created_at.desc())
+        .limit(limit)
+    )
+    refund_result = await db.execute(
+        select(
+            RetailRefund.id,
+            RetailRefund.refund_number,
+            RetailRefund.customer_id,
+            RetailRefund.total,
+            RetailRefund.refund_method,
+            RetailRefund.created_at,
+            RetailRefund.invoice_id,
+        )
+        .where(func.date(RetailRefund.created_at).between(start_date, end_date))
+        .order_by(RetailRefund.created_at.desc())
+        .limit(limit)
+    )
+    invoice_rows = invoice_result.all()
+    refund_rows = refund_result.all()
+
+    customer_ids = {
+        row.customer_id
+        for row in [*invoice_rows, *refund_rows]
+        if getattr(row, "customer_id", None) is not None
+    }
+    customer_map: dict[int, str] = {}
+    if customer_ids:
+        customer_result = await db.execute(select(Customer.id, Customer.name).where(Customer.id.in_(customer_ids)))
+        customer_map = {int(row.id): row.name for row in customer_result.all()}
+
+    items = []
+    for row in invoice_rows:
+        items.append(
+            {
+                "type": "sale",
+                "invoice_id": int(row.id),
+                "invoice_number": row.invoice_number,
+                "customer": customer_map.get(int(row.customer_id), "Walk-in") if row.customer_id is not None else "Walk-in",
+                "total": round(float(row.total or 0), 2),
+                "method": row.payment_method or "cash",
+                "timestamp": row.created_at.isoformat() if row.created_at else None,
+            }
+        )
+    for row in refund_rows:
+        items.append(
+            {
+                "type": "refund",
+                "invoice_id": int(row.invoice_id) if row.invoice_id is not None else None,
+                "invoice_number": row.refund_number,
+                "customer": customer_map.get(int(row.customer_id), "-") if row.customer_id is not None else "-",
+                "total": round(-float(row.total or 0), 2),
+                "method": row.refund_method or "cash",
+                "timestamp": row.created_at.isoformat() if row.created_at else None,
+            }
+        )
+    items.sort(key=lambda item: item.get("timestamp") or "", reverse=True)
+    items = items[:limit]
+    return {
+        "date_from": start_date.isoformat(),
+        "date_to": end_date.isoformat(),
+        "count": len(items),
+        "items": items,
+    }
+
+
+async def get_customer_growth_summary(
+    db: AsyncSession,
+    *,
+    date_from: str | None = None,
+    date_to: str | None = None,
+) -> dict:
+    """Customer growth in a period vs the prior equal-length period."""
+    today = date_type.today()
+    start_date = _as_date(date_from, fallback=today.replace(day=1))
+    end_date = _as_date(date_to, fallback=today)
+    span = (end_date - start_date).days
+    prior_end = start_date - timedelta(days=1)
+    prior_start = prior_end - timedelta(days=span)
+
+    total_result = await db.execute(select(func.count(Customer.id)))
+    current_result = await db.execute(
+        select(func.count(Customer.id)).where(
+            func.date(Customer.created_at).between(start_date, end_date)
+        )
+    )
+    prior_result = await db.execute(
+        select(func.count(Customer.id)).where(
+            func.date(Customer.created_at).between(prior_start, prior_end)
+        )
+    )
+
+    total_customers = int(total_result.scalar() or 0)
+    current_new = int(current_result.scalar() or 0)
+    prior_new = int(prior_result.scalar() or 0)
+    change_pct = round(((current_new - prior_new) / prior_new) * 100, 1) if prior_new else None
+    return {
+        "date_from": start_date.isoformat(),
+        "date_to": end_date.isoformat(),
+        "total_customers": total_customers,
+        "new_customers": current_new,
+        "prior_new_customers": prior_new,
+        "change_pct": change_pct,
+    }
+
+
+async def get_b2b_performance_summary(
+    db: AsyncSession,
+    *,
+    date_from: str | None = None,
+    date_to: str | None = None,
+) -> dict:
+    """Paid B2B sales and current outstanding balance."""
+    today = date_type.today()
+    start_date = _as_date(date_from, fallback=today.replace(day=1))
+    end_date = _as_date(date_to, fallback=today)
+
+    paid_sales_result = await db.execute(
+        select(func.coalesce(func.sum(B2BInvoice.total), 0)).where(
+            func.date(B2BInvoice.created_at).between(start_date, end_date),
+            B2BInvoice.status == "paid",
+        )
+    )
+    outstanding_result = await db.execute(
+        select(func.coalesce(func.sum(B2BInvoice.total - B2BInvoice.amount_paid), 0)).where(
+            B2BInvoice.status.in_(["unpaid", "partial"])
+        )
+    )
+    active_clients_result = await db.execute(select(func.count(B2BClient.id)).where(B2BClient.is_active == True))
+    unpaid_clients_result = await db.execute(
+        select(func.count(func.distinct(B2BInvoice.client_id))).where(
+            B2BInvoice.status.in_(["unpaid", "partial"])
+        )
+    )
+
+    return {
+        "date_from": start_date.isoformat(),
+        "date_to": end_date.isoformat(),
+        "paid_sales": round(float(paid_sales_result.scalar() or 0), 2),
+        "outstanding": round(float(outstanding_result.scalar() or 0), 2),
+        "active_clients": int(active_clients_result.scalar() or 0),
+        "clients_with_balance": int(unpaid_clients_result.scalar() or 0),
     }

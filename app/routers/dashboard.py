@@ -32,6 +32,9 @@ router = APIRouter(
 
 class DashboardAssistantQuestion(BaseModel):
     question: str
+    range: Optional[str] = None
+    start: Optional[str] = None
+    end: Optional[str] = None
 
 
 # ── legacy data endpoint ───────────────────────────────────────────────
@@ -352,6 +355,11 @@ async def dashboard_assistant(
             db,
             question=data.question,
             current_user=current_user,
+            dashboard_context={
+                "range": data.range,
+                "start": data.start,
+                "end": data.end,
+            },
         )
     except HTTPException as exc:
         detail = exc.detail if isinstance(exc.detail, str) else "Request failed"
@@ -556,9 +564,15 @@ def dashboard_ui():
     <div class="assistant-header">
       <div>
         <h2>Ask about your business</h2>
-        <p>Ask about sales, products, stock, expenses, receivables, or customer balances</p>
+        <p>Ask about the selected period or use explicit dates. I can help with sales, stock, products, expenses, receivables, activity, and comparisons.</p>
       </div>
       <button type="button" class="assistant-clear" id="assistant-clear">Clear</button>
+    </div>
+    <div class="assistant-helper">
+      <span>Try:</span>
+      <span>top products this month</span>
+      <span>what changed compared to yesterday</span>
+      <span>show recent sales activity</span>
     </div>
     <div class="assistant-chips" id="assistant-chips"></div>
     <div class="assistant-input-row">

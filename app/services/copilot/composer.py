@@ -10,6 +10,8 @@ SUPPORTED_QUESTIONS_BY_CATEGORY: dict[str, list[str]] = {
         "how much did we make last week",
         "top products",
         "sales by period",
+        "what changed compared to yesterday",
+        "show recent sales activity",
     ],
     "Inventory": [
         "low-stock items",
@@ -21,6 +23,7 @@ SUPPORTED_QUESTIONS_BY_CATEGORY: dict[str, list[str]] = {
         "overdue customers",
         "customer balance for <name>",
         "who owes me the most",
+        "customer growth this month",
     ],
     "Expenses": [
         "expenses this month",
@@ -31,6 +34,7 @@ SUPPORTED_QUESTIONS_BY_CATEGORY: dict[str, list[str]] = {
         "profit and loss",
         "profit last month",
         "margin this month",
+        "what is gross profit this month",
     ],
 }
 

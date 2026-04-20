@@ -36,11 +36,13 @@ async def answer_dashboard_question(
     *,
     question: str,
     current_user: User,
+    dashboard_context: dict | None = None,
 ) -> dict:
     return await answer_question(
         db,
         question=question,
         current_user=current_user,
+        dashboard_context=dashboard_context,
     )
 
 
