@@ -29,8 +29,9 @@ from decimal import Decimal
 from typing import Optional
 
 import openpyxl
-from sqlalchemy import Date as SADate, cast, or_, select
+from sqlalchemy import Date as SADate, cast, insert, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import defer
 from sqlalchemy.sql import func as sa_func
 
 from app.models.b2b import (
@@ -121,6 +122,24 @@ def _find_col(headers: list[str], candidates: list[str]) -> Optional[int]:
     return None
 
 
+async def _column_exists(db: AsyncSession, table_name: str, column_name: str) -> bool:
+    result = await db.execute(
+        text(
+            """
+            SELECT EXISTS (
+                SELECT 1
+                FROM information_schema.columns
+                WHERE table_schema = current_schema()
+                  AND table_name = :table_name
+                  AND column_name = :column_name
+            )
+            """
+        ),
+        {"table_name": table_name, "column_name": column_name},
+    )
+    return bool(result.scalar())
+
+
 # ── Main entry point ──────────────────────────────────────────────────────────
 
 async def import_b2b_sales(
@@ -134,6 +153,10 @@ async def import_b2b_sales(
 ) -> dict:
     if mode not in VALID_MODES:
         mode = "history_only"
+
+    product_import_batch_supported = await _column_exists(db, "products", "created_by_import_batch")
+    invoice_import_batch_supported = await _column_exists(db, "b2b_invoices", "import_batch_id")
+    consignment_import_batch_supported = await _column_exists(db, "consignments", "import_batch_id")
 
     wb = openpyxl.load_workbook(io.BytesIO(workbook_bytes), data_only=True)
     ws = wb.active
@@ -352,7 +375,9 @@ async def import_b2b_sales(
         })
 
     _all_p = await db.execute(
-        select(Product).where(or_(Product.is_active.is_(True), Product.is_active.is_(None)))
+        select(Product)
+        .options(defer(Product.created_by_import_batch))
+        .where(or_(Product.is_active.is_(True), Product.is_active.is_(None)))
     )
     all_products = _all_p.scalars().all()
     products_by_norm_sku = {normalize_barcode_value(p.sku): p for p in all_products}
@@ -449,7 +474,9 @@ async def import_b2b_sales(
 
     # Fetch all active products once
     _all_p = await db.execute(
-        select(Product).where(or_(Product.is_active.is_(True), Product.is_active.is_(None)))
+        select(Product)
+        .options(defer(Product.created_by_import_batch))
+        .where(or_(Product.is_active.is_(True), Product.is_active.is_(None)))
     )
     all_products = _all_p.scalars().all()
     products_by_norm_sku = {normalize_barcode_value(p.sku): p for p in all_products}
@@ -560,21 +587,34 @@ async def import_b2b_sales(
                 else:
                     sku_name_registry[norm_sku] = item_name
 
-                product = Product(
-                    sku=raw_sku_str,
-                    name=item_name,
-                    price=round(float(r["price"]), 2),
-                    cost=0,
-                    stock=0,
-                    min_stock=5,
-                    unit="pcs",
-                    is_active=True,
-                    category="Imported - Historical B2B",
-                    item_type="finished",
-                    created_by_import_batch=batch_id,
-                )
-                db.add(product)
-                await db.flush()
+                product_payload = {
+                    "sku": raw_sku_str,
+                    "name": item_name,
+                    "price": round(float(r["price"]), 2),
+                    "cost": 0,
+                    "stock": 0,
+                    "min_stock": 5,
+                    "unit": "pcs",
+                    "is_active": True,
+                    "category": "Imported - Historical B2B",
+                    "item_type": "finished",
+                }
+
+                if product_import_batch_supported:
+                    product = Product(**product_payload, created_by_import_batch=batch_id)
+                    db.add(product)
+                    await db.flush()
+                else:
+                    product_insert = await db.execute(
+                        insert(Product.__table__).values(**product_payload).returning(Product.id)
+                    )
+                    product_id = product_insert.scalar_one()
+                    fetched_product = await db.execute(
+                        select(Product)
+                        .options(defer(Product.created_by_import_batch))
+                        .where(Product.id == product_id)
+                    )
+                    product = fetched_product.scalar_one()
 
                 newly_created_by_norm_sku[norm_sku] = product
                 group_created_norm_skus.append(norm_sku)
@@ -615,27 +655,34 @@ async def import_b2b_sales(
         invoice_number = f"HB2B-{str(max_b2b_id + b2b_counter).zfill(5)}"
 
         try:
-            invoice = B2BInvoice(
-                invoice_number=invoice_number,
-                client_id=client.id,
-                user_id=current_user_id,
-                invoice_type=payment_type,
-                status=status,
-                payment_method=payment_type,
-                subtotal=subtotal_inv,
-                discount=discount_inv,
-                total=total_inv,
-                amount_paid=amount_paid,
-                notes=f"Imported from {filename} on {today_str}",
-                import_batch_id=batch_id,
-                created_at=sale_dt,
-            )
-            db.add(invoice)
-            await db.flush()
+            invoice_payload = {
+                "invoice_number": invoice_number,
+                "client_id": client.id,
+                "user_id": current_user_id,
+                "invoice_type": payment_type,
+                "status": status,
+                "payment_method": payment_type,
+                "subtotal": subtotal_inv,
+                "discount": discount_inv,
+                "total": total_inv,
+                "amount_paid": amount_paid,
+                "notes": f"Imported from {filename} on {today_str}",
+                "created_at": sale_dt,
+            }
+            if invoice_import_batch_supported:
+                invoice = B2BInvoice(**invoice_payload, import_batch_id=batch_id)
+                db.add(invoice)
+                await db.flush()
+                invoice_id = invoice.id
+            else:
+                invoice_insert = await db.execute(
+                    insert(B2BInvoice.__table__).values(**invoice_payload).returning(B2BInvoice.id)
+                )
+                invoice_id = invoice_insert.scalar_one()
 
             for product, qty, unit_price, disc, line_total in line_items:
                 db.add(B2BInvoiceItem(
-                    invoice_id=invoice.id,
+                    invoice_id=invoice_id,
                     product_id=product.id,
                     qty=qty,
                     unit_price=unit_price,
@@ -649,7 +696,7 @@ async def import_b2b_sales(
                     db.add(StockMove(
                         product_id=product.id, type="out", qty=-qty,
                         qty_before=before, qty_after=after,
-                        ref_type="b2b", ref_id=invoice.id,
+                        ref_type="b2b", ref_id=invoice_id,
                         note=f"Historical B2B import — {invoice_number}",
                         user_id=current_user_id,
                     ))
@@ -667,7 +714,7 @@ async def import_b2b_sales(
                     [("1000", total_inv, 0), ("4000", 0, total_inv)],
                     user_id=current_user_id,
                     created_at=sale_dt,
-                    ref_id=invoice.id,
+                    ref_id=invoice_id,
                 )
             else:  # full_payment or consignment
                 await post_journal(
@@ -677,7 +724,7 @@ async def import_b2b_sales(
                     [("1100", total_inv, 0), ("2200", 0, total_inv)],
                     user_id=current_user_id,
                     created_at=sale_dt,
-                    ref_id=invoice.id,
+                    ref_id=invoice_id,
                 )
                 client.outstanding = Decimal(str(float(client.outstanding) + total_inv))
 
@@ -685,22 +732,29 @@ async def import_b2b_sales(
             if payment_type == "consignment":
                 cons_counter += 1
                 cons_ref = f"HCONS-{str(max_cons_id + cons_counter).zfill(4)}"
-                consignment = Consignment(
-                    ref_number=cons_ref,
-                    client_id=client.id,
-                    invoice_id=invoice.id,
-                    user_id=current_user_id,
-                    status="active",
-                    import_batch_id=batch_id,
-                    created_at=sale_dt,
-                    notes=f"Imported from {filename} on {today_str}",
-                )
-                db.add(consignment)
-                await db.flush()
+                consignment_payload = {
+                    "ref_number": cons_ref,
+                    "client_id": client.id,
+                    "invoice_id": invoice_id,
+                    "user_id": current_user_id,
+                    "status": "active",
+                    "created_at": sale_dt,
+                    "notes": f"Imported from {filename} on {today_str}",
+                }
+                if consignment_import_batch_supported:
+                    consignment = Consignment(**consignment_payload, import_batch_id=batch_id)
+                    db.add(consignment)
+                    await db.flush()
+                    consignment_id = consignment.id
+                else:
+                    consignment_insert = await db.execute(
+                        insert(Consignment.__table__).values(**consignment_payload).returning(Consignment.id)
+                    )
+                    consignment_id = consignment_insert.scalar_one()
                 for product, qty, unit_price, disc, line_total in line_items:
                     post_disc_unit = line_total / qty if qty else 0.0
                     db.add(ConsignmentItem(
-                        consignment_id=consignment.id,
+                        consignment_id=consignment_id,
                         product_id=product.id,
                         qty_sent=qty,
                         qty_sold=0,
