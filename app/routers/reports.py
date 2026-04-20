@@ -79,12 +79,27 @@ def parse_dates(date_from, date_to):
     return d_from, d_to
 
 
+def _resolve_pagination(skip, limit, default_limit=100):
+    skip_value = getattr(skip, "default", skip)
+    limit_value = getattr(limit, "default", limit)
+    try:
+        skip_value = max(int(skip_value or 0), 0)
+    except (TypeError, ValueError):
+        skip_value = 0
+    try:
+        limit_value = max(int(limit_value or default_limit), 0)
+    except (TypeError, ValueError):
+        limit_value = default_limit
+    return skip_value, limit_value
+
+
 # ── SALES ──────────────────────────────────────────────
 @router.get("/api/sales")
 async def sales_report(date_from: Optional[str] = None, date_to: Optional[str] = None, skip: int = 0, limit: int = Query(default=100, le=500), db: AsyncSession = Depends(get_async_session)):
     d_from, d_to = parse_dates(date_from, date_to)
     if (d_to - d_from).days > 366:
         raise HTTPException(status_code=400, detail="Date range cannot exceed 1 year")
+    skip, limit = _resolve_pagination(skip, limit)
     result = await db.execute(
         select(Invoice)
         .where(Invoice.created_at >= d_from, Invoice.created_at <= d_to, Invoice.status == "paid")
@@ -192,7 +207,7 @@ async def sales_report(date_from: Optional[str] = None, date_to: Optional[str] =
 
 @router.get("/export/sales", dependencies=[Depends(require_permission("action_export_excel"))])
 async def export_sales(date_from: str = None, date_to: str = None, db: AsyncSession = Depends(get_async_session)):
-    data = await sales_report(date_from=date_from, date_to=date_to, db=db)
+    data = await sales_report(date_from=date_from, date_to=date_to, skip=0, limit=100000, db=db)
     try:
         import openpyxl
         from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
@@ -318,6 +333,7 @@ async def b2b_statement(date_from: Optional[str] = None, date_to: Optional[str] 
     d_from, d_to = parse_dates(date_from, date_to)
     if (d_to - d_from).days > 366:
         raise HTTPException(status_code=400, detail="Date range cannot exceed 1 year")
+    skip, limit = _resolve_pagination(skip, limit)
     res = await db.execute(select(B2BClient).where(B2BClient.is_active == True).order_by(B2BClient.name))
     clients = res.scalars().all()
     result = []
@@ -342,7 +358,7 @@ async def b2b_statement(date_from: Optional[str] = None, date_to: Optional[str] 
 
 @router.get("/export/b2b-statement", dependencies=[Depends(require_permission("action_export_excel"))])
 async def export_b2b(date_from: str = None, date_to: str = None, db: AsyncSession = Depends(get_async_session)):
-    data = await b2b_statement(date_from=date_from, date_to=date_to, db=db)
+    data = await b2b_statement(date_from=date_from, date_to=date_to, skip=0, limit=100000, db=db)
     rows = [[d["name"],d["phone"],d["payment_terms"],d["total_invoiced"],d["total_paid"],d["outstanding"],d["invoice_count"]] for d in data]
     buf = to_xlsx(["Client","Phone","Payment Terms","Total Invoiced","Total Paid","Outstanding","Invoices"], rows, "B2B Statement")
     return StreamingResponse(buf, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -352,6 +368,7 @@ async def export_b2b(date_from: str = None, date_to: str = None, db: AsyncSessio
 # ── INVENTORY ──────────────────────────────────────────
 @router.get("/api/inventory")
 async def inventory_report(skip: int = 0, limit: int = Query(default=100, le=500), db: AsyncSession = Depends(get_async_session)):
+    skip, limit = _resolve_pagination(skip, limit)
     prod_res = await db.execute(select(Product).where(Product.is_active == True).order_by(Product.name))
     products = prod_res.scalars().all()
     rows = []
@@ -370,7 +387,7 @@ async def inventory_report(skip: int = 0, limit: int = Query(default=100, le=500
 
 @router.get("/export/inventory", dependencies=[Depends(require_permission("action_export_excel"))])
 async def export_inventory(db: AsyncSession = Depends(get_async_session)):
-    data = await inventory_report(db=db)
+    data = await inventory_report(skip=0, limit=100000, db=db)
     rows = [[p["sku"],p["name"],p["stock"],p["unit"],p["price"],p["value"],p["total_in"],p["total_out"],"YES" if p["low_stock"] else ""] for p in data["products"]]
     buf = to_xlsx(["SKU","Product","Stock","Unit","Price (EGP)","Stock Value","Total In","Total Out","Low Stock"], rows, "Inventory")
     return StreamingResponse(buf, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -383,6 +400,7 @@ async def farm_intake_report(date_from: Optional[str] = None, date_to: Optional[
     d_from, d_to = parse_dates(date_from, date_to)
     if (d_to - d_from).days > 366:
         raise HTTPException(status_code=400, detail="Date range cannot exceed 1 year")
+    skip, limit = _resolve_pagination(skip, limit)
     farm_res = await db.execute(select(Farm).where(Farm.is_active == 1))
     farms = farm_res.scalars().all()
     # Auto-fix unnamed farms
@@ -427,7 +445,7 @@ async def farm_intake_report(date_from: Optional[str] = None, date_to: Optional[
 
 @router.get("/export/farm-intake", dependencies=[Depends(require_permission("action_export_excel"))])
 async def export_farm(date_from: str = None, date_to: str = None, db: AsyncSession = Depends(get_async_session)):
-    data = await farm_intake_report(date_from=date_from, date_to=date_to, db=db)
+    data = await farm_intake_report(date_from=date_from, date_to=date_to, skip=0, limit=100000, db=db)
     rows = []
     for farm in data["farms"]:
         for p in farm["products"]:
@@ -447,6 +465,7 @@ async def spoilage_report(date_from: Optional[str] = None, date_to: Optional[str
     d_from, d_to = parse_dates(date_from, date_to)
     if (d_to - d_from).days > 366:
         raise HTTPException(status_code=400, detail="Date range cannot exceed 1 year")
+    skip, limit = _resolve_pagination(skip, limit)
     sp_res = await db.execute(
         select(SpoilageRecord)
         .where(SpoilageRecord.spoilage_date>=d_from.date(), SpoilageRecord.spoilage_date<=d_to.date())
@@ -469,7 +488,7 @@ async def spoilage_report(date_from: Optional[str] = None, date_to: Optional[str
 
 @router.get("/export/spoilage", dependencies=[Depends(require_permission("action_export_excel"))])
 async def export_spoilage(date_from: str = None, date_to: str = None, db: AsyncSession = Depends(get_async_session)):
-    data = await spoilage_report(date_from=date_from, date_to=date_to, db=db)
+    data = await spoilage_report(date_from=date_from, date_to=date_to, skip=0, limit=100000, db=db)
     rows = [[r["ref"],r["product"],r["qty"],r["unit"],r["reason"],r["farm"],r["date"],r["user_name"],r["notes"]] for r in data["records"]]
     buf = to_xlsx(["Ref #","Product","Qty","Unit","Reason","Farm","Date","Performed By","Notes"], rows, "Spoilage")
     return StreamingResponse(buf, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -482,6 +501,7 @@ async def production_report(date_from: Optional[str] = None, date_to: Optional[s
     d_from, d_to = parse_dates(date_from, date_to)
     if (d_to - d_from).days > 366:
         raise HTTPException(status_code=400, detail="Date range cannot exceed 1 year")
+    skip, limit = _resolve_pagination(skip, limit)
     batch_res = await db.execute(
         select(ProductionBatch)
         .where(ProductionBatch.created_at>=d_from, ProductionBatch.created_at<=d_to)
@@ -509,7 +529,7 @@ async def production_report(date_from: Optional[str] = None, date_to: Optional[s
 
 @router.get("/export/production", dependencies=[Depends(require_permission("action_export_excel"))])
 async def export_production(date_from: str = None, date_to: str = None, db: AsyncSession = Depends(get_async_session)):
-    data = await production_report(date_from=date_from, date_to=date_to, db=db)
+    data = await production_report(date_from=date_from, date_to=date_to, skip=0, limit=100000, db=db)
     rows = [[b["batch_number"],b["type"],b["recipe"],b["inputs_str"],b["outputs_str"],b["waste_pct"],b["date"],b["user_name"],b["notes"]] for b in data["batches"]]
     buf = to_xlsx(["Batch #","Type","Recipe","Inputs","Outputs","Loss %","Date","Performed By","Notes"], rows, "Production")
     return StreamingResponse(buf, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -1590,7 +1610,15 @@ function showToast(msg){
     clearTimeout(toastTimer); toastTimer=setTimeout(()=>t.classList.remove("show"),3000);
 }
 
-function exportSection(tab){
+function getDownloadFilename(response, fallback){
+    const disposition = response.headers.get("Content-Disposition") || "";
+    const utf8Match = disposition.match(/filename\\*=UTF-8''([^;]+)/i);
+    if(utf8Match) return decodeURIComponent(utf8Match[1]);
+    const plainMatch = disposition.match(/filename="?([^\";]+)"?/i);
+    return plainMatch ? plainMatch[1] : fallback;
+}
+
+async function exportSection(tab){
     const build = {
         sales:      ()=>{ let r=getRange("sales-from","sales-to"); return `/reports/export/sales?date_from=${r.from}&date_to=${r.to}`; },
         b2b:        ()=>{ let r=getRange("b2b-from","b2b-to");     return `/reports/export/b2b-statement?date_from=${r.from}&date_to=${r.to}`; },
@@ -1601,8 +1629,42 @@ function exportSection(tab){
         pl:           ()=>{ let r=getRange("pl-from","pl-to");   return `/reports/export/pl?date_from=${r.from}&date_to=${r.to}`; },
         transactions: ()=>{ let r=getRange("tx-from","tx-to"); let s=document.getElementById("tx-source").value; return `/reports/export/transactions?date_from=${r.from}&date_to=${r.to}${s?"&source="+s:""}`; },
     };
-    window.location.href = build[tab]();
-    showToast("Downloading Excel...");
+    const fallbackFilename = `${tab}_report.xlsx`;
+    showToast("Preparing Excel...");
+    try{
+        const response = await fetch(build[tab](), { credentials: "same-origin" });
+        if(!response.ok){
+            const contentType = response.headers.get("content-type") || "";
+            let message = `Excel export failed (${response.status}).`;
+            if(contentType.includes("application/json")){
+                const payload = await response.json().catch(()=>null);
+                if(payload && payload.detail) message = payload.detail;
+            } else if(response.status >= 500){
+                message = "Excel export failed on the server. Please try again.";
+            } else {
+                const text = await response.text().catch(()=> "");
+                if(text && !text.trim().startsWith("<!DOCTYPE") && !text.trim().startsWith("<html")){
+                    message = text.trim().slice(0, 160);
+                }
+            }
+            showToast(message);
+            return;
+        }
+        const blob = await response.blob();
+        const filename = getDownloadFilename(response, fallbackFilename);
+        const blobUrl = URL.createObjectURL(blob);
+        const link = document.createElement("a");
+        link.href = blobUrl;
+        link.download = filename;
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        setTimeout(() => URL.revokeObjectURL(blobUrl), 1000);
+        showToast("Excel downloaded");
+    } catch(e){
+        console.error("Export failed:", e);
+        showToast("Excel export failed. Please check your connection and try again.");
+    }
 }
 
 /* ── TRANSACTIONS ── */
