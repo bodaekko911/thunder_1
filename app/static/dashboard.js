@@ -506,22 +506,6 @@ function renderAssistantChips() {
   });
 }
 
-function renderAssistantHelper() {
-  const helperItems = [
-    "Revenue this week",
-    "Top products this month",
-    "Low-stock items",
-    "Product details for olive oil",
-    "Expenses this month",
-    "Who owes me the most?",
-  ];
-  const container = document.getElementById("assistant-helper-list");
-  container.innerHTML = helperItems.map((item) => `<button type="button" class="assistant-helper-chip" data-question="${escHtml(item)}">${escHtml(item)}</button>`).join("");
-  container.querySelectorAll(".assistant-helper-chip").forEach((button) => {
-    button.addEventListener("click", () => submitAssistantQuestion(button.dataset.question || ""));
-  });
-}
-
 function showErrorState(message) {
   document.getElementById("loading").innerHTML = `<div class="load-error">${escHtml(message)}</div>`;
 }
@@ -644,7 +628,6 @@ setTheme = function setTheme(theme) {
 async function initDashboard() {
   initTheme();
   updateRangeButtons();
-  renderAssistantHelper();
   renderAssistantChips();
   renderAssistantHistory();
   bindEvents();
