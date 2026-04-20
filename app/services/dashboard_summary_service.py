@@ -271,40 +271,43 @@ async def _sparkline_expenses(db: AsyncSession, rng: dict[str, Any]) -> list[flo
 
 async def _daily_sales_rows(db: AsyncSession, utc_s: datetime, utc_e: datetime) -> list[dict[str, Any]]:
     tz = _tz()
+    invoice_bucket = _local_bucket_expr(Invoice.created_at, "day")
+    refund_bucket = _local_bucket_expr(RetailRefund.created_at, "day")
+    b2b_bucket = _local_bucket_expr(B2BInvoice.created_at, "day")
 
     pos_rows = await db.execute(
         select(
-            _local_bucket_expr(Invoice.created_at, "day").label("bucket_date"),
+            invoice_bucket.label("bucket_date"),
             func.coalesce(func.sum(Invoice.total), 0).label("total"),
             func.count(Invoice.id).label("orders"),
         )
         .where(Invoice.created_at >= utc_s, Invoice.created_at <= utc_e, Invoice.status == "paid")
-        .group_by(_local_bucket_expr(Invoice.created_at, "day"))
-        .order_by(_local_bucket_expr(Invoice.created_at, "day"))
+        .group_by(invoice_bucket)
+        .order_by(invoice_bucket)
     )
     pos_by_day = {str(row.bucket_date): (_safe_float(row.total), _safe_int(row.orders)) for row in pos_rows}
 
     refund_rows = await db.execute(
         select(
-            _local_bucket_expr(RetailRefund.created_at, "day").label("bucket_date"),
+            refund_bucket.label("bucket_date"),
             func.coalesce(func.sum(RetailRefund.total), 0).label("total"),
             func.count(RetailRefund.id).label("orders"),
         )
         .where(RetailRefund.created_at >= utc_s, RetailRefund.created_at <= utc_e)
-        .group_by(_local_bucket_expr(RetailRefund.created_at, "day"))
-        .order_by(_local_bucket_expr(RetailRefund.created_at, "day"))
+        .group_by(refund_bucket)
+        .order_by(refund_bucket)
     )
     refund_by_day = {str(row.bucket_date): (_safe_float(row.total), _safe_int(row.orders)) for row in refund_rows}
 
     b2b_rows = await db.execute(
         select(
-            _local_bucket_expr(B2BInvoice.created_at, "day").label("bucket_date"),
+            b2b_bucket.label("bucket_date"),
             func.coalesce(func.sum(B2BInvoice.total), 0).label("total"),
             func.count(B2BInvoice.id).label("orders"),
         )
         .where(B2BInvoice.created_at >= utc_s, B2BInvoice.created_at <= utc_e, B2BInvoice.status == "paid")
-        .group_by(_local_bucket_expr(B2BInvoice.created_at, "day"))
-        .order_by(_local_bucket_expr(B2BInvoice.created_at, "day"))
+        .group_by(b2b_bucket)
+        .order_by(b2b_bucket)
     )
     b2b_by_day = {str(row.bucket_date): (_safe_float(row.total), _safe_int(row.orders)) for row in b2b_rows}
 
@@ -550,6 +553,11 @@ async def get_summary(
     from app.services.dashboard_briefing_service import build_briefing
 
     rng = resolve_range(range_param, custom_start, custom_end)
+    user_role = getattr(user, "role", "user")
+    can_view_b2b = has_permission(user, "page_b2b")
+    can_view_expenses = has_permission(user, "page_expenses") or has_permission(user, "page_accounting")
+    can_view_inventory = has_permission(user, "page_inventory") or has_permission(user, "page_products")
+    can_view_pos = has_permission(user, "page_pos")
     _errors: list[dict[str, str]] = []
 
     briefing: dict[str, Any] = {"lead": "You haven't recorded any sales yet for this period.", "actions": [], "body": ""}
@@ -620,11 +628,11 @@ async def get_summary(
         "panels": panels,
         "generated_at": generated_at,
         "viewer": {
-            "role": getattr(user, "role", "user"),
-            "can_view_b2b": has_permission(user, "page_b2b"),
-            "can_view_expenses": has_permission(user, "page_expenses") or has_permission(user, "page_accounting"),
-            "can_view_inventory": has_permission(user, "page_inventory") or has_permission(user, "page_products"),
-            "can_view_pos": has_permission(user, "page_pos"),
+            "role": user_role,
+            "can_view_b2b": can_view_b2b,
+            "can_view_expenses": can_view_expenses,
+            "can_view_inventory": can_view_inventory,
+            "can_view_pos": can_view_pos,
             "alt_sales_today": alt_sales_today,
         },
         "timezone": settings.APP_TIMEZONE,
