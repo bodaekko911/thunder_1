@@ -556,9 +556,13 @@ def dashboard_ui():
     <div class="assistant-header">
       <div>
         <h2>Ask about your business</h2>
-        <p>Click a question or type your own</p>
+        <p>Ask about sales, products, stock, expenses, receivables, or customer balances</p>
       </div>
       <button type="button" class="assistant-clear" id="assistant-clear">Clear</button>
+    </div>
+    <div class="assistant-helper" aria-label="Assistant examples">
+      <div class="assistant-helper-title">Try asking</div>
+      <div class="assistant-helper-list" id="assistant-helper-list"></div>
     </div>
     <div class="assistant-chips" id="assistant-chips"></div>
     <div class="assistant-input-row">

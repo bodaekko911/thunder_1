@@ -208,8 +208,8 @@ async def execute_tool(db, *, current_user, name: str, input_data: dict) -> dict
         return await _get_low_stock_items(db, threshold=int(input_data.get("threshold", 5)))
 
     if name == "get_expenses_summary":
-        if not has_permission(current_user, "page_accounting"):
-            return {"error": "Permission denied: page_accounting is required to view expenses."}
+        if not (has_permission(current_user, "page_accounting") or has_permission(current_user, "page_expenses")):
+            return {"error": "Permission denied: page_accounting or page_expenses is required to view expenses."}
         return await _get_expenses_summary(db)
 
     if name == "get_unpaid_invoices_summary":
@@ -255,8 +255,8 @@ async def execute_tool(db, *, current_user, name: str, input_data: dict) -> dict
         )
 
     if name == "get_expense_breakdown":
-        if not has_permission(current_user, "page_accounting"):
-            return {"error": "Permission denied: page_accounting is required to view expense breakdown."}
+        if not (has_permission(current_user, "page_accounting") or has_permission(current_user, "page_expenses")):
+            return {"error": "Permission denied: page_accounting or page_expenses is required to view expense breakdown."}
         return await _get_expense_breakdown(db, month=input_data.get("month"))
 
     if name == "get_profit_loss_summary":

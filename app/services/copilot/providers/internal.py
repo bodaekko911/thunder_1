@@ -288,8 +288,9 @@ async def _answer_from_intent(
     confidence = parsed.confidence
 
     # ── Permission guards ──────────────────────────────────────────────────────
-    if parsed.intent == "expenses_month":
-        await ensure_permission(db, current_user, "page_accounting", path="/dashboard/assistant")
+    if parsed.intent in {"expenses_month", "expense_breakdown"}:
+        if not (has_permission(current_user, "page_accounting") or has_permission(current_user, "page_expenses")):
+            await ensure_permission(db, current_user, "page_accounting", path="/dashboard/assistant")
     elif parsed.intent == "unpaid_invoices":
         if not (has_permission(current_user, "page_pos") or has_permission(current_user, "page_b2b")):
             await ensure_permission(db, current_user, "page_pos", path="/dashboard/assistant")
@@ -324,58 +325,73 @@ async def _answer_from_intent(
         )
 
     # ── Dashboard snapshot intents (sales_today, top_products, low_stock) ─────
-    if parsed.intent in {"sales_today", "top_products", "low_stock"}:
-        from app.routers.dashboard import dashboard_data
-
-        snapshot = await dashboard_data(db=db)
-        if parsed.intent == "sales_today":
-            _result = {
-                "total_sales": snapshot["total_today"],
-                "pos_sales": snapshot["pos_today"],
-                "b2b_sales": snapshot["b2b_today"],
-                "refunds": snapshot["ref_today"],
-            }
-            return composer.compose(
-                supported=True,
-                intent=parsed.intent,
-                parameters=parsed.parameters,
-                result=_result,
-                message=f"Today's total sales are {snapshot['total_today']:.2f}.",
-                confidence=confidence,
-                suggestions=build_suggestions(parsed.intent, _result),
-                highlights=build_highlights(parsed.intent, _result),
-                table=build_table(parsed.intent, _result),
-            )
-        if parsed.intent == "top_products":
-            _result = {
-                "items": snapshot["top_products"],
-                "count": len(snapshot["top_products"]),
-            }
-            return composer.compose(
-                supported=True,
-                intent=parsed.intent,
-                parameters=parsed.parameters,
-                result=_result,
-                message="Here are the current top products for this month.",
-                confidence=confidence,
-                suggestions=build_suggestions(parsed.intent, _result),
-                highlights=build_highlights(parsed.intent, _result),
-                table=build_table(parsed.intent, _result),
-            )
+    if parsed.intent == "sales_today":
+        result = await execute_tool(
+            db,
+            current_user=current_user,
+            name="get_sales_summary",
+            input_data=parsed.parameters,
+        )
         _result = {
-            "items": snapshot["low_stock"],
-            "count": snapshot["low_stock_count"],
+            "total_sales": result.get("total", 0),
+            "pos_sales": result.get("net_pos", result.get("pos_sales", 0)),
+            "b2b_sales": result.get("b2b_sales", 0),
+            "refunds": result.get("refunds", 0),
         }
         return composer.compose(
             supported=True,
             intent=parsed.intent,
             parameters=parsed.parameters,
             result=_result,
-            message=f"There are {snapshot['low_stock_count']} low-stock items right now.",
+            message=(
+                f"Today's total sales are {float(_result['total_sales']):.2f}, "
+                f"including {float(_result['b2b_sales']):.2f} from B2B."
+            ),
             confidence=confidence,
             suggestions=build_suggestions(parsed.intent, _result),
             highlights=build_highlights(parsed.intent, _result),
             table=build_table(parsed.intent, _result),
+        )
+    if parsed.intent == "top_products":
+        result = await execute_tool(
+            db,
+            current_user=current_user,
+            name="get_top_products",
+            input_data=parsed.parameters,
+        )
+        date_from = parsed.parameters.get("date_from", "")
+        date_to = parsed.parameters.get("date_to", "")
+        return composer.compose(
+            supported=True,
+            intent=parsed.intent,
+            parameters=parsed.parameters,
+            result=result,
+            message=f"Here are the top products from {date_from} to {date_to}.",
+            confidence=confidence,
+            suggestions=build_suggestions(parsed.intent, result),
+            highlights=build_highlights(parsed.intent, result),
+            table=build_table(parsed.intent, result),
+        )
+    if parsed.intent == "low_stock":
+        result = await execute_tool(
+            db,
+            current_user=current_user,
+            name="get_low_stock_items",
+            input_data={"threshold": parsed.parameters.get("threshold", 5)},
+        )
+        return composer.compose(
+            supported=True,
+            intent=parsed.intent,
+            parameters=parsed.parameters,
+            result=result,
+            message=(
+                f"There are {int(result.get('out_of_stock_count', 0))} out-of-stock items and "
+                f"{int(result.get('low_stock_count', 0))} low-stock items right now."
+            ),
+            confidence=confidence,
+            suggestions=build_suggestions(parsed.intent, result),
+            highlights=build_highlights(parsed.intent, result),
+            table=build_table(parsed.intent, result),
         )
 
     # ── sales_summary ─────────────────────────────────────────────────────────
@@ -461,20 +477,43 @@ async def _answer_from_intent(
 
     # ── expenses_month ────────────────────────────────────────────────────────
     if parsed.intent == "expenses_month":
-        from app.services.expense_service import get_summary as get_expense_summary
+        summary = await execute_tool(
+            db,
+            current_user=current_user,
+            name="get_expenses_summary",
+            input_data={},
+        )
+        if "error" in summary:
+            return composer.compose(
+                supported=True,
+                intent=parsed.intent,
+                parameters=parsed.parameters,
+                result=summary,
+                message=str(summary["error"]),
+                confidence=confidence,
+                suggestions=[],
+                highlights=[],
+                table=None,
+            )
 
-        summary = await get_expense_summary(db)
+        requested_month = parsed.parameters.get("month")
+        target_total = float(summary["this_month"])
+        comparison_total = float(summary["last_month"])
+        if requested_month and requested_month != date.today().strftime("%Y-%m"):
+            target_total = float(summary["last_month"])
+            comparison_total = float(summary["this_month"])
         _result = {
-            "this_month": float(summary["this_month"]),
-            "last_month": float(summary["last_month"]),
+            "this_month": target_total,
+            "last_month": comparison_total,
             "breakdown": summary["breakdown"][:5],
+            "month": requested_month or date.today().strftime("%Y-%m"),
         }
         return composer.compose(
             supported=True,
             intent=parsed.intent,
             parameters=parsed.parameters,
             result=_result,
-            message=f"Expenses this month are {float(summary['this_month']):.2f}.",
+            message=f"Expenses for {_result['month']} are {float(_result['this_month']):.2f}.",
             confidence=confidence,
             suggestions=build_suggestions(parsed.intent, _result),
             highlights=build_highlights(parsed.intent, _result),
@@ -482,22 +521,30 @@ async def _answer_from_intent(
         )
 
     # ── unpaid_invoices (fallthrough) ─────────────────────────────────────────
-    from app.services.dashboard_assistant_service import get_unpaid_invoice_summary
-
-    unpaid = await get_unpaid_invoice_summary(db)
+    unpaid = await execute_tool(
+        db,
+        current_user=current_user,
+        name="get_unpaid_invoices_summary",
+        input_data={},
+    )
     return composer.compose(
         supported=True,
         intent=parsed.intent,
         parameters=parsed.parameters,
         result=unpaid,
         message=(
-            f"There are {unpaid['pos_unpaid_count']} unpaid POS invoices and "
-            f"{unpaid['b2b_unpaid_count']} unpaid or partial B2B invoices."
+            str(unpaid["error"])
+            if "error" in unpaid
+            else (
+                f"There are {unpaid['pos_unpaid_count']} unpaid POS invoices and "
+                f"{unpaid['b2b_unpaid_count']} unpaid or partial B2B invoices, "
+                f"with {float(unpaid['b2b_outstanding_amount']):.2f} outstanding in B2B."
+            )
         ),
         confidence=confidence,
-        suggestions=build_suggestions(parsed.intent, unpaid),
-        highlights=build_highlights(parsed.intent, unpaid),
-        table=build_table(parsed.intent, unpaid),
+        suggestions=[] if "error" in unpaid else build_suggestions(parsed.intent, unpaid),
+        highlights=[] if "error" in unpaid else build_highlights(parsed.intent, unpaid),
+        table=None if "error" in unpaid else build_table(parsed.intent, unpaid),
     )
 
 

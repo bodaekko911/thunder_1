@@ -122,6 +122,7 @@ INTENT_KEYWORDS: dict[str, dict] = {
         "require_any": [
             ["help", "what can you do", "what can you ask", "what do you support",
              "commands", "capabilities", "what questions", "what can i ask",
+             "what can you answer",
              "what can you help with"],
         ],
         "boost": [],

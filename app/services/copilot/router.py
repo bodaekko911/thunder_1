@@ -10,27 +10,25 @@ from app.services.copilot.contracts import ParsedDashboardIntent
 
 SUPPORTED_QUESTION_HINTS = [
     "today's sales",
-    "sales by period",
     "sales this week",
-    "sales last month",
-    "overdue customers",
-    "customer balance for Acme",
-    "product details for olive oil",
-    "stock levels",
-    "stock value",
-    "expense breakdown",
-    "profit/loss summary",
-    "top products",
+    "revenue last month",
+    "top products this month",
     "low-stock items",
+    "product details for olive oil",
+    "stock levels for olive oil",
     "expenses this month",
+    "expense breakdown",
     "unpaid invoices",
     "customer balances",
     "who owes me the most",
+    "overdue customers",
+    "profit/loss summary",
+    "stock value",
 ]
 
 # Intents where time_parser may override the default date range
 _DATE_RANGE_INTENTS = frozenset(
-    {"sales_summary", "sales_by_period", "profit_loss_summary", "expense_breakdown"}
+    {"sales_summary", "sales_by_period", "profit_loss_summary", "expense_breakdown", "top_products"}
 )
 
 # Score threshold — a single fully-matched group scores exactly 1.0
@@ -41,6 +39,7 @@ def parse_dashboard_question(question: str | None) -> ParsedDashboardIntent:
     raw = (question or "").strip()
     if not raw:
         return ParsedDashboardIntent(None, {})
+    today = date.today()
 
     # Special case: bare "?"
     if raw == "?":
@@ -91,6 +90,45 @@ def parse_dashboard_question(question: str | None) -> ParsedDashboardIntent:
                     {"product_query": query, "limit": 10},
                     confidence=1.0,
                 )
+
+    if any(phrase in text for phrase in ["customer balances", "b2b outstanding", "top balances", "largest outstanding"]):
+        return ParsedDashboardIntent("customer_balances_top", {"limit": 10}, confidence=1.0)
+
+    if any(phrase in text for phrase in ["who owes me", "receivables", "money clients owe"]):
+        if any(phrase in text for phrase in ["most", "top", "biggest", "largest"]):
+            return ParsedDashboardIntent("customer_balances_top", {"limit": 10}, confidence=1.0)
+        return ParsedDashboardIntent("unpaid_invoices", {"status": "unpaid"}, confidence=1.0)
+
+    if any(phrase in text for phrase in ["top products", "best sellers", "best selling", "top sellers", "most sold"]):
+        params, comparison_baseline = _build_params("top_products", text)
+        parsed_range = time_parser.parse_time_expression(text)
+        if parsed_range:
+            date_from, date_to = parsed_range
+            params = dict(params)
+            params["date_from"] = date_from.isoformat()
+            params["date_to"] = date_to.isoformat()
+        return ParsedDashboardIntent("top_products", params, comparison_baseline=comparison_baseline, confidence=1.0)
+
+    if any(phrase in text for phrase in ["sales", "revenue", "made", "earned", "income", "turnover"]) and any(
+        phrase in text for phrase in ["today", "week", "month", "year", "yesterday", "last", "this", "from", "between"]
+    ):
+        params, comparison_baseline = _build_params("sales_summary", text)
+        parsed_range = time_parser.parse_time_expression(text)
+        if parsed_range:
+            date_from, date_to = parsed_range
+            params = dict(params)
+            params["date_from"] = date_from.isoformat()
+            params["date_to"] = date_to.isoformat()
+        return ParsedDashboardIntent("sales_summary", params, comparison_baseline=comparison_baseline, confidence=0.98)
+
+    if any(phrase in text for phrase in ["expenses", "expense summary", "spending"]) and any(
+        phrase in text for phrase in ["this month", "last month", "month", "monthly"]
+    ):
+        month_value = today.strftime("%Y-%m")
+        if "last month" in text:
+            previous_month_end = today.replace(day=1) - timedelta(days=1)
+            month_value = previous_month_end.strftime("%Y-%m")
+        return ParsedDashboardIntent("expenses_month", {"month": month_value}, confidence=0.98)
 
     # ── Arabic boost (pre-normalisation pass) ──────────────────────────────────
     arabic_boost: dict[str, float] = {}

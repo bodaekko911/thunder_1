@@ -42,18 +42,20 @@ class ResponseComposer:
         supported_hints: list[str],
         close_matches: list[str] | None = None,
     ) -> dict:
+        examples = supported_hints[:6]
         return {
             "supported": False,
             "intent": None,
             "parameters": {},
             "result": None,
             "message": (
-                "I can currently help with deterministic ERP questions such as "
-                + ", ".join(supported_hints)
+                "I can help with dashboard questions about sales, products, stock, expenses, receivables, and customer balances. "
+                "Try something like: "
+                + ", ".join(examples)
                 + "."
             ),
             "confidence": 0.0,
-            "suggestions": close_matches or [],
+            "suggestions": close_matches or examples[:3],
             "highlights": [],
             "table": None,
         }

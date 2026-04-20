@@ -22,6 +22,16 @@ from app.services.copilot import fuzzy as copilot_fuzzy
 from app.services.expense_service import get_summary as _expense_summary
 
 
+def _as_date(value: str | date_type | None, *, fallback: date_type | None = None) -> date_type:
+    if isinstance(value, date_type):
+        return value
+    if isinstance(value, str) and value.strip():
+        return date_type.fromisoformat(value.strip())
+    if fallback is not None:
+        return fallback
+    return date_type.today()
+
+
 def _normalized_product_parts(product: Product) -> tuple[str, str, str]:
     sku = copilot_fuzzy.normalize(product.sku or "")
     name = copilot_fuzzy.normalize(product.name or "")
@@ -80,23 +90,59 @@ def _serialize_product(product: Product) -> dict:
     }
 
 
+def _serialize_product_row(row) -> dict:
+    return {
+        "product_id": int(row.id),
+        "sku": row.sku,
+        "name": row.name,
+        "category": row.category,
+        "item_type": row.item_type,
+        "unit": row.unit,
+        "price": round(float(row.price or 0), 2),
+        "cost": round(float(row.cost or 0), 2),
+        "stock": round(float(row.stock or 0), 3),
+        "min_stock": round(float(row.min_stock or 0), 3),
+        "reorder_level": round(float(row.reorder_level or 0), 3) if row.reorder_level is not None else None,
+        "reorder_qty": round(float(row.reorder_qty or 0), 3) if row.reorder_qty is not None else None,
+    }
+
+
+def _product_snapshot_query():
+    return select(
+        Product.id,
+        Product.sku,
+        Product.name,
+        Product.category,
+        Product.item_type,
+        Product.unit,
+        Product.price,
+        Product.cost,
+        Product.stock,
+        Product.min_stock,
+        Product.reorder_level,
+        Product.reorder_qty,
+    ).where(Product.is_active == True)
+
+
 async def get_sales_summary(db: AsyncSession, *, date_from: str, date_to: str) -> dict:
     """POS + B2B revenue with refunds deducted for a date range."""
+    start_date = _as_date(date_from)
+    end_date = _as_date(date_to, fallback=start_date)
     r = await db.execute(
         select(func.coalesce(func.sum(Invoice.total), 0))
-        .where(func.date(Invoice.created_at).between(date_from, date_to), Invoice.status == "paid")
+        .where(func.date(Invoice.created_at).between(start_date, end_date), Invoice.status == "paid")
     )
     pos_sales = float(r.scalar() or 0)
 
     r = await db.execute(
         select(func.coalesce(func.sum(RetailRefund.total), 0))
-        .where(func.date(RetailRefund.created_at).between(date_from, date_to))
+        .where(func.date(RetailRefund.created_at).between(start_date, end_date))
     )
     refunds = float(r.scalar() or 0)
 
     r = await db.execute(
         select(func.coalesce(func.sum(B2BInvoice.total), 0))
-        .where(func.date(B2BInvoice.created_at).between(date_from, date_to))
+        .where(func.date(B2BInvoice.created_at).between(start_date, end_date))
     )
     b2b_sales = float(r.scalar() or 0)
 
@@ -128,7 +174,7 @@ async def get_top_products(
         )
         .join(Invoice, InvoiceItem.invoice_id == Invoice.id)
         .where(
-            func.date(Invoice.created_at).between(date_from, date_to),
+            func.date(Invoice.created_at).between(_as_date(date_from), _as_date(date_to, fallback=_as_date(date_from))),
             Invoice.status == "paid",
         )
         .group_by(InvoiceItem.name)
@@ -145,17 +191,17 @@ async def get_top_products(
 async def get_low_stock_items(db: AsyncSession, *, threshold: int = 5) -> dict:
     """Products at or below the threshold (includes out-of-stock)."""
     r = await db.execute(
-        select(Product).where(Product.is_active == True, Product.stock <= threshold)
+        _product_snapshot_query().where(Product.stock <= threshold)
     )
-    products = r.scalars().all()
-    out_of_stock = [p for p in products if float(p.stock) <= 0]
-    low_stock = [p for p in products if float(p.stock) > 0]
+    products = r.all()
+    out_of_stock = [p for p in products if float(p.stock or 0) <= 0]
+    low_stock = [p for p in products if float(p.stock or 0) > 0]
     return {
         "threshold": threshold,
         "out_of_stock_count": len(out_of_stock),
         "low_stock_count": len(low_stock),
-        "out_of_stock": [{"sku": p.sku, "name": p.name, "stock": float(p.stock)} for p in out_of_stock[:20]],
-        "low_stock": [{"sku": p.sku, "name": p.name, "stock": float(p.stock)} for p in low_stock[:20]],
+        "out_of_stock": [{"sku": p.sku, "name": p.name, "stock": float(p.stock or 0)} for p in out_of_stock[:20]],
+        "low_stock": [{"sku": p.sku, "name": p.name, "stock": float(p.stock or 0)} for p in low_stock[:20]],
     }
 
 
@@ -225,6 +271,8 @@ async def get_sales_by_period(
         date_from = (today - timedelta(days=29)).isoformat()
     if not date_to:
         date_to = today.isoformat()
+    start_date = _as_date(date_from)
+    end_date = _as_date(date_to, fallback=start_date)
 
     r = await db.execute(
         select(
@@ -232,7 +280,7 @@ async def get_sales_by_period(
             func.coalesce(func.sum(Invoice.total), 0).label("total"),
         )
         .where(
-            func.date(Invoice.created_at).between(date_from, date_to),
+            func.date(Invoice.created_at).between(start_date, end_date),
             Invoice.status == "paid",
         )
         .group_by(func.date(Invoice.created_at))
@@ -365,12 +413,12 @@ async def get_product_details(
 
     if product_id is not None:
         result = await db.execute(
-            select(Product)
-            .where(Product.is_active == True, Product.id == int(product_id))
+            _product_snapshot_query()
+            .where(Product.id == int(product_id))
             .limit(1)
         )
-        product = result.scalar_one_or_none()
-        matches = [_serialize_product(product)] if product else []
+        product = result.one_or_none()
+        matches = [_serialize_product_row(product)] if product else []
         return {
             "query": query,
             "count": len(matches),
@@ -380,19 +428,18 @@ async def get_product_details(
         }
 
     result = await db.execute(
-        select(Product)
-        .where(Product.is_active == True)
+        _product_snapshot_query()
     )
-    products = result.scalars().all()
+    products = result.all()
     scored = [
         (score, product)
         for product in products
-        if (score := _product_match_score(query, product)) >= 45.0
+        if (score := _product_match_score(query, product)) >= 38.0
     ]
     scored.sort(key=lambda item: (-item[0], (item[1].name or "").lower(), (item[1].sku or "").lower()))
 
     top_ranked = scored[:5]
-    matches = [_serialize_product(product) for _, product in top_ranked]
+    matches = [_serialize_product_row(product) for _, product in top_ranked]
     selected = matches[0] if matches else None
     ambiguous = False
     if len(top_ranked) > 1:
@@ -418,20 +465,26 @@ async def get_stock_levels(
     limit: int = 10,
 ) -> dict:
     """Stock snapshot, optionally filtered to a product query."""
-    statement = select(Product).where(Product.is_active == True)
     query = (product_query or "").strip()
+    products: list[Product]
     if query:
-        statement = statement.where(
-            or_(
-                Product.sku.ilike(query),
-                Product.sku.ilike(f"%{query}%"),
-                Product.name.ilike(f"%{query}%"),
-            )
+        result = await db.execute(_product_snapshot_query())
+        all_products = result.all()
+        scored = [
+            (score, product)
+            for product in all_products
+            if (score := _product_match_score(query, product)) >= 32.0
+        ]
+        scored.sort(key=lambda item: (-item[0], float(item[1].stock or 0), (item[1].name or "").lower()))
+        products = [product for _, product in scored[:limit]]
+    else:
+        result = await db.execute(
+            _product_snapshot_query()
+            .order_by(Product.stock.asc(), Product.name.asc())
+            .limit(limit)
         )
-    statement = statement.order_by(Product.stock.asc(), Product.name.asc()).limit(limit)
+        products = result.all()
 
-    result = await db.execute(statement)
-    products = result.scalars().all()
     items = [
         {
             "product_id": int(product.id),
@@ -531,12 +584,14 @@ async def get_profit_loss_summary(
         date_from = today.replace(day=1).isoformat()
     if not date_to:
         date_to = today.isoformat()
+    start_date = _as_date(date_from)
+    end_date = _as_date(date_to, fallback=start_date)
 
     sales = await get_sales_summary(db, date_from=date_from, date_to=date_to)
     expense_result = await db.execute(
         select(func.coalesce(func.sum(Expense.amount), 0)).where(
-            Expense.expense_date >= date_from,
-            Expense.expense_date <= date_to,
+            Expense.expense_date >= start_date,
+            Expense.expense_date <= end_date,
         )
     )
     expenses = round(float(expense_result.scalar() or 0), 2)

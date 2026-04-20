@@ -14,15 +14,15 @@ let loadingTimer = null;
 
 const ASSISTANT_CHIPS = [
   "What did I sell today?",
-  "What did I sell this month?",
-  "Who owes me money?",
+  "Show me revenue this week",
+  "Top products this month",
   "Which products are running low?",
-  "Biggest customer this month?",
-  "Best-selling products?",
+  "Product details for olive oil",
+  "Stock levels for olive oil",
   "How much did I spend this month?",
-  "Show me sales this week",
-  "Compare this month to last month",
-  "How much stock do I have in total?",
+  "Show unpaid invoices",
+  "Who owes me the most?",
+  "Show customer balances",
 ];
 
 function escHtml(value) {
@@ -506,6 +506,22 @@ function renderAssistantChips() {
   });
 }
 
+function renderAssistantHelper() {
+  const helperItems = [
+    "Revenue this week",
+    "Top products this month",
+    "Low-stock items",
+    "Product details for olive oil",
+    "Expenses this month",
+    "Who owes me the most?",
+  ];
+  const container = document.getElementById("assistant-helper-list");
+  container.innerHTML = helperItems.map((item) => `<button type="button" class="assistant-helper-chip" data-question="${escHtml(item)}">${escHtml(item)}</button>`).join("");
+  container.querySelectorAll(".assistant-helper-chip").forEach((button) => {
+    button.addEventListener("click", () => submitAssistantQuestion(button.dataset.question || ""));
+  });
+}
+
 function showErrorState(message) {
   document.getElementById("loading").innerHTML = `<div class="load-error">${escHtml(message)}</div>`;
 }
@@ -628,6 +644,7 @@ setTheme = function setTheme(theme) {
 async function initDashboard() {
   initTheme();
   updateRangeButtons();
+  renderAssistantHelper();
   renderAssistantChips();
   renderAssistantHistory();
   bindEvents();
