@@ -1200,7 +1200,7 @@ function renderCategories(){
     }
     nr.style.display = "none";
     document.getElementById("grid").innerHTML = categories.map(category => `
-        <button class="category-tile" type="button" onclick="openCategory(${JSON.stringify(category.name)})">
+        <button class="category-tile" type="button" data-category="${category.name.replace(/"/g, "&quot;")}">
             <div class="category-kicker">Category</div>
             <div class="category-name">${category.name}</div>
             <div class="category-meta">${category.count} product${category.count === 1 ? "" : "s"}</div>
@@ -1228,6 +1228,14 @@ async function runProductSearch(query){
     let data = await (await fetch("/search-products?q="+encodeURIComponent(query))).json();
     renderProducts(data, "No products found");
 }
+
+document.getElementById("grid").addEventListener("click", function(event){
+    const categoryButton = event.target.closest(".category-tile");
+    if(!categoryButton) return;
+    const categoryName = categoryButton.dataset.category;
+    if(!categoryName) return;
+    openCategory(categoryName);
+});
 
 document.getElementById("search").addEventListener("input", async function(){
     let v = this.value.trim();
