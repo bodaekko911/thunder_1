@@ -33,6 +33,7 @@ async def products_cache(db: AsyncSession = Depends(get_async_session)):
         {
             "sku": p.sku,
             "name": p.name,
+            "category": p.category or "",
             "price": float(p.price or 0),
             "stock": float(p.stock or 0),
         }
@@ -50,7 +51,7 @@ async def search_products(
         exact_match = await find_product_by_barcode(db, normalized_query)
         if exact_match is not None:
             return [
-                {"sku": exact_match.sku, "name": exact_match.name, "price": float(exact_match.price), "stock": float(exact_match.stock)}
+                {"sku": exact_match.sku, "name": exact_match.name, "category": exact_match.category or "", "price": float(exact_match.price), "stock": float(exact_match.stock)}
             ]
 
     _r = await db.execute(
@@ -66,6 +67,7 @@ async def search_products(
         {
             "sku": p.sku,
             "name": p.name,
+            "category": p.category or "",
             "price": float(p.price or 0),
             "stock": float(p.stock or 0),
         }
@@ -429,7 +431,18 @@ body.light #topbar{background:rgba(244,245,239,.92);}
 #left{overflow-y:auto;padding:18px;display:flex;flex-direction:column;gap:14px;scrollbar-width:thin;scrollbar-color:var(--border2) transparent;}
 .panel-title{font-size:11px;font-weight:700;letter-spacing:2px;text-transform:uppercase;color:var(--muted);display:flex;align-items:center;gap:8px;}
 .panel-title::after{content:'';flex:1;height:1px;background:linear-gradient(90deg,var(--border2),transparent);}
+#browser_head{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;}
+#browser_meta{display:flex;align-items:center;gap:10px;flex-wrap:wrap;}
+#browser_hint{font-size:12px;color:var(--sub);}
+#browser_back{display:none;align-items:center;gap:6px;border:1px solid var(--border2);background:var(--card);color:var(--sub);border-radius:10px;padding:8px 12px;font-family:var(--sans);font-size:12px;font-weight:700;cursor:pointer;transition:all .2s;}
+#browser_back.show{display:inline-flex;}
+#browser_back:hover{border-color:rgba(0,255,157,.35);color:var(--green);}
 #grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(145px,1fr));gap:10px;}
+.category-tile{background:linear-gradient(180deg,rgba(77,159,255,.12),rgba(77,159,255,.04));border:1px solid rgba(77,159,255,.18);border-radius:16px;padding:18px 16px;cursor:pointer;display:flex;flex-direction:column;gap:10px;min-height:132px;transition:border-color .2s,box-shadow .2s,transform .15s;}
+.category-tile:hover{border-color:rgba(77,159,255,.45);box-shadow:0 10px 30px rgba(77,159,255,.16);transform:translateY(-2px);}
+.category-kicker{font-size:11px;letter-spacing:1.4px;text-transform:uppercase;color:var(--blue);font-weight:800;}
+.category-name{font-size:20px;line-height:1.1;font-weight:800;color:var(--text);}
+.category-meta{margin-top:auto;font-size:12px;color:var(--sub);display:flex;align-items:center;justify-content:space-between;gap:8px;}
 .product{background:var(--card);border:1px solid var(--border);border-radius:var(--r);padding:16px 13px 13px;cursor:pointer;display:flex;flex-direction:column;gap:5px;position:relative;overflow:hidden;transition:border-color .2s,box-shadow .2s,transform .15s;}
 .product:hover{border-color:rgba(0,255,157,.5);box-shadow:0 8px 30px rgba(0,255,157,.12);transform:translateY(-3px);}
 .product:active{transform:translateY(-1px);}
@@ -632,7 +645,18 @@ body.light .toast{background:var(--card);}
 
 <!-- LEFT: PRODUCTS -->
 <div id="left">
-    <div class="panel-title">Products</div>
+    <div id="browser_head">
+        <div id="browser_meta">
+            <div class="panel-title" id="browser_title">Categories</div>
+            <div id="browser_hint">Tap a category to open products</div>
+        </div>
+        <button id="browser_back" type="button" onclick="showCategoriesView()">
+            <svg width="12" height="12" fill="none" stroke="currentColor" stroke-width="2.3" viewBox="0 0 24 24">
+                <path d="M15 18l-6-6 6-6"/>
+            </svg>
+            All Categories
+        </button>
+    </div>
     <div id="grid"></div>
     <div id="no_results">
         <svg width="40" height="40" fill="none" stroke="currentColor" stroke-width="1.2" viewBox="0 0 24 24">
@@ -820,6 +844,8 @@ body.light .toast{background:var(--card);}
   }
   initializeColorMode();
 let customers=[], products=[], cart=[], lastCart=[];
+let categories=[], selectedCategory=null;
+let searchMode=false;
 let selectedCustomer = null;
 let selectedPayMethod = "cash";
 let toastTimer = null;
@@ -948,7 +974,8 @@ async function load(){
     try {
         customers = await (await fetch("/customers")).json();
         products  = await (await fetch("/products-cache")).json();
-        draw(products.slice(0,40));
+        buildCategories(products);
+        showCategoriesView();
         checkUnpaidCount();
     } catch(e){
         console.error("Load error:", e);
@@ -1115,9 +1142,44 @@ document.getElementById("barcode").addEventListener("input", function(){
 });
 
 /* ── PRODUCT GRID ── */
-function draw(list){
+function normalizeCategoryName(value){
+    return String(value || "").trim() || "Uncategorized";
+}
+
+function buildCategories(list){
+    const counts = new Map();
+    list.forEach(product => {
+        const category = normalizeCategoryName(product.category);
+        counts.set(category, (counts.get(category) || 0) + 1);
+    });
+    categories = Array.from(counts.entries())
+        .map(([name, count]) => ({ name, count }))
+        .sort((a, b) => a.name.localeCompare(b.name));
+}
+
+function setBrowserHeader(title, hint, showBack){
+    document.getElementById("browser_title").innerText = title;
+    document.getElementById("browser_hint").innerText = hint;
+    document.getElementById("browser_back").classList.toggle("show", !!showBack);
+}
+
+function setEmptyState(message){
+    const nr = document.getElementById("no_results");
+    nr.innerHTML = `
+        <svg width="40" height="40" fill="none" stroke="currentColor" stroke-width="1.2" viewBox="0 0 24 24">
+            <circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/>
+        </svg>
+        ${message}`;
+    nr.style.display = "flex";
+}
+
+function renderProducts(list, emptyMessage="No products found"){
     let nr = document.getElementById("no_results");
-    if(!list.length){ document.getElementById("grid").innerHTML=""; nr.style.display="flex"; return; }
+    if(!list.length){
+        document.getElementById("grid").innerHTML="";
+        setEmptyState(emptyMessage);
+        return;
+    }
     nr.style.display="none";
     document.getElementById("grid").innerHTML = list.map(p=>`
         <div class="product" data-sku="${p.sku}"
@@ -1129,11 +1191,48 @@ function draw(list){
         </div>`).join("");
 }
 
+function renderCategories(){
+    const nr = document.getElementById("no_results");
+    if(!categories.length){
+        document.getElementById("grid").innerHTML = "";
+        setEmptyState("No categories available");
+        return;
+    }
+    nr.style.display = "none";
+    document.getElementById("grid").innerHTML = categories.map(category => `
+        <button class="category-tile" type="button" onclick="openCategory(${JSON.stringify(category.name)})">
+            <div class="category-kicker">Category</div>
+            <div class="category-name">${category.name}</div>
+            <div class="category-meta">${category.count} product${category.count === 1 ? "" : "s"}</div>
+        </button>`).join("");
+}
+
+function showCategoriesView(){
+    searchMode = false;
+    selectedCategory = null;
+    setBrowserHeader("Categories", "Tap a category to open products", false);
+    renderCategories();
+}
+
+function openCategory(categoryName){
+    searchMode = false;
+    selectedCategory = categoryName;
+    const list = products.filter(product => normalizeCategoryName(product.category) === categoryName);
+    setBrowserHeader(categoryName, `${list.length} product${list.length === 1 ? "" : "s"} in this category`, true);
+    renderProducts(list, "No products found in this category");
+}
+
+async function runProductSearch(query){
+    searchMode = true;
+    setBrowserHeader("Search Results", `Matches for "${query}"`, false);
+    let data = await (await fetch("/search-products?q="+encodeURIComponent(query))).json();
+    renderProducts(data, "No products found");
+}
+
 document.getElementById("search").addEventListener("input", async function(){
     let v = this.value.trim();
-    if(!v){ draw(products.slice(0,40)); return; }
-    let data = await (await fetch("/search-products?q="+encodeURIComponent(v))).json();
-    draw(data);
+    if(!v){ showCategoriesView(); return; }
+    await runProductSearch(v);
 });
 
 /* ── CART ── */
