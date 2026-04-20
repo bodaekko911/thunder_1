@@ -401,7 +401,7 @@ async def dashboard_assistant(
 
 @router.get("/dashboard/summary")
 async def dashboard_summary(
-    range_param: str = Query("today", pattern="^(today|7d|30d|mtd|qtd|custom)$", alias="range"),
+    range_param: str = Query("today", pattern="^(today|7d|30d|90d|mtd|qtd|year|ytd|custom)$", alias="range"),
     start: Optional[str] = Query(None),
     end:   Optional[str] = Query(None),
     db:    AsyncSession  = Depends(get_async_session),
@@ -469,12 +469,12 @@ async def dashboard_insights(db: AsyncSession = Depends(get_async_session)):
 def dashboard_ui():
     locale_dir = getattr(settings, "APP_LOCALE_DIR", "ltr")
     return f"""<!DOCTYPE html>
-<html lang="en" dir="{locale_dir}">
+<html lang="en" dir="{locale_dir}" data-theme="light">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Dashboard — Thunder ERP</title>
-<link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+<title>Dashboard \u2014 Thunder ERP</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="/static/dashboard.css">
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
 <script src="/static/auth-guard.js"></script>
@@ -483,7 +483,6 @@ def dashboard_ui():
 
 <div id="loading"><div class="spinner"></div></div>
 
-<!-- ── Nav ──────────────────────────────────────────────────────────── -->
 <nav>
   <a href="/home" class="logo">Thunder ERP</a>
   <a href="/dashboard"  class="nav-link active">Dashboard</a>
@@ -492,7 +491,7 @@ def dashboard_ui():
   <a href="/reports/"   class="nav-link">Reports</a>
   <a href="/inventory/" class="nav-link">Inventory</a>
   <span class="nav-spacer"></span>
-  <button class="mode-btn" id="mode-btn" onclick="toggleMode()" aria-label="Toggle color mode">🌙</button>
+  <button class="mode-btn" id="mode-btn" onclick="toggleMode()" aria-label="Toggle color mode">&#9728;</button>
   <div class="account-menu">
     <div class="user-pill" onclick="toggleAccountMenu(event)">
       <div class="user-avatar" id="user-avatar">A</div>
@@ -505,186 +504,126 @@ def dashboard_ui():
   </div>
 </nav>
 
-<!-- ── Main content ───────────────────────────────────────────────── -->
 <div class="content">
 
-  <!-- 1. Header strip -->
-  <div class="header-strip">
+  <!-- 1. Header -->
+  <header class="page-header">
     <div class="header-left">
-      <span class="greeting" id="greeting">Good morning</span>
-      <div class="header-meta">
-        <span class="date-display" id="date-display"></span>
-        <span class="last-updated-pill" id="last-updated">Loading…</span>
-      </div>
+      <h1 class="greeting" id="greeting">Good morning</h1>
+      <p class="date-display" id="date-display"></p>
     </div>
-    <div style="display:flex;flex-direction:column;align-items:flex-end;gap:6px">
-      <div class="range-picker">
-        <button class="range-btn active" data-range="today">Today</button>
-        <button class="range-btn" data-range="7d">7 days</button>
-        <button class="range-btn" data-range="30d">30 days</button>
-        <button class="range-btn" data-range="90d">90 days</button>
-        <button class="range-btn" data-range="mtd">This month</button>
-        <button class="range-btn" data-range="qtd">This quarter</button>
+    <div class="header-right">
+      <div class="range-picker" role="group" aria-label="Date range">
+        <button class="range-btn" data-range="today">Today</button>
+        <button class="range-btn" data-range="7d">7d</button>
+        <button class="range-btn" data-range="30d">30d</button>
+        <button class="range-btn active" data-range="mtd">This month</button>
         <button class="range-btn" data-range="year">This year</button>
-        <button class="range-btn" data-range="custom">Custom…</button>
+        <button class="range-btn" data-range="custom">Custom&#9662;</button>
       </div>
-      <span id="range-label" class="text-muted" style="font-size:12px"></span>
+      <span class="last-updated-pill" id="last-updated">Loading&#8230;</span>
     </div>
-  </div>
+  </header>
 
-  <!-- 2. Insights strip -->
-  <section aria-label="What changed">
-    <div id="insights-strip" class="insights-strip">
-      <div class="skeleton" style="width:260px;height:100px"></div>
-      <div class="skeleton" style="width:260px;height:100px"></div>
-      <div class="skeleton" style="width:260px;height:100px"></div>
-    </div>
+  <!-- 2. Hero row -->
+  <section class="hero-row" aria-label="Key metrics">
+    <article class="hero-card" id="hero-0" role="region" aria-live="polite">
+      <span class="hero-label">&#8212;</span>
+      <div class="hero-value" id="hero-0-value">&#8212;</div>
+      <span class="hero-chip chip-flat" id="hero-0-chip">&#8212;</span>
+      <span class="hero-subtitle" id="hero-0-sub"></span>
+      <div class="hero-sparkline"><canvas id="spark-0" aria-hidden="true"></canvas></div>
+    </article>
+    <article class="hero-card" id="hero-1" role="region" aria-live="polite">
+      <span class="hero-label">&#8212;</span>
+      <div class="hero-value" id="hero-1-value">&#8212;</div>
+      <span class="hero-chip chip-flat" id="hero-1-chip">&#8212;</span>
+      <span class="hero-subtitle" id="hero-1-sub"></span>
+      <div class="hero-sparkline"><canvas id="spark-1" aria-hidden="true"></canvas></div>
+    </article>
+    <article class="hero-card" id="hero-2" role="region" aria-live="polite">
+      <span class="hero-label">&#8212;</span>
+      <div class="hero-value" id="hero-2-value">&#8212;</div>
+      <span class="hero-chip chip-flat" id="hero-2-chip">&#8212;</span>
+      <span class="hero-subtitle" id="hero-2-sub"></span>
+      <div class="hero-sparkline"><canvas id="spark-2" aria-hidden="true"></canvas></div>
+    </article>
+    <article class="hero-card" id="hero-3" role="region" aria-live="polite">
+      <span class="hero-label">&#8212;</span>
+      <div class="hero-value" id="hero-3-value">&#8212;</div>
+      <span class="hero-chip chip-flat" id="hero-3-chip">&#8212;</span>
+      <span class="hero-subtitle" id="hero-3-sub"></span>
+      <div class="hero-sparkline"><canvas id="spark-3" aria-hidden="true"></canvas></div>
+    </article>
   </section>
 
-  <!-- 3. Hero row (4 cards) -->
-  <section aria-label="Key metrics" class="hero-row">
-    <!-- Hero cards rendered by JS; placeholders here for layout -->
-    <div class="hero-card" id="hero-0" role="region" aria-label="Primary metric">
-      <span class="hero-label">—</span>
-      <div class="hero-value skeleton" style="height:32px;width:120px"></div>
-      <span class="hero-chip chip chip-flat">—</span>
-      <span class="hero-subtitle"></span>
-      <div class="hero-sparkline"><canvas></canvas></div>
-    </div>
-    <div class="hero-card" id="hero-1" role="region" aria-label="Metric 2">
-      <span class="hero-label">—</span>
-      <div class="hero-value skeleton" style="height:32px;width:120px"></div>
-      <span class="hero-chip chip chip-flat">—</span>
-      <span class="hero-subtitle"></span>
-      <div class="hero-sparkline"><canvas></canvas></div>
-    </div>
-    <div class="hero-card" id="hero-2" role="region" aria-label="Metric 3">
-      <span class="hero-label">—</span>
-      <div class="hero-value skeleton" style="height:32px;width:120px"></div>
-      <span class="hero-chip chip chip-flat">—</span>
-      <span class="hero-subtitle"></span>
-      <div class="hero-sparkline"></div>
-    </div>
-    <div class="hero-card" id="hero-3" role="region" aria-label="Metric 4">
-      <span class="hero-label">—</span>
-      <div class="hero-value skeleton" style="height:32px;width:120px"></div>
-      <span class="hero-chip chip chip-flat">—</span>
-      <span class="hero-subtitle"></span>
-      <div class="hero-sparkline"></div>
-    </div>
-  </section>
-
-  <!-- 4. Primary chart -->
-  <div class="chart-panel">
+  <!-- 3. Primary chart -->
+  <section class="chart-panel" role="region" aria-label="Revenue chart">
     <div class="panel-header">
-      <span class="panel-title">Revenue Trend</span>
+      <span class="panel-title" id="chart-title">Revenue</span>
+      <div class="chart-legend" id="chart-legend"></div>
     </div>
     <div class="chart-wrap">
       <canvas id="main-chart" aria-label="Revenue trend chart"></canvas>
     </div>
-    <!-- Accessibility fallback -->
-    <table class="sr-only" aria-label="Revenue trend data table" id="chart-table"></table>
+    <table class="sr-only" id="chart-table" aria-label="Revenue data table"></table>
+  </section>
+
+  <!-- 4. Two-column row -->
+  <div class="two-col-row">
+
+    <section class="panel" role="region" aria-label="Top products">
+      <div class="panel-header">
+        <span class="panel-title" id="top-products-title">Top Products</span>
+        <div class="tab-bar">
+          <button class="tab-btn active" data-tab="rev">By revenue</button>
+          <button class="tab-btn" data-tab="qty">By qty</button>
+        </div>
+      </div>
+      <div id="top-products-body" class="panel-body"></div>
+    </section>
+
+    <section class="panel" role="region" aria-label="Needs attention">
+      <div class="panel-header">
+        <span class="panel-title">Needs Attention</span>
+      </div>
+      <div id="needs-attention-body" class="panel-body">
+        <div class="skeleton" style="height:60px;margin:12px 20px"></div>
+        <div class="skeleton" style="height:60px;margin:8px 20px"></div>
+        <div class="skeleton" style="height:60px;margin:8px 20px 12px"></div>
+      </div>
+    </section>
+
   </div>
 
-  <!-- 5. Secondary grid (4 panels) -->
-  <div class="secondary-grid">
-
-    <!-- Panel A: Top Products -->
-    <div class="panel" role="region" aria-label="Top products">
-      <div class="panel-header"><span class="panel-title">Top Products</span></div>
-      <div class="tab-bar">
-        <button class="tab-btn active" data-pane="top-by-revenue-pane">By Revenue</button>
-        <button class="tab-btn"        data-pane="top-by-qty-pane">By Qty</button>
-        <button class="tab-btn"        data-pane="top-by-margin-pane">By Margin</button>
-      </div>
-      <div class="panel-body">
-        <div class="tab-pane active" id="top-by-revenue-pane">
-          <table><thead></thead><tbody id="top-by-revenue"></tbody></table>
-        </div>
-        <div class="tab-pane" id="top-by-qty-pane">
-          <table><thead></thead><tbody id="top-by-qty"></tbody></table>
-        </div>
-        <div class="tab-pane" id="top-by-margin-pane">
-          <table><thead></thead><tbody id="top-by-margin"></tbody></table>
-        </div>
-      </div>
+  <!-- 5. Recent Activity -->
+  <section class="panel" role="region" aria-label="Recent activity">
+    <div class="panel-header">
+      <span class="panel-title">Recent Activity</span>
     </div>
-
-    <!-- Panel B: Receivables -->
-    <div class="panel" role="region" aria-label="Receivables">
-      <div class="panel-header"><span class="panel-title">Who Owes Us</span></div>
-      <div class="tab-bar">
-        <button class="tab-btn active" data-pane="recv-b2b-pane">B2B</button>
-        <button class="tab-btn"        data-pane="recv-retail-pane">Retail Credit</button>
-      </div>
-      <div class="panel-body">
-        <div class="tab-pane active" id="recv-b2b-pane">
-          <table><thead></thead><tbody id="recv-b2b"></tbody></table>
-        </div>
-        <div class="tab-pane" id="recv-retail-pane">
-          <table><thead></thead><tbody id="recv-retail"></tbody></table>
-        </div>
-      </div>
+    <div class="panel-body">
+      <table>
+        <thead>
+          <tr>
+            <th>Invoice</th><th>Customer</th><th>Total</th><th>Method</th><th>Time</th>
+          </tr>
+        </thead>
+        <tbody id="recent-activity"></tbody>
+      </table>
     </div>
+  </section>
 
-    <!-- Panel C: Stock Pressure -->
-    <div class="panel" role="region" aria-label="Stock pressure">
-      <div class="panel-header"><span class="panel-title">Stock Pressure</span></div>
-      <div class="tab-bar">
-        <button class="tab-btn active" data-pane="stock-risk-pane">Stock-out Risk</button>
-        <button class="tab-btn"        data-pane="stock-low-pane">Low Stock</button>
-        <button class="tab-btn"        data-pane="stock-dead-pane">Dead Stock</button>
-      </div>
-      <div class="panel-body">
-        <div class="tab-pane active" id="stock-risk-pane">
-          <table><thead></thead><tbody id="stock-risk"></tbody></table>
-        </div>
-        <div class="tab-pane" id="stock-low-pane">
-          <table><thead></thead><tbody id="stock-low"></tbody></table>
-        </div>
-        <div class="tab-pane" id="stock-dead-pane">
-          <table><thead></thead><tbody id="stock-dead"></tbody></table>
-        </div>
-      </div>
-    </div>
+</div>
 
-    <!-- Panel D: Recent Activity -->
-    <div class="panel" role="region" aria-label="Recent activity">
-      <div class="panel-header"><span class="panel-title">Today's Operations</span></div>
-      <div class="panel-body">
-        <table>
-          <thead>
-            <tr>
-              <th>Ref</th><th>Customer</th><th>Total</th><th>Method</th><th>Time</th>
-            </tr>
-          </thead>
-          <tbody id="recent-activity"></tbody>
-        </table>
-      </div>
-    </div>
-
-  </div><!-- /secondary-grid -->
-
-</div><!-- /content -->
-
-<div id="custom-range-modal" class="range-modal hidden" role="dialog" aria-modal="true" aria-labelledby="custom-range-title">
+<div id="custom-range-modal" class="range-modal hidden" role="dialog" aria-modal="true" aria-labelledby="crm-title">
   <div class="range-modal-card">
     <div class="range-modal-header">
-      <div>
-        <h3 id="custom-range-title">Custom Range</h3>
-        <p>Select a start date and end date for the dashboard summary.</p>
-      </div>
-      <button type="button" class="range-modal-close" onclick="closeCustomRangePicker()" aria-label="Close custom range">×</button>
+      <h3 id="crm-title">Custom Range</h3>
+      <button type="button" class="range-modal-close" onclick="closeCustomRangePicker()" aria-label="Close">&#215;</button>
     </div>
     <div class="range-modal-body">
-      <label class="range-field">
-        <span>Start date</span>
-        <input id="custom-range-start" type="date">
-      </label>
-      <label class="range-field">
-        <span>End date</span>
-        <input id="custom-range-end" type="date">
-      </label>
+      <label class="range-field"><span>Start date</span><input id="custom-range-start" type="date"></label>
+      <label class="range-field"><span>End date</span><input id="custom-range-end" type="date"></label>
       <p id="custom-range-error" class="range-error" hidden></p>
     </div>
     <div class="range-modal-actions">
@@ -694,28 +633,24 @@ def dashboard_ui():
   </div>
 </div>
 
-<!-- ── Assistant drawer ───────────────────────────────────────────── -->
 <aside id="assistant-drawer" aria-label="AI Assistant" role="complementary">
   <div class="drawer-header">
     <span class="drawer-title">AI Assistant</span>
-    <button class="drawer-close" onclick="closeDrawer()" aria-label="Close assistant">✕</button>
+    <button class="drawer-close" onclick="closeDrawer()" aria-label="Close assistant">&#10005;</button>
   </div>
   <div class="drawer-body" id="chat-body">
-    <div class="preset-chips" id="preset-chips">
-      <!-- Chips rendered by JS from /dashboard/insights -->
-    </div>
+    <div class="preset-chips" id="preset-chips"></div>
   </div>
   <div class="drawer-footer">
     <div class="chat-input-wrap">
       <input class="chat-input" id="chat-input" type="text"
-             placeholder="Ask anything about your business…" autocomplete="off">
-      <button class="chat-send" id="chat-send" aria-label="Send">→</button>
+             placeholder="Ask anything about your business&#8230;" autocomplete="off">
+      <button class="chat-send" id="chat-send" aria-label="Send">&#8594;</button>
     </div>
   </div>
 </aside>
 
-<!-- FAB (mobile) -->
-<button class="fab" onclick="openDrawer()" aria-label="Open AI assistant">💬</button>
+<button class="fab" onclick="openDrawer()" aria-label="Open AI assistant">&#128172;</button>
 
 <script src="/static/dashboard.js"></script>
 </body>
