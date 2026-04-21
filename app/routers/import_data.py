@@ -1153,7 +1153,7 @@ td{padding:8px 12px;border-top:1px solid var(--border);color:var(--sub);white-sp
     <div class="import-grid" style="grid-template-columns:minmax(340px,760px)">
         <div class="import-card">
             <div class="import-card-header">
-                <div class="import-card-icon" style="background:rgba(45,212,191,.12)">FI</div>
+                <div class="import-card-icon" style="background:rgba(45,212,191,.12)">&#127806;</div>
                 <div>
                     <div class="import-card-title">Farm Intake Import</div>
                     <div class="import-card-sub">Import farm delivery history from Excel and optionally record stock movement</div>
@@ -1188,7 +1188,7 @@ td{padding:8px 12px;border-top:1px solid var(--border);color:var(--sub);white-sp
 
                 <div class="drop-zone" id="drop-farm-intake" ondragover="onDrag(event,'farm-intake')" ondragleave="offDrag('farm-intake')" ondrop="onDrop(event,'farm-intake')">
                     <input type="file" accept=".xlsx,.xls" onchange="onFile(this,'farm-intake')">
-                    <div class="drop-icon">FI</div>
+                    <div class="drop-icon">&#127806;</div>
                     <div class="drop-text">Click or drag farm_intake.xlsx here</div>
                     <div class="drop-hint" id="hint-farm-intake">Grouped by Farm + Date into delivery records</div>
                 </div>

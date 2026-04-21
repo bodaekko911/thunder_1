@@ -5,6 +5,7 @@ import uuid
 from collections import defaultdict
 from datetime import date, datetime, timezone
 from typing import Optional
+import unicodedata
 
 import openpyxl
 from sqlalchemy import select
@@ -67,7 +68,17 @@ def _find_col(headers: list[str], candidates: list[str]) -> Optional[int]:
 
 
 def _normalize_farm_name(value) -> str:
-    return " ".join(str(value or "").strip().split())
+    raw = str(value or "")
+    raw = unicodedata.normalize("NFKC", raw)
+    raw = raw.replace("\u00A0", " ")
+    raw = raw.replace("\u2007", " ")
+    raw = raw.replace("\u202F", " ")
+    raw = raw.replace("\u200B", "")
+    raw = raw.replace("\u200C", "")
+    raw = raw.replace("\u200D", "")
+    raw = raw.replace("\uFEFF", "")
+    raw = " ".join(raw.strip().split())
+    return raw.casefold()
 
 
 def _extract_batch_id(notes: str | None) -> str | None:
@@ -135,7 +146,8 @@ async def import_farm_intake(
 
         sku = _normalize_sku(raw_sku)[:_SKU_MAX]
         item_name = str(raw_product or "").strip()[:_ITEM_MAX]
-        farm_name = _normalize_farm_name(raw_farm)[:_FARM_MAX]
+        farm_key = _normalize_farm_name(raw_farm)
+        farm_name = " ".join(str(raw_farm or "").strip().split())[:_FARM_MAX]
         qty = _safe_float(raw_qty)
         parsed_date = _parse_date(raw_date)
 
@@ -148,7 +160,7 @@ async def import_farm_intake(
             row_errors.append("QTY must be numeric")
         elif qty <= 0:
             row_errors.append("QTY must be greater than 0")
-        if not farm_name:
+        if not farm_key:
             row_errors.append("Farm is required")
         if not parsed_date:
             row_errors.append(f"Date '{raw_date}' is invalid — use YYYY-MM-DD, DD/MM/YYYY, or MM/DD/YYYY")
@@ -159,9 +171,9 @@ async def import_farm_intake(
                     "row": rn,
                     "sku": sku,
                     "product": item_name,
-                    "farm": farm_name,
-                    "date": str(raw_date or ""),
-                    "reason": "; ".join(row_errors),
+                "farm": farm_name,
+                "date": str(raw_date or ""),
+                "reason": "; ".join(row_errors),
                 }
             )
             continue
@@ -174,7 +186,7 @@ async def import_farm_intake(
                 "product": item_name,
                 "qty": qty,
                 "farm": farm_name,
-                "farm_key": farm_name.lower(),
+                "farm_key": farm_key,
                 "date": parsed_date,
             }
         )
@@ -190,7 +202,9 @@ async def import_farm_intake(
 
     farm_result = await db.execute(select(Farm).where(Farm.is_active == 1))
     for farm in farm_result.scalars().all():
-        farms_by_name[_normalize_farm_name(farm.name).lower()] = farm
+        normalized_existing_name = _normalize_farm_name(farm.name)
+        if normalized_existing_name:
+            farms_by_name[normalized_existing_name] = farm
 
     farms_auto_created: list[dict] = []
     rows_ready: list[dict] = []
