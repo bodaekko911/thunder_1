@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from datetime import date as date_type
 from decimal import Decimal, ROUND_HALF_UP
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
 from fastapi import HTTPException
 from pydantic import BaseModel, Field
@@ -30,7 +30,15 @@ _MONEY = Decimal("0.01")
 _QTY   = Decimal("0.001")
 
 STOCK_PURCHASE_ACCOUNT_CODE  = "5011"
-STOCK_PURCHASE_CATEGORY_NAME = "Stock Purchase"
+STOCK_PURCHASE_CATEGORY_NAME = "Products"
+PACKAGING_CATEGORY_NAME = "Packaging Materials"
+PACKAGING_CATEGORY_ACCOUNT_CODE = "5007"
+PRODUCT_TYPE_PRODUCTS = "products"
+PRODUCT_TYPE_PACKAGING = "packaging_materials"
+RECEIPT_PRODUCT_TYPE_TO_CATEGORY = {
+    PRODUCT_TYPE_PRODUCTS: (STOCK_PURCHASE_CATEGORY_NAME, STOCK_PURCHASE_ACCOUNT_CODE),
+    PRODUCT_TYPE_PACKAGING: (PACKAGING_CATEGORY_NAME, PACKAGING_CATEGORY_ACCOUNT_CODE),
+}
 
 
 # ── Input schemas ─────────────────────────────────────────────────────────────
@@ -40,6 +48,7 @@ class ReceiptCreate(BaseModel):
     product_id:   int             = Field(..., ge=1)
     qty:          float           = Field(..., gt=0)
     unit_cost:    Optional[float] = Field(None, ge=0)
+    product_type: Literal["products", "packaging_materials"]
     receive_date: date_type
     supplier_ref: Optional[str]   = Field(None, max_length=150)
     notes:        Optional[str]   = None
@@ -54,6 +63,7 @@ class BatchReceiptItem(BaseModel):
 
 class BatchReceiptCreate(BaseModel):
     """Multi-product receive submitted from the form."""
+    product_type: Literal["products", "packaging_materials"]
     receive_date: date_type
     supplier_ref: Optional[str] = Field(None, max_length=150)
     notes:        Optional[str] = None
@@ -64,6 +74,7 @@ class ReceiptUpdate(BaseModel):
     """Editable fields for an existing receipt."""
     qty:          float           = Field(..., gt=0)
     unit_cost:    Optional[float] = Field(None, ge=0)
+    product_type: Optional[Literal["products", "packaging_materials"]] = None
     receive_date: date_type
     supplier_ref: Optional[str]   = Field(None, max_length=150)
     notes:        Optional[str]   = None
@@ -98,10 +109,30 @@ async def _ensure_account(
     return account
 
 
-async def _get_or_create_stock_purchase_category(db: AsyncSession) -> ExpenseCategory:
+async def _get_or_create_receipt_category(
+    db: AsyncSession,
+    *,
+    product_type: str,
+) -> ExpenseCategory:
+    category_config = RECEIPT_PRODUCT_TYPE_TO_CATEGORY.get(product_type)
+    if category_config is None:
+        raise HTTPException(status_code=422, detail="Product Type is required")
+
+    category_name, account_code = category_config
     result   = await db.execute(
         select(ExpenseCategory).where(
-            ExpenseCategory.account_code == STOCK_PURCHASE_ACCOUNT_CODE
+            ExpenseCategory.name == category_name,
+            ExpenseCategory.is_active == "1",
+        )
+    )
+    category = result.scalar_one_or_none()
+    if category is not None:
+        return category
+
+    result = await db.execute(
+        select(ExpenseCategory).where(
+            ExpenseCategory.account_code == account_code,
+            ExpenseCategory.is_active == "1",
         )
     )
     category = result.scalar_one_or_none()
@@ -109,11 +140,11 @@ async def _get_or_create_stock_purchase_category(db: AsyncSession) -> ExpenseCat
         return category
 
     await _ensure_account(
-        db, STOCK_PURCHASE_ACCOUNT_CODE, STOCK_PURCHASE_CATEGORY_NAME, "expense"
+        db, account_code, category_name, "expense"
     )
     category = ExpenseCategory(
-        name=STOCK_PURCHASE_CATEGORY_NAME,
-        account_code=STOCK_PURCHASE_ACCOUNT_CODE,
+        name=category_name,
+        account_code=account_code,
         is_active="1",
     )
     db.add(category)
@@ -138,7 +169,7 @@ async def _post_receipt_expense(
 
     journal = Journal(
         ref_type="expense",
-        description=f"{STOCK_PURCHASE_CATEGORY_NAME} — {receipt_ref}",
+        description=f"{category.name} — {receipt_ref}",
         user_id=user_id,
     )
     db.add(journal)
@@ -240,6 +271,7 @@ async def _sync_receipt_expense(
     total_cost: Optional[Decimal],
     receive_date: date_type,
     supplier_ref: Optional[str],
+    product_type: Optional[str] = None,
 ) -> Optional[str]:
     if total_cost is None or total_cost <= 0:
         if receipt.expense_id:
@@ -254,7 +286,9 @@ async def _sync_receipt_expense(
         return None
 
     if receipt.expense_id is None:
-        category = await _get_or_create_stock_purchase_category(db)
+        if not product_type:
+            raise HTTPException(status_code=422, detail="Product Type is required")
+        category = await _get_or_create_receipt_category(db, product_type=product_type)
         expense = await _post_receipt_expense(
             db,
             category=category,
@@ -286,12 +320,25 @@ async def _sync_receipt_expense(
             total_cost=total_cost,
             receive_date=receive_date,
             supplier_ref=supplier_ref,
+            product_type=product_type,
         )
 
     old_amount = Decimal(str(expense.amount or 0)).quantize(_MONEY, rounding=ROUND_HALF_UP)
     delta = total_cost - old_amount
 
-    expense_account = await _ensure_account(db, STOCK_PURCHASE_ACCOUNT_CODE, STOCK_PURCHASE_CATEGORY_NAME, "expense")
+    expense_category = expense.category
+    if expense_category is None:
+        category_result = await db.execute(
+            select(ExpenseCategory).where(ExpenseCategory.id == expense.category_id)
+        )
+        expense_category = category_result.scalar_one_or_none()
+    if expense_category is None:
+        if not product_type:
+            raise HTTPException(status_code=422, detail="Product Type is required")
+        expense_category = await _get_or_create_receipt_category(db, product_type=product_type)
+        expense.category_id = expense_category.id
+
+    expense_account = await _ensure_account(db, expense_category.account_code, expense_category.name, "expense")
     cash_account = await _ensure_account(db, "1000", "Cash", "asset")
     if delta:
         expense_account.balance = Decimal(str(expense_account.balance or 0)) + delta
@@ -310,7 +357,7 @@ async def _sync_receipt_expense(
     if journal is None:
         journal = Journal(
             ref_type="expense",
-            description=f"{STOCK_PURCHASE_CATEGORY_NAME} — {receipt.ref_number}",
+            description=f"{expense_category.name} — {receipt.ref_number}",
             user_id=receipt.user_id,
         )
         db.add(journal)
@@ -331,7 +378,7 @@ async def _sync_receipt_expense(
     credit_entry.account_id = cash_account.id
     credit_entry.debit = 0
     credit_entry.credit = float(total_cost)
-    journal.description = f"{STOCK_PURCHASE_CATEGORY_NAME} — {receipt.ref_number}"
+    journal.description = f"{expense_category.name} — {receipt.ref_number}"
 
     expense.expense_date = receive_date
     expense.amount = float(total_cost)
@@ -406,7 +453,7 @@ async def _create_receipt_core(
 
     expense_ref: Optional[str] = None
     if total_cost and total_cost > 0:
-        category = await _get_or_create_stock_purchase_category(db)
+        category = await _get_or_create_receipt_category(db, product_type=data.product_type)
         expense  = await _post_receipt_expense(
             db,
             category=category,
@@ -444,6 +491,7 @@ async def _create_receipt_core(
         "total_cost":   float(total_cost) if total_cost else None,
         "supplier_ref": supplier_ref,
         "notes":        notes,
+        "product_type": data.product_type,
         "expense_id":   receipt.expense_id,
         "expense_ref":  expense_ref,
     }
@@ -512,6 +560,7 @@ async def update_receipt(
         total_cost=total_cost,
         receive_date=data.receive_date,
         supplier_ref=supplier_ref,
+        product_type=data.product_type,
     )
 
     record(
@@ -537,6 +586,7 @@ async def update_receipt(
         "total_cost": float(total_cost) if total_cost is not None else None,
         "supplier_ref": supplier_ref,
         "notes": notes,
+        "product_type": data.product_type,
         "expense_id": receipt.expense_id,
         "expense_ref": expense_ref,
         "received_by": receipt.user.name if receipt.user else None,
@@ -609,6 +659,7 @@ async def create_receipt_batch(
             receive_date=data.receive_date,
             supplier_ref=data.supplier_ref,
             notes=data.notes,
+            product_type=data.product_type,
         )
         receipts.append(await _create_receipt_core(db, line, current_user))
 
@@ -643,7 +694,7 @@ async def list_receipts(
         base.options(
             selectinload(ProductReceipt.product),
             selectinload(ProductReceipt.user),
-            selectinload(ProductReceipt.expense),
+            selectinload(ProductReceipt.expense).selectinload(Expense.category),
         )
         .order_by(ProductReceipt.receive_date.desc(), ProductReceipt.id.desc())
         .offset(skip)
@@ -667,6 +718,7 @@ async def list_receipts(
                 "total_cost":   float(r.total_cost) if r.total_cost is not None else None,
                 "supplier_ref": r.supplier_ref,
                 "notes":        r.notes,
+                "expense_category_name": r.expense.category.name if r.expense and r.expense.category else None,
                 "expense_id":   r.expense_id,
                 "expense_ref":  r.expense.ref_number if r.expense else None,
                 "received_by":  r.user.name if r.user else None,

@@ -424,6 +424,18 @@ body.light table.hist tr:hover td{background:rgba(0,0,0,.03)}
           <input type="date" id="receive-date" required>
         </div>
         <div class="field">
+          <label>Product Type *</label>
+          <select id="product-type" required onchange="onProductTypeChange()">
+            <option value="">Select product type</option>
+            <option value="products">Products</option>
+            <option value="packaging_materials">Packaging Materials</option>
+          </select>
+        </div>
+        <div class="field">
+          <label>Expense Category</label>
+          <input type="text" id="expense-category-display" placeholder="Set automatically from Product Type" readonly>
+        </div>
+        <div class="field">
           <label>Supplier / Reference <span style="color:var(--muted);font-weight:400">(optional)</span></label>
           <input type="text" id="supplier-ref" maxlength="150" placeholder="e.g. Acme Supplies / INV-2026-001">
         </div>
@@ -509,6 +521,18 @@ body.light table.hist tr:hover td{background:rgba(0,0,0,.03)}
         <label>Unit Cost</label>
         <input type="number" id="edit-cost" min="0" step="0.01">
       </div>
+      <div class="field">
+        <label>Product Type *</label>
+        <select id="edit-product-type" required onchange="syncProductTypeFields('edit-product-type', 'edit-expense-category-display')">
+          <option value="">Select product type</option>
+          <option value="products">Products</option>
+          <option value="packaging_materials">Packaging Materials</option>
+        </select>
+      </div>
+      <div class="field">
+        <label>Expense Category</label>
+        <input type="text" id="edit-expense-category-display" placeholder="Set automatically from Product Type" readonly>
+      </div>
       <div class="field full">
         <label>Supplier / Reference</label>
         <input type="text" id="edit-supplier" maxlength="150">
@@ -540,6 +564,10 @@ let _currentUserRole = '';
 let _currentUserPermissions = new Set();
 let _historyItems = [];
 let _editingReceipt = null;
+const PRODUCT_TYPE_LABELS = {
+  products: 'Products',
+  packaging_materials: 'Packaging Materials',
+};
 
 function hasPermission(permission) {
   return _currentUserRole === 'admin' || _currentUserPermissions.has(permission);
@@ -566,6 +594,7 @@ async function init() {
   }
   await Promise.all([initUser(), loadProducts()]);
   document.getElementById('receive-date').value = todayIso();
+  syncProductTypeFields('product-type', 'expense-category-display');
   addRow();          // start with one empty row
   await loadHistory();
 }
@@ -788,15 +817,35 @@ function updateGrandTotal() {
   else         { el.textContent = '—';             el.style.color = 'var(--muted)'; }
 }
 
+function syncProductTypeFields(selectId, displayId) {
+  const select = document.getElementById(selectId);
+  const display = document.getElementById(displayId);
+  if (!select || !display) return;
+  display.value = PRODUCT_TYPE_LABELS[select.value] || '';
+}
+
+function onProductTypeChange() {
+  syncProductTypeFields('product-type', 'expense-category-display');
+  validateSubmit();
+}
+
+function inferProductTypeFromReceipt(receipt) {
+  const categoryName = String(receipt?.expense_category_name || '').trim().toLowerCase();
+  if (categoryName === 'products') return 'products';
+  if (categoryName === 'packaging materials') return 'packaging_materials';
+  return '';
+}
+
 function validateSubmit() {
   const rows = document.querySelectorAll('#rows-body tr.data-row');
+  const productType = document.getElementById('product-type')?.value;
   const valid = Array.from(rows).some(tr => {
     const id  = tr.dataset.row;
     const pid = document.getElementById(`pid-${id}`)?.value;
     const qty = parseFloat(document.getElementById(`qty-${id}`)?.value) || 0;
     return pid && qty > 0;
   });
-  document.getElementById('submit-btn').disabled = !valid;
+  document.getElementById('submit-btn').disabled = !(productType && valid);
 }
 
 // ── Submit ──────────────────────────────────────────────────────────────────
@@ -812,7 +861,7 @@ async function submitBatch(e) {
 
   const rows    = document.querySelectorAll('#rows-body tr.data-row');
   const items   = [];
-  const missing = [];
+  const productType = document.getElementById('product-type').value;
 
   rows.forEach(tr => {
     const id   = tr.dataset.row;
@@ -823,9 +872,13 @@ async function submitBatch(e) {
     const item = { product_id: parseInt(pid), qty };
     if (cost) item.unit_cost = parseFloat(cost);
     items.push(item);
-    missing.push(!pid);
   });
 
+  if (!productType) {
+    showToast('Choose Product Type before receiving stock.', 'err');
+    btn.disabled = false; btn.textContent = 'âœ“ Receive Stock';
+    return;
+  }
   if (items.length === 0) {
     showToast('Add at least one product with a quantity.', 'err');
     btn.disabled = false; btn.textContent = '✓ Receive Stock';
@@ -833,6 +886,7 @@ async function submitBatch(e) {
   }
 
   const payload = {
+    product_type: productType,
     receive_date: document.getElementById('receive-date').value,
     supplier_ref: document.getElementById('supplier-ref').value.trim() || null,
     notes:        document.getElementById('notes').value.trim() || null,
@@ -865,6 +919,8 @@ async function submitBatch(e) {
 }
 
 function resetForm() {
+  document.getElementById('product-type').value = '';
+  syncProductTypeFields('product-type', 'expense-category-display');
   document.getElementById('supplier-ref').value = '';
   document.getElementById('notes').value = '';
   document.getElementById('receive-date').value = todayIso();
@@ -924,6 +980,8 @@ function openEditModal(receiptId) {
   document.getElementById('edit-date').value = receipt.receive_date || todayIso();
   document.getElementById('edit-qty').value = parseFloat(receipt.qty || 0).toFixed(3);
   document.getElementById('edit-cost').value = receipt.unit_cost != null ? parseFloat(receipt.unit_cost).toFixed(2) : '';
+  document.getElementById('edit-product-type').value = inferProductTypeFromReceipt(receipt);
+  syncProductTypeFields('edit-product-type', 'edit-expense-category-display');
   document.getElementById('edit-supplier').value = receipt.supplier_ref || '';
   document.getElementById('edit-notes').value = receipt.notes || '';
   document.getElementById('edit-modal').classList.add('open');
@@ -939,7 +997,15 @@ async function saveEditReceipt() {
   const btn = document.getElementById('edit-save-btn');
   btn.disabled = true;
   btn.textContent = 'Saving...';
+  const productType = document.getElementById('edit-product-type').value;
+  if (!productType) {
+    showToast('Choose Product Type before saving.', 'err');
+    btn.disabled = false;
+    btn.textContent = 'Save Changes';
+    return;
+  }
   const payload = {
+    product_type: productType,
     receive_date: document.getElementById('edit-date').value,
     qty: parseFloat(document.getElementById('edit-qty').value),
     supplier_ref: document.getElementById('edit-supplier').value.trim() || null,

@@ -449,12 +449,20 @@ async def export_farm(date_from: str = None, date_to: str = None, db: AsyncSessi
     rows = []
     for farm in data["farms"]:
         for p in farm["products"]:
-            rows.append([farm["name"],p["name"],p["total_qty"],p["unit"],farm["delivery_count"]])
+            rows.append([farm["name"], "", p["name"], p["total_qty"], p["unit"], farm["delivery_count"], ""])
         if not farm["products"]:
-            rows.append([farm["name"],"No deliveries",0,"",0])
+            rows.append([farm["name"], "", "No deliveries", 0, "", 0, ""])
     for delivery in data["deliveries"]:
-        rows.append([delivery["farm"], "Delivery " + delivery["delivery_number"], delivery["total_qty"], "", delivery["total_items"], delivery["user_name"]])
-    buf = to_xlsx(["Farm","Product / Record","Total Qty","Unit","Deliveries / Items","Performed By"], rows, "Farm Intake")
+        rows.append([
+            delivery["farm"],
+            delivery["delivery_date"],
+            "Delivery " + delivery["delivery_number"],
+            delivery["total_qty"],
+            "",
+            delivery["total_items"],
+            delivery["user_name"],
+        ])
+    buf = to_xlsx(["Farm","Date","Product / Record","Total Qty","Unit","Deliveries / Items","Performed By"], rows, "Farm Intake")
     return StreamingResponse(buf, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={"Content-Disposition": f"attachment; filename=farm_intake_{date.today()}.xlsx"})
 
