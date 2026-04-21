@@ -4,6 +4,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 from sqlalchemy import func, select
 from datetime import datetime, date, timedelta, timezone
+from collections import defaultdict
 from typing import Optional
 import io
 
@@ -11,7 +12,7 @@ from app.core.permissions import require_permission
 from app.database import get_async_session
 from app.models.product import Product
 from app.models.invoice import Invoice, InvoiceItem
-from app.models.b2b import B2BClient, B2BInvoice, B2BInvoiceItem
+from app.models.b2b import B2BClient, B2BInvoice, B2BInvoiceItem, B2BRefund
 from app.models.inventory import StockMove
 from app.models.farm import Farm, FarmDelivery, FarmDeliveryItem
 from app.models.spoilage import SpoilageRecord
@@ -93,6 +94,228 @@ def _resolve_pagination(skip, limit, default_limit=100):
     return skip_value, limit_value
 
 
+def _num(value) -> float:
+    try:
+        return float(value or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _paginate_rows(rows, skip, limit, include_all=False):
+    if include_all:
+        return rows
+    if limit == 0:
+        return []
+    return rows[skip : skip + limit]
+
+
+def _channel_totals():
+    return {
+        "gross_sales": 0.0,
+        "cash_collected": 0.0,
+        "outstanding": 0.0,
+        "count": 0,
+    }
+
+
+async def _build_sales_report(
+    db: AsyncSession,
+    *,
+    d_from: datetime,
+    d_to: datetime,
+    skip: int = 0,
+    limit: int = 100,
+    include_all: bool = False,
+):
+    result = await db.execute(
+        select(Invoice)
+        .where(Invoice.created_at >= d_from, Invoice.created_at <= d_to)
+        .options(selectinload(Invoice.items), selectinload(Invoice.user), selectinload(Invoice.customer))
+    )
+    pos_invoices = result.scalars().all()
+
+    result = await db.execute(
+        select(B2BInvoice)
+        .where(B2BInvoice.created_at >= d_from, B2BInvoice.created_at <= d_to)
+        .options(
+            selectinload(B2BInvoice.items).selectinload(B2BInvoiceItem.product),
+            selectinload(B2BInvoice.client),
+            selectinload(B2BInvoice.user),
+        )
+    )
+    b2b_invoices = result.scalars().all()
+
+    result = await db.execute(
+        select(RetailRefund)
+        .where(RetailRefund.created_at >= d_from, RetailRefund.created_at <= d_to)
+        .options(selectinload(RetailRefund.customer), selectinload(RetailRefund.user))
+    )
+    retail_refunds = result.scalars().all()
+
+    result = await db.execute(
+        select(B2BRefund)
+        .where(B2BRefund.created_at >= d_from, B2BRefund.created_at <= d_to)
+        .options(selectinload(B2BRefund.client), selectinload(B2BRefund.user))
+    )
+    b2b_refunds = result.scalars().all()
+
+    channels = {"pos": _channel_totals(), "b2b": _channel_totals()}
+    daily = defaultdict(lambda: {"gross_sales": 0.0, "refunds": 0.0, "cash_collected": 0.0})
+    product_sales = defaultdict(lambda: {"qty": 0.0, "revenue": 0.0})
+
+    pos_records = []
+    for inv in sorted(pos_invoices, key=lambda x: x.created_at or datetime.min.replace(tzinfo=timezone.utc), reverse=True):
+        total = _num(inv.total)
+        collected = total if (inv.status or "").lower() == "paid" else 0.0
+        outstanding = max(total - collected, 0.0)
+        day_key = inv.created_at.strftime("%Y-%m-%d") if inv.created_at else ""
+        channels["pos"]["gross_sales"] += total
+        channels["pos"]["cash_collected"] += collected
+        channels["pos"]["outstanding"] += outstanding
+        channels["pos"]["count"] += 1
+        daily[day_key]["gross_sales"] += total
+        daily[day_key]["cash_collected"] += collected
+        for item in inv.items:
+            item_name = item.name or "â€”"
+            product_sales[item_name]["qty"] += _num(item.qty)
+            product_sales[item_name]["revenue"] += _num(item.total)
+        pos_records.append({
+            "invoice_number": inv.invoice_number or f"POS-{inv.id}",
+            "datetime": inv.created_at.strftime("%Y-%m-%d %H:%M") if inv.created_at else "â€”",
+            "customer": inv.customer.name if inv.customer else "Walk-in",
+            "user_name": inv.user.name if inv.user else "â€”",
+            "payment": inv.payment_method or "â€”",
+            "status": inv.status or "â€”",
+            "items": [{"name": it.name, "qty": _num(it.qty), "unit_price": _num(it.unit_price), "total": _num(it.total)} for it in inv.items],
+            "total": total,
+            "cash_collected": collected,
+            "outstanding": outstanding,
+        })
+
+    b2b_records = []
+    for inv in sorted(b2b_invoices, key=lambda x: x.created_at or datetime.min.replace(tzinfo=timezone.utc), reverse=True):
+        total = _num(inv.total)
+        amount_paid = _num(inv.amount_paid)
+        outstanding = max(total - amount_paid, 0.0)
+        day_key = inv.created_at.strftime("%Y-%m-%d") if inv.created_at else ""
+        channels["b2b"]["gross_sales"] += total
+        channels["b2b"]["cash_collected"] += amount_paid
+        channels["b2b"]["outstanding"] += outstanding
+        channels["b2b"]["count"] += 1
+        daily[day_key]["gross_sales"] += total
+        daily[day_key]["cash_collected"] += amount_paid
+        items_data = []
+        for it in inv.items:
+            product_name = it.product.name if it.product else "â€”"
+            item_qty = _num(it.qty)
+            item_total = _num(it.total)
+            items_data.append({"name": product_name, "qty": item_qty, "unit_price": _num(it.unit_price), "total": item_total})
+            product_sales[product_name]["qty"] += item_qty
+            product_sales[product_name]["revenue"] += item_total
+        b2b_records.append({
+            "invoice_number": inv.invoice_number,
+            "client": inv.client.name if inv.client else "â€”",
+            "datetime": inv.created_at.strftime("%Y-%m-%d %H:%M") if inv.created_at else "â€”",
+            "user_name": inv.user.name if inv.user else "â€”",
+            "invoice_type": inv.invoice_type,
+            "status": inv.status or "â€”",
+            "items": items_data,
+            "total": total,
+            "amount_paid": amount_paid,
+            "balance_due": outstanding,
+        })
+
+    refund_records = []
+    retail_cash_refunds = 0.0
+    b2b_cash_refunds = 0.0
+    total_refunds = 0.0
+    for refund in sorted(retail_refunds, key=lambda x: x.created_at or datetime.min.replace(tzinfo=timezone.utc), reverse=True):
+        refund_total = _num(refund.total)
+        day_key = refund.created_at.strftime("%Y-%m-%d") if refund.created_at else ""
+        daily[day_key]["refunds"] += refund_total
+        total_refunds += refund_total
+        if (refund.refund_method or "").lower() == "cash":
+            retail_cash_refunds += refund_total
+        refund_records.append({
+            "refund_number": refund.refund_number,
+            "source": "Retail",
+            "counterparty": refund.customer.name if refund.customer else "â€”",
+            "datetime": refund.created_at.strftime("%Y-%m-%d %H:%M") if refund.created_at else "â€”",
+            "processed_by": refund.user.name if refund.user else "â€”",
+            "reason": refund.reason or "â€”",
+            "refund_method": refund.refund_method or "â€”",
+            "total": refund_total,
+        })
+    for refund in sorted(b2b_refunds, key=lambda x: x.created_at or datetime.min.replace(tzinfo=timezone.utc), reverse=True):
+        refund_total = _num(refund.total)
+        day_key = refund.created_at.strftime("%Y-%m-%d") if refund.created_at else ""
+        daily[day_key]["refunds"] += refund_total
+        total_refunds += refund_total
+        b2b_cash_refunds += refund_total
+        refund_records.append({
+            "refund_number": refund.refund_number,
+            "source": "B2B",
+            "counterparty": refund.client.name if refund.client else "â€”",
+            "datetime": refund.created_at.strftime("%Y-%m-%d %H:%M") if refund.created_at else "â€”",
+            "processed_by": refund.user.name if refund.user else "â€”",
+            "reason": refund.notes or "â€”",
+            "refund_method": "cash",
+            "total": refund_total,
+        })
+
+    gross_sales = channels["pos"]["gross_sales"] + channels["b2b"]["gross_sales"]
+    cash_collected = channels["pos"]["cash_collected"] + channels["b2b"]["cash_collected"] - retail_cash_refunds - b2b_cash_refunds
+    outstanding = channels["pos"]["outstanding"] + channels["b2b"]["outstanding"]
+    net_sales = gross_sales - total_refunds
+
+    daily_rows = []
+    for day_key, bucket in sorted(daily.items()):
+        daily_rows.append({
+            "date": day_key,
+            "gross_sales": round(bucket["gross_sales"], 2),
+            "refunds": round(bucket["refunds"], 2),
+            "net_sales": round(bucket["gross_sales"] - bucket["refunds"], 2),
+            "cash_collected": round(bucket["cash_collected"], 2),
+        })
+
+    top_products = sorted(product_sales.items(), key=lambda x: x[1]["revenue"], reverse=True)[:10]
+    return {
+        "gross_sales": round(gross_sales, 2),
+        "refunds": round(total_refunds, 2),
+        "net_sales": round(net_sales, 2),
+        "cash_collected": round(cash_collected, 2),
+        "outstanding": round(outstanding, 2),
+        "channels": {
+            "pos": {
+                "gross_sales": round(channels["pos"]["gross_sales"], 2),
+                "cash_collected": round(channels["pos"]["cash_collected"] - retail_cash_refunds, 2),
+                "outstanding": round(channels["pos"]["outstanding"], 2),
+                "count": channels["pos"]["count"],
+            },
+            "b2b": {
+                "gross_sales": round(channels["b2b"]["gross_sales"], 2),
+                "cash_collected": round(channels["b2b"]["cash_collected"] - b2b_cash_refunds, 2),
+                "outstanding": round(channels["b2b"]["outstanding"], 2),
+                "count": channels["b2b"]["count"],
+            },
+        },
+        "refund_breakdown": {
+            "retail": round(sum(_num(r.total) for r in retail_refunds), 2),
+            "b2b": round(sum(_num(r.total) for r in b2b_refunds), 2),
+        },
+        "daily": daily_rows,
+        "top_products": [{"name": name, "qty": round(values["qty"], 2), "revenue": round(values["revenue"], 2)} for name, values in top_products],
+        "pos_records": _paginate_rows(pos_records, skip, limit, include_all=include_all),
+        "b2b_records": _paginate_rows(b2b_records, skip, limit, include_all=include_all),
+        "refund_records": _paginate_rows(refund_records, skip, limit, include_all=include_all),
+        "pos_count": len(pos_invoices),
+        "b2b_count": len(b2b_invoices),
+        "refund_count": len(refund_records),
+        "date_from": d_from.strftime("%Y-%m-%d"),
+        "date_to": d_to.strftime("%Y-%m-%d"),
+    }
+
+
 # ── SALES ──────────────────────────────────────────────
 @router.get("/api/sales")
 async def sales_report(date_from: Optional[str] = None, date_to: Optional[str] = None, skip: int = 0, limit: int = Query(default=100, le=500), db: AsyncSession = Depends(get_async_session)):
@@ -100,6 +323,7 @@ async def sales_report(date_from: Optional[str] = None, date_to: Optional[str] =
     if (d_to - d_from).days > 366:
         raise HTTPException(status_code=400, detail="Date range cannot exceed 1 year")
     skip, limit = _resolve_pagination(skip, limit)
+    return await _build_sales_report(db, d_from=d_from, d_to=d_to, skip=skip, limit=limit)
     result = await db.execute(
         select(Invoice)
         .where(Invoice.created_at >= d_from, Invoice.created_at <= d_to, Invoice.status == "paid")
@@ -207,7 +431,71 @@ async def sales_report(date_from: Optional[str] = None, date_to: Optional[str] =
 
 @router.get("/export/sales", dependencies=[Depends(require_permission("action_export_excel"))])
 async def export_sales(date_from: str = None, date_to: str = None, db: AsyncSession = Depends(get_async_session)):
-    data = await sales_report(date_from=date_from, date_to=date_to, skip=0, limit=100000, db=db)
+    d_from, d_to = parse_dates(date_from, date_to)
+    data = await _build_sales_report(db, d_from=d_from, d_to=d_to, include_all=True)
+    try:
+        import openpyxl
+
+        wb = openpyxl.Workbook()
+        ws1 = wb.active
+        ws1.title = "Summary"
+        ws1.append(["Metric", "Value"])
+        for row in [
+            ["Period", f"{data['date_from']} -> {data['date_to']}"],
+            ["Gross Sales", data["gross_sales"]],
+            ["Refunds", data["refunds"]],
+            ["Net Sales", data["net_sales"]],
+            ["Cash Collected", data["cash_collected"]],
+            ["Outstanding", data["outstanding"]],
+            ["POS Gross Sales", data["channels"]["pos"]["gross_sales"]],
+            ["POS Cash Collected", data["channels"]["pos"]["cash_collected"]],
+            ["POS Outstanding", data["channels"]["pos"]["outstanding"]],
+            ["B2B Gross Sales", data["channels"]["b2b"]["gross_sales"]],
+            ["B2B Cash Collected", data["channels"]["b2b"]["cash_collected"]],
+            ["B2B Outstanding", data["channels"]["b2b"]["outstanding"]],
+        ]:
+            ws1.append(row)
+
+        ws2 = wb.create_sheet("Daily")
+        ws2.append(["Date", "Gross Sales", "Refunds", "Net Sales", "Cash Collected"])
+        for row in data["daily"]:
+            ws2.append([row["date"], row["gross_sales"], row["refunds"], row["net_sales"], row["cash_collected"]])
+
+        ws3 = wb.create_sheet("POS Invoices")
+        ws3.append(["Invoice #", "Date / Time", "Customer", "User", "Payment", "Status", "Invoice Total", "Cash Collected", "Outstanding"])
+        for row in data["pos_records"]:
+            ws3.append([row["invoice_number"], row["datetime"], row["customer"], row["user_name"], row["payment"], row["status"], row["total"], row["cash_collected"], row["outstanding"]])
+
+        ws4 = wb.create_sheet("B2B Invoices")
+        ws4.append(["Invoice #", "Client", "Date / Time", "User", "Type", "Status", "Total Invoiced", "Amount Paid", "Outstanding"])
+        for row in data["b2b_records"]:
+            ws4.append([row["invoice_number"], row["client"], row["datetime"], row["user_name"], row["invoice_type"], row["status"], row["total"], row["amount_paid"], row["balance_due"]])
+
+        ws5 = wb.create_sheet("Refunds")
+        ws5.append(["Refund #", "Source", "Counterparty", "Date / Time", "Processed By", "Method", "Reason", "Amount"])
+        for row in data["refund_records"]:
+            ws5.append([row["refund_number"], row["source"], row["counterparty"], row["datetime"], row["processed_by"], row["refund_method"], row["reason"], row["total"]])
+
+        ws6 = wb.create_sheet("Top Products")
+        ws6.append(["Product", "Qty Sold", "Gross Sales"])
+        for row in data["top_products"]:
+            ws6.append([row["name"], row["qty"], row["revenue"]])
+
+        for ws in wb.worksheets:
+            for column in ws.columns:
+                width = max((len(str(cell.value or "")) for cell in column), default=10)
+                ws.column_dimensions[column[0].column_letter].width = min(width + 3, 40)
+
+        buf = io.BytesIO()
+        wb.save(buf)
+        buf.seek(0)
+        return StreamingResponse(
+            buf,
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={"Content-Disposition": f"attachment; filename=sales_report_{date.today()}.xlsx"},
+        )
+    except ImportError:
+        raise Exception("Run: pip install openpyxl --break-system-packages")
     try:
         import openpyxl
         from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
@@ -366,9 +654,147 @@ async def export_b2b(date_from: str = None, date_to: str = None, db: AsyncSessio
 
 
 # ── INVENTORY ──────────────────────────────────────────
+async def _build_inventory_report(
+    db: AsyncSession,
+    *,
+    mode: str,
+    d_from: Optional[datetime] = None,
+    d_to: Optional[datetime] = None,
+    skip: int = 0,
+    limit: int = 100,
+    include_all: bool = False,
+):
+    if mode == "movement":
+        move_res = await db.execute(
+            select(StockMove)
+            .where(StockMove.created_at >= d_from, StockMove.created_at <= d_to)
+            .options(selectinload(StockMove.product))
+            .order_by(StockMove.created_at.desc(), StockMove.id.desc())
+        )
+        moves = move_res.scalars().all()
+        grouped = {}
+        detail_rows = []
+        for move in moves:
+            product = move.product
+            if product is None:
+                continue
+            if product.id not in grouped:
+                grouped[product.id] = {
+                    "sku": product.sku,
+                    "name": product.name,
+                    "category": product.category or "—",
+                    "unit": product.unit,
+                    "stock_in": 0.0,
+                    "stock_out": 0.0,
+                    "receipts": 0.0,
+                    "sales_usage": 0.0,
+                    "spoilage": 0.0,
+                    "transfers_in": 0.0,
+                    "transfers_out": 0.0,
+                    "adjustments_net": 0.0,
+                    "net_movement": 0.0,
+                }
+            row = grouped[product.id]
+            qty = abs(_num(move.qty))
+            is_in = (move.type or "").lower() == "in"
+            signed_qty = qty if is_in else -qty
+            row["net_movement"] += signed_qty
+            if is_in:
+                row["stock_in"] += qty
+            else:
+                row["stock_out"] += qty
+            ref_type = (move.ref_type or "").lower()
+            if ref_type == "receipt":
+                row["receipts"] += qty
+            elif ref_type in {"invoice", "b2b", "consignment"}:
+                row["sales_usage"] += qty
+            elif ref_type == "spoilage":
+                row["spoilage"] += qty
+            elif ref_type == "transfer":
+                if is_in:
+                    row["transfers_in"] += qty
+                else:
+                    row["transfers_out"] += qty
+            else:
+                row["adjustments_net"] += signed_qty
+            detail_rows.append({
+                "date": move.created_at.strftime("%Y-%m-%d %H:%M") if move.created_at else "—",
+                "sku": product.sku,
+                "product": product.name,
+                "transaction_type": ref_type or (move.type or "move"),
+                "direction": "in" if is_in else "out",
+                "qty": qty,
+                "unit": product.unit,
+                "reference": f"{move.ref_type or 'move'}:{move.ref_id or ''}".strip(":"),
+                "note": move.note or "",
+            })
+        rows = sorted(grouped.values(), key=lambda x: x["name"])
+        for row in rows:
+            for key in ("stock_in", "stock_out", "receipts", "sales_usage", "spoilage", "transfers_in", "transfers_out", "adjustments_net", "net_movement"):
+                row[key] = round(row[key], 2)
+        return {
+            "mode": "movement",
+            "date_from": d_from.strftime("%Y-%m-%d"),
+            "date_to": d_to.strftime("%Y-%m-%d"),
+            "products": _paginate_rows(rows, skip, limit, include_all=include_all),
+            "detail_rows": detail_rows if include_all else _paginate_rows(detail_rows, skip, limit, include_all=False),
+            "total_products": len(rows),
+            "summary": {
+                "stock_in": round(sum(r["stock_in"] for r in rows), 2),
+                "stock_out": round(sum(r["stock_out"] for r in rows), 2),
+                "receipts": round(sum(r["receipts"] for r in rows), 2),
+                "spoilage": round(sum(r["spoilage"] for r in rows), 2),
+            },
+        }
+
+    prod_res = await db.execute(select(Product).where(Product.is_active == True).order_by(Product.name))
+    products = prod_res.scalars().all()
+    rows = []
+    dead_stock_cutoff = datetime.now(timezone.utc) - timedelta(days=90)
+    dead_stock_count = 0
+    for product in products:
+        threshold = _num(product.reorder_level if product.reorder_level is not None else product.min_stock if product.min_stock is not None else 5)
+        last_move_res = await db.execute(select(func.max(StockMove.created_at)).where(StockMove.product_id == product.id))
+        last_move_at = last_move_res.scalar()
+        is_dead_stock = _num(product.stock) > 0 and (last_move_at is None or last_move_at < dead_stock_cutoff)
+        low_stock = _num(product.stock) <= threshold
+        if is_dead_stock:
+            dead_stock_count += 1
+        rows.append({
+            "sku": product.sku,
+            "name": product.name,
+            "category": product.category or "—",
+            "stock": _num(product.stock),
+            "unit": product.unit,
+            "price": _num(product.price),
+            "value": round(_num(product.stock) * _num(product.price), 2),
+            "threshold": round(threshold, 2),
+            "reorder_qty": round(_num(product.reorder_qty), 2),
+            "low_stock": low_stock,
+            "dead_stock": is_dead_stock,
+            "last_move_at": last_move_at.strftime("%Y-%m-%d") if last_move_at else "—",
+        })
+    return {
+        "mode": "snapshot",
+        "date_from": None,
+        "date_to": None,
+        "products": _paginate_rows(rows, skip, limit, include_all=include_all),
+        "total_value": round(sum(r["value"] for r in rows), 2),
+        "low_count": sum(1 for r in rows if r["low_stock"]),
+        "dead_stock_count": dead_stock_count,
+        "total_products": len(rows),
+    }
+
+
 @router.get("/api/inventory")
-async def inventory_report(skip: int = 0, limit: int = Query(default=100, le=500), db: AsyncSession = Depends(get_async_session)):
+async def inventory_report(mode: str = "snapshot", date_from: Optional[str] = None, date_to: Optional[str] = None, skip: int = 0, limit: int = Query(default=100, le=500), db: AsyncSession = Depends(get_async_session)):
     skip, limit = _resolve_pagination(skip, limit)
+    if mode == "movement":
+        d_from, d_to = parse_dates(date_from, date_to)
+        if (d_to - d_from).days > 366:
+            raise HTTPException(status_code=400, detail="Date range cannot exceed 1 year")
+        return await _build_inventory_report(db, mode="movement", d_from=d_from, d_to=d_to, skip=skip, limit=limit)
+    return await _build_inventory_report(db, mode="snapshot", skip=skip, limit=limit)
     prod_res = await db.execute(select(Product).where(Product.is_active == True).order_by(Product.name))
     products = prod_res.scalars().all()
     rows = []
@@ -386,21 +812,103 @@ async def inventory_report(skip: int = 0, limit: int = Query(default=100, le=500
     return {"products":rows,"total_value":total_value,"low_count":low_count,"total_products":total_products}
 
 @router.get("/export/inventory", dependencies=[Depends(require_permission("action_export_excel"))])
-async def export_inventory(db: AsyncSession = Depends(get_async_session)):
-    data = await inventory_report(skip=0, limit=100000, db=db)
-    rows = [[p["sku"],p["name"],p["stock"],p["unit"],p["price"],p["value"],p["total_in"],p["total_out"],"YES" if p["low_stock"] else ""] for p in data["products"]]
-    buf = to_xlsx(["SKU","Product","Stock","Unit","Price (EGP)","Stock Value","Total In","Total Out","Low Stock"], rows, "Inventory")
+async def export_inventory(mode: str = "snapshot", date_from: Optional[str] = None, date_to: Optional[str] = None, db: AsyncSession = Depends(get_async_session)):
+    if mode == "movement":
+        d_from, d_to = parse_dates(date_from, date_to)
+        data = await _build_inventory_report(db, mode="movement", d_from=d_from, d_to=d_to, include_all=True)
+        rows = [[p["sku"], p["name"], p["category"], p["unit"], p["stock_in"], p["stock_out"], p["receipts"], p["sales_usage"], p["spoilage"], p["transfers_in"], p["transfers_out"], p["adjustments_net"], p["net_movement"]] for p in data["products"]]
+        buf = to_xlsx(["SKU","Product","Category","Unit","Stock In","Stock Out","Receipts","Sales/Usage","Spoilage","Transfers In","Transfers Out","Adjustments Net","Net Movement"], rows, "Inventory Movement")
+    else:
+        data = await _build_inventory_report(db, mode="snapshot", include_all=True)
+        rows = [[p["sku"], p["name"], p["category"], p["stock"], p["unit"], p["price"], p["value"], p["threshold"], p["reorder_qty"], p["last_move_at"], "YES" if p["low_stock"] else "", "YES" if p["dead_stock"] else ""] for p in data["products"]]
+        buf = to_xlsx(["SKU","Product","Category","Stock","Unit","Price (EGP)","Stock Value","Threshold","Reorder Qty","Last Move","Low Stock","Dead Stock"], rows, "Inventory Snapshot")
     return StreamingResponse(buf, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={"Content-Disposition": f"attachment; filename=inventory_{date.today()}.xlsx"})
 
 
 # ── FARM INTAKE ────────────────────────────────────────
+async def _build_farm_intake_report(
+    db: AsyncSession,
+    *,
+    d_from: datetime,
+    d_to: datetime,
+    skip: int = 0,
+    limit: int = 100,
+    include_all: bool = False,
+):
+    delivery_res = await db.execute(
+        select(FarmDelivery)
+        .where(FarmDelivery.delivery_date >= d_from.date(), FarmDelivery.delivery_date <= d_to.date())
+        .options(
+            selectinload(FarmDelivery.farm),
+            selectinload(FarmDelivery.items).selectinload(FarmDeliveryItem.product),
+            selectinload(FarmDelivery.user),
+        )
+        .order_by(FarmDelivery.delivery_date.desc(), FarmDelivery.id.desc())
+    )
+    deliveries = delivery_res.scalars().all()
+    farm_summary = {}
+    detail_rows = []
+    for delivery in deliveries:
+        farm_name = delivery.farm.name if delivery.farm and delivery.farm.name else f"Farm {delivery.farm_id}"
+        summary = farm_summary.setdefault(farm_name, {"farm": farm_name, "delivery_count": 0, "line_count": 0, "total_qty": 0.0, "products": defaultdict(float)})
+        summary["delivery_count"] += 1
+        for item in delivery.items:
+            product = item.product
+            sku = product.sku if product else "—"
+            name = product.name if product else "—"
+            qty = _num(item.qty)
+            unit = item.unit or (product.unit if product else "")
+            summary["line_count"] += 1
+            summary["total_qty"] += qty
+            summary["products"][f"{sku}|{name}|{unit}"] += qty
+            detail_rows.append({
+                "farm": farm_name,
+                "date": str(delivery.delivery_date),
+                "delivery_number": delivery.delivery_number,
+                "sku": sku,
+                "product": name,
+                "qty": round(qty, 2),
+                "unit": unit,
+                "received_by": delivery.received_by or "—",
+                "user_name": delivery.user.name if delivery.user else "—",
+                "notes": item.notes or delivery.notes or "",
+            })
+    summary_rows = []
+    for farm_name, summary in sorted(farm_summary.items()):
+        top_product = ""
+        if summary["products"]:
+            top_key, top_qty = max(summary["products"].items(), key=lambda x: x[1])
+            _, top_name, top_unit = top_key.split("|")
+            top_product = f"{top_name} ({round(top_qty, 2)} {top_unit})"
+        summary_rows.append({
+            "farm": farm_name,
+            "delivery_count": summary["delivery_count"],
+            "line_count": summary["line_count"],
+            "total_qty": round(summary["total_qty"], 2),
+            "top_product": top_product or "—",
+        })
+    return {
+        "date_from": d_from.strftime("%Y-%m-%d"),
+        "date_to": d_to.strftime("%Y-%m-%d"),
+        "summary": summary_rows,
+        "detail": _paginate_rows(detail_rows, skip, limit, include_all=include_all),
+        "totals": {
+            "delivery_count": len(deliveries),
+            "line_count": len(detail_rows),
+            "total_qty": round(sum(r["qty"] for r in detail_rows), 2),
+            "farm_count": len(summary_rows),
+        },
+    }
+
+
 @router.get("/api/farm-intake")
 async def farm_intake_report(date_from: Optional[str] = None, date_to: Optional[str] = None, skip: int = 0, limit: int = Query(default=100, le=500), db: AsyncSession = Depends(get_async_session)):
     d_from, d_to = parse_dates(date_from, date_to)
     if (d_to - d_from).days > 366:
         raise HTTPException(status_code=400, detail="Date range cannot exceed 1 year")
     skip, limit = _resolve_pagination(skip, limit)
+    return await _build_farm_intake_report(db, d_from=d_from, d_to=d_to, skip=skip, limit=limit)
     farm_res = await db.execute(select(Farm).where(Farm.is_active == 1))
     farms = farm_res.scalars().all()
     # Auto-fix unnamed farms
@@ -445,26 +953,35 @@ async def farm_intake_report(date_from: Optional[str] = None, date_to: Optional[
 
 @router.get("/export/farm-intake", dependencies=[Depends(require_permission("action_export_excel"))])
 async def export_farm(date_from: str = None, date_to: str = None, db: AsyncSession = Depends(get_async_session)):
-    data = await farm_intake_report(date_from=date_from, date_to=date_to, skip=0, limit=100000, db=db)
-    rows = []
-    for farm in data["farms"]:
-        for p in farm["products"]:
-            rows.append([farm["name"], "", p["name"], p["total_qty"], p["unit"], farm["delivery_count"], ""])
-        if not farm["products"]:
-            rows.append([farm["name"], "", "No deliveries", 0, "", 0, ""])
-    for delivery in data["deliveries"]:
-        rows.append([
-            delivery["farm"],
-            delivery["delivery_date"],
-            "Delivery " + delivery["delivery_number"],
-            delivery["total_qty"],
-            "",
-            delivery["total_items"],
-            delivery["user_name"],
-        ])
-    buf = to_xlsx(["Farm","Date","Product / Record","Total Qty","Unit","Deliveries / Items","Performed By"], rows, "Farm Intake")
-    return StreamingResponse(buf, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        headers={"Content-Disposition": f"attachment; filename=farm_intake_{date.today()}.xlsx"})
+    d_from, d_to = parse_dates(date_from, date_to)
+    data = await _build_farm_intake_report(db, d_from=d_from, d_to=d_to, include_all=True)
+    try:
+        import openpyxl
+
+        wb = openpyxl.Workbook()
+        ws1 = wb.active
+        ws1.title = "Farm Intake Summary"
+        ws1.append(["Farm", "Deliveries", "Line Items", "Total Qty", "Top Product"])
+        for row in data["summary"]:
+            ws1.append([row["farm"], row["delivery_count"], row["line_count"], row["total_qty"], row["top_product"]])
+
+        ws2 = wb.create_sheet("Farm Intake Detail")
+        ws2.append(["Farm", "Date", "Delivery #", "SKU", "Product", "Qty", "Unit", "Received By", "Performed By", "Notes"])
+        for row in data["detail"]:
+            ws2.append([row["farm"], row["date"], row["delivery_number"], row["sku"], row["product"], row["qty"], row["unit"], row["received_by"], row["user_name"], row["notes"]])
+
+        for ws in wb.worksheets:
+            for column in ws.columns:
+                width = max((len(str(cell.value or "")) for cell in column), default=10)
+                ws.column_dimensions[column[0].column_letter].width = min(width + 3, 40)
+
+        buf = io.BytesIO()
+        wb.save(buf)
+        buf.seek(0)
+        return StreamingResponse(buf, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={"Content-Disposition": f"attachment; filename=farm_intake_{date.today()}.xlsx"})
+    except ImportError:
+        raise Exception("Run: pip install openpyxl --break-system-packages")
 
 
 # ── SPOILAGE ───────────────────────────────────────────
@@ -593,27 +1110,14 @@ async def pl_report(date_from: Optional[str] = None, date_to: Optional[str] = No
             if mv != 0:
                 expense_lines.append({"name": a.name, "code": a.code, "amount": round(abs(mv), 2), "entries": entry_details(a)})
 
-    used_balance_fallback = False
-    if not revenue_lines and not expense_lines:
-        used_balance_fallback = True
-        revenue_lines = [
-            {"name": a.name, "code": a.code, "amount": round(abs(float(a.balance)), 2), "entries": []}
-            for a in accounts
-            if a.type == "revenue" and round(abs(float(a.balance)), 2) > 0
-        ]
-        expense_lines = [
-            {"name": a.name, "code": a.code, "amount": round(abs(float(a.balance)), 2), "entries": []}
-            for a in accounts
-            if a.type == "expense" and round(abs(float(a.balance)), 2) > 0
-        ]
-
     total_revenue = sum(r["amount"] for r in revenue_lines)
     total_expense = sum(e["amount"] for e in expense_lines)
     return {"revenue_lines": revenue_lines, "expense_lines": expense_lines,
             "total_revenue": round(total_revenue, 2), "total_expense": round(total_expense, 2),
             "net_profit": round(total_revenue - total_expense, 2),
             "date_from": d_from.strftime("%Y-%m-%d"), "date_to": d_to.strftime("%Y-%m-%d"),
-            "used_balance_fallback": used_balance_fallback}
+            "used_balance_fallback": False,
+            "warning": None if (revenue_lines or expense_lines) else "No journal-backed revenue or expense movement was found in this period. Current account balances were not used as a substitute."}
 
 @router.get("/export/pl", dependencies=[Depends(require_permission("action_export_excel"))])
 async def export_pl(date_from: str = None, date_to: str = None, db: AsyncSession = Depends(get_async_session)):
@@ -775,6 +1279,174 @@ async def export_pl(date_from: str = None, date_to: str = None, db: AsyncSession
 
 
 # ── TRANSACTIONS ────────────────────────────────────────
+async def _build_transactions_report(
+    db: AsyncSession,
+    *,
+    d_from: datetime,
+    d_to: datetime,
+    source: Optional[str] = None,
+):
+    from app.models.refund import RetailRefundItem
+
+    rows = []
+
+    if not source or source == "pos":
+        pos_res = await db.execute(
+            select(Invoice)
+            .where(Invoice.created_at >= d_from, Invoice.created_at <= d_to)
+            .options(selectinload(Invoice.items), selectinload(Invoice.user), selectinload(Invoice.customer))
+        )
+        for inv in pos_res.scalars().all():
+            for item in inv.items:
+                rows.append({
+                    "date": inv.created_at.strftime("%Y-%m-%d %H:%M") if inv.created_at else "—",
+                    "reference": inv.invoice_number,
+                    "transaction_type": "POS Sale",
+                    "source": "POS",
+                    "counterparty_type": "Customer",
+                    "counterparty_name": inv.customer.name if inv.customer else "Walk-in",
+                    "sku": item.sku or "—",
+                    "product": item.name or "—",
+                    "qty": _num(item.qty),
+                    "unit_price": _num(item.unit_price),
+                    "money_effect": _num(item.total),
+                    "stock_effect": -_num(item.qty),
+                    "direction": "out",
+                    "payment_method": inv.payment_method or "cash",
+                    "status": inv.status or "—",
+                    "user_name": inv.user.name if inv.user else "—",
+                    "notes": inv.notes or "",
+                })
+
+    if not source or source == "b2b":
+        b2b_res = await db.execute(
+            select(B2BInvoice)
+            .where(B2BInvoice.created_at >= d_from, B2BInvoice.created_at <= d_to)
+            .options(selectinload(B2BInvoice.items).selectinload(B2BInvoiceItem.product), selectinload(B2BInvoice.client), selectinload(B2BInvoice.user))
+        )
+        for inv in b2b_res.scalars().all():
+            for item in inv.items:
+                product = item.product
+                rows.append({
+                    "date": inv.created_at.strftime("%Y-%m-%d %H:%M") if inv.created_at else "—",
+                    "reference": inv.invoice_number,
+                    "transaction_type": "B2B Invoice",
+                    "source": "B2B",
+                    "counterparty_type": "Client",
+                    "counterparty_name": inv.client.name if inv.client else "—",
+                    "sku": product.sku if product else "—",
+                    "product": product.name if product else "—",
+                    "qty": _num(item.qty),
+                    "unit_price": _num(item.unit_price),
+                    "money_effect": _num(item.total),
+                    "stock_effect": -_num(item.qty),
+                    "direction": "out",
+                    "payment_method": inv.payment_method or inv.invoice_type,
+                    "status": inv.status or "—",
+                    "user_name": inv.user.name if inv.user else "—",
+                    "notes": inv.notes or "",
+                })
+
+    if not source or source == "refund":
+        refund_res = await db.execute(
+            select(RetailRefund)
+            .where(RetailRefund.created_at >= d_from, RetailRefund.created_at <= d_to)
+            .options(selectinload(RetailRefund.customer), selectinload(RetailRefund.user), selectinload(RetailRefund.items).selectinload(RetailRefundItem.product))
+        )
+        for refund in refund_res.scalars().all():
+            for item in refund.items:
+                product = item.product
+                rows.append({
+                    "date": refund.created_at.strftime("%Y-%m-%d %H:%M") if refund.created_at else "—",
+                    "reference": refund.refund_number,
+                    "transaction_type": "Retail Refund",
+                    "source": "Refund",
+                    "counterparty_type": "Customer",
+                    "counterparty_name": refund.customer.name if refund.customer else "—",
+                    "sku": product.sku if product else "—",
+                    "product": product.name if product else "—",
+                    "qty": _num(item.qty),
+                    "unit_price": _num(item.unit_price),
+                    "money_effect": -_num(item.total),
+                    "stock_effect": _num(item.qty),
+                    "direction": "in",
+                    "payment_method": refund.refund_method or "—",
+                    "status": "refunded",
+                    "user_name": refund.user.name if refund.user else "—",
+                    "notes": refund.reason or "",
+                })
+
+    if not source or source == "receive":
+        rec_res = await db.execute(
+            select(ProductReceipt)
+            .where(ProductReceipt.receive_date >= d_from.date(), ProductReceipt.receive_date <= d_to.date())
+            .options(selectinload(ProductReceipt.product), selectinload(ProductReceipt.user), selectinload(ProductReceipt.expense))
+        )
+        for rec in rec_res.scalars().all():
+            product = rec.product
+            rows.append({
+                "date": rec.created_at.strftime("%Y-%m-%d %H:%M") if rec.created_at else (rec.receive_date.isoformat() if rec.receive_date else "—"),
+                "reference": rec.ref_number,
+                "transaction_type": "Stock Receipt",
+                "source": "Receive",
+                "counterparty_type": "Supplier",
+                "counterparty_name": rec.supplier_ref or "—",
+                "sku": product.sku if product else "—",
+                "product": product.name if product else "—",
+                "qty": _num(rec.qty),
+                "unit_price": _num(rec.unit_cost),
+                "money_effect": -_num(rec.total_cost),
+                "stock_effect": _num(rec.qty),
+                "direction": "in",
+                "payment_method": rec.expense.payment_method if rec.expense and rec.expense.payment_method else "cash",
+                "status": "received",
+                "user_name": rec.user.name if rec.user else "—",
+                "notes": rec.notes or "",
+            })
+
+    if not source or source == "expense":
+        receipt_expense_ids_res = await db.execute(select(ProductReceipt.expense_id).where(ProductReceipt.expense_id.is_not(None)))
+        receipt_expense_ids = {row[0] for row in receipt_expense_ids_res.all() if row[0] is not None}
+        exp_res = await db.execute(
+            select(Expense)
+            .where(Expense.expense_date >= d_from.date(), Expense.expense_date <= d_to.date())
+            .options(selectinload(Expense.category), selectinload(Expense.user))
+        )
+        for exp in exp_res.scalars().all():
+            if exp.id in receipt_expense_ids:
+                continue
+            rows.append({
+                "date": exp.created_at.strftime("%Y-%m-%d %H:%M") if exp.created_at else (exp.expense_date.isoformat() if exp.expense_date else "—"),
+                "reference": exp.ref_number,
+                "transaction_type": "Expense",
+                "source": "Expense",
+                "counterparty_type": "Vendor",
+                "counterparty_name": exp.vendor or "—",
+                "sku": "—",
+                "product": exp.category.name if exp.category else "Expense",
+                "qty": 0.0,
+                "unit_price": _num(exp.amount),
+                "money_effect": -_num(exp.amount),
+                "stock_effect": 0.0,
+                "direction": "out",
+                "payment_method": exp.payment_method or "cash",
+                "status": "posted",
+                "user_name": exp.user.name if exp.user else "—",
+                "notes": exp.description or "",
+            })
+
+    rows.sort(key=lambda x: x["date"], reverse=True)
+    return {
+        "rows": rows,
+        "total_rows": len(rows),
+        "money_in": round(sum(r["money_effect"] for r in rows if r["money_effect"] > 0), 2),
+        "money_out": round(abs(sum(r["money_effect"] for r in rows if r["money_effect"] < 0)), 2),
+        "net_money": round(sum(r["money_effect"] for r in rows), 2),
+        "stock_in": round(sum(r["stock_effect"] for r in rows if r["stock_effect"] > 0), 2),
+        "stock_out": round(abs(sum(r["stock_effect"] for r in rows if r["stock_effect"] < 0)), 2),
+    }
+
+
 @router.get("/api/transactions")
 async def transactions_report(
     date_from: Optional[str] = None,
@@ -782,6 +1454,8 @@ async def transactions_report(
     source:    Optional[str] = None,
     db: AsyncSession = Depends(get_async_session)
 ):
+    d_from, d_to = parse_dates(date_from, date_to)
+    return await _build_transactions_report(db, d_from=d_from, d_to=d_to, source=source)
     from app.models.customer import Customer
     from app.models.refund import RetailRefundItem
     from app.models.user import User
@@ -980,10 +1654,13 @@ async def transactions_report(
 
 @router.get("/export/transactions", dependencies=[Depends(require_permission("action_export_excel"))])
 async def export_transactions(date_from: str = None, date_to: str = None, source: str = None, db: AsyncSession = Depends(get_async_session)):
-    data = await transactions_report(date_from=date_from, date_to=date_to, source=source, db=db)
-    headers = ["Date","Invoice #","Source","Customer","Performed By","SKU","Product","QTY","Unit Price","Line Total","Discount (EGP)","Discount %","Payment Method","Invoice Total","Status"]
-    rows    = [[r["date"],r["invoice_number"],r["source"],r["customer"],r["user_name"],r["sku"],r["product"],r["qty"],r["unit_price"],r["line_total"],r["discount"],r["discount_pct"],r["payment_method"],r["invoice_total"],r["status"]] for r in data["rows"]]
-    rows.append(["","","","","","","TOTAL",data["total_qty"],"TOTAL REVENUE","","","","","",""])
+    d_from, d_to = parse_dates(date_from, date_to)
+    data = await _build_transactions_report(db, d_from=d_from, d_to=d_to, source=source)
+    headers = ["Date","Reference","Transaction Type","Source","Counterparty Type","Counterparty","Performed By","SKU","Product","Qty","Unit Price","Money Effect","Stock Effect","Direction","Payment Method","Status","Notes"]
+    rows = [[r["date"], r["reference"], r["transaction_type"], r["source"], r["counterparty_type"], r["counterparty_name"], r["user_name"], r["sku"], r["product"], r["qty"], r["unit_price"], r["money_effect"], r["stock_effect"], r["direction"], r["payment_method"], r["status"], r["notes"]] for r in data["rows"]]
+    rows.append(["","","","","","","","","","","Money In",data["money_in"],"","","","",""])
+    rows.append(["","","","","","","","","","","Money Out",data["money_out"],"","","","",""])
+    rows.append(["","","","","","","","","","","Net Money",data["net_money"],"","","","",""])
     buf = to_xlsx(headers, rows, "Transactions")
     return StreamingResponse(buf, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={"Content-Disposition": f"attachment; filename=transactions_{date.today()}.xlsx"})
@@ -1630,7 +2307,7 @@ async function exportSection(tab){
     const build = {
         sales:      ()=>{ let r=getRange("sales-from","sales-to"); return `/reports/export/sales?date_from=${r.from}&date_to=${r.to}`; },
         b2b:        ()=>{ let r=getRange("b2b-from","b2b-to");     return `/reports/export/b2b-statement?date_from=${r.from}&date_to=${r.to}`; },
-        inventory:  ()=> `/reports/export/inventory`,
+        inventory:  ()=>{ let mode=document.getElementById("inv-mode")?.value || "snapshot"; let from=document.getElementById("inv-from")?.value || ""; let to=document.getElementById("inv-to")?.value || ""; return `/reports/export/inventory?mode=${mode}${mode==="movement"?`&date_from=${from}&date_to=${to}`:""}`; },
         farm:       ()=>{ let r=getRange("farm-from","farm-to");   return `/reports/export/farm-intake?date_from=${r.from}&date_to=${r.to}`; },
         spoilage:   ()=>{ let r=getRange("spl-from","spl-to");     return `/reports/export/spoilage?date_from=${r.from}&date_to=${r.to}`; },
         production: ()=>{ let r=getRange("prod-from","prod-to");   return `/reports/export/production?date_from=${r.from}&date_to=${r.to}`; },
@@ -1681,6 +2358,42 @@ async function loadTransactions(){
     let source = document.getElementById("tx-source").value;
     let url    = `/reports/api/transactions?date_from=${r.from}&date_to=${r.to}${source?"&source="+source:""}`;
     let data   = await (await fetch(url)).json();
+    const statsRow = document.querySelector("#section-transactions .stats-row");
+    if (statsRow) {
+        statsRow.innerHTML = `
+            <div class="stat-card lime"><div class="stat-label">Rows</div><div class="stat-value lime" id="tx-count">${data.total_rows}</div></div>
+            <div class="stat-card green"><div class="stat-label">Money In</div><div class="stat-value green" id="tx-money-in">${data.money_in.toFixed(2)}</div></div>
+            <div class="stat-card warn"><div class="stat-label">Money Out</div><div class="stat-value warn" id="tx-money-out">${data.money_out.toFixed(2)}</div></div>
+            <div class="stat-card blue"><div class="stat-label">Stock In</div><div class="stat-value blue" id="tx-stock-in">${data.stock_in.toFixed(2)}</div></div>
+            <div class="stat-card sc-danger"><div class="stat-label">Stock Out</div><div class="stat-value sv-danger" id="tx-stock-out">${data.stock_out.toFixed(2)}</div></div>
+        `;
+    }
+    const txTableHead = document.querySelector("#tx-body")?.closest("table")?.querySelector("thead tr");
+    if (txTableHead) {
+        txTableHead.innerHTML = "<th>Date</th><th>Reference</th><th>Type</th><th>Source</th><th>Counterparty Type</th><th>Counterparty</th><th>By</th><th>SKU</th><th>Product</th><th>Qty</th><th>Unit Price</th><th>Money Effect</th><th>Stock Effect</th><th>Direction</th><th>Payment</th><th>Status</th>";
+    }
+    setPrintDates("ph-tx-dates", r.from, r.to);
+    document.getElementById("tx-body").innerHTML = data.rows.length
+        ? data.rows.map(r => `<tr>
+            <td class="mono" style="font-size:11px;white-space:nowrap">${r.date}</td>
+            <td class="mono" style="font-size:11px;color:var(--blue)">${r.reference}</td>
+            <td>${r.transaction_type}</td>
+            <td>${r.source}</td>
+            <td>${r.counterparty_type}</td>
+            <td class="name">${r.counterparty_name}</td>
+            <td style="font-size:12px;color:var(--muted)">${r.user_name}</td>
+            <td class="mono" style="font-size:11px;color:var(--muted)">${r.sku}</td>
+            <td>${r.product}${r.notes?`<br><span style="font-size:10px;color:var(--muted)">${r.notes}</span>`:""}</td>
+            <td class="mono">${r.qty.toFixed(2)}</td>
+            <td class="mono">${r.unit_price.toFixed(2)}</td>
+            <td class="mono" style="color:${r.money_effect>=0?"var(--green)":"var(--danger)"};font-weight:700">${r.money_effect.toFixed(2)}</td>
+            <td class="mono" style="color:${r.stock_effect>=0?"var(--green)":"var(--danger)"};font-weight:700">${r.stock_effect.toFixed(2)}</td>
+            <td>${r.direction}</td>
+            <td>${r.payment_method}</td>
+            <td>${r.status}</td>
+        </tr>`).join("")
+        : `<tr><td colspan="16" style="text-align:center;color:var(--muted);padding:40px">No transactions in this period</td></tr>`;
+    return;
 
     document.getElementById("tx-count").innerText   = data.total_rows;
     document.getElementById("tx-revenue").innerText = data.total_revenue.toFixed(2);
@@ -1755,6 +2468,118 @@ async function loadTransactions(){
 async function loadSales(){
     let r = getRange("sales-from","sales-to");
     let data = await (await fetch(`/reports/api/sales?date_from=${r.from}&date_to=${r.to}`)).json();
+    const statsRow = document.querySelector("#section-sales .stats-row");
+    if (statsRow) {
+        statsRow.innerHTML = `
+            <div class="stat-card sc-blue"><div class="stat-label">Gross Sales</div><div class="stat-value sv-blue" id="s-gross">${data.gross_sales.toFixed(2)}</div></div>
+            <div class="stat-card" style="border-color:rgba(255,77,109,.3);background:rgba(255,77,109,.04);position:relative;overflow:hidden;">
+                <div style="position:absolute;top:0;left:0;right:0;height:2px;background:linear-gradient(90deg,#ff4d6d,transparent)"></div>
+                <div class="stat-label" style="color:#ff4d6d">Refunds</div>
+                <div class="stat-value" style="color:#ff4d6d;font-family:var(--mono)" id="s-refunds">${data.refunds > 0 ? "−" + data.refunds.toFixed(2) : "0.00"}</div>
+                <div style="font-size:11px;color:rgba(255,77,109,.6);margin-top:4px" id="s-refund-count">${data.refund_count} refund${data.refund_count !== 1 ? "s" : ""}</div>
+            </div>
+            <div class="stat-card sc-green"><div class="stat-label">Net Sales</div><div class="stat-value sv-green" id="s-net">${data.net_sales.toFixed(2)}</div></div>
+            <div class="stat-card sc-orange"><div class="stat-label">Cash Collected</div><div class="stat-value sv-orange" id="s-collected">${data.cash_collected.toFixed(2)}</div></div>
+            <div class="stat-card sc-danger"><div class="stat-label">Outstanding</div><div class="stat-value sv-danger" id="s-outstanding">${data.outstanding.toFixed(2)}</div></div>`;
+    }
+    const salesHead = document.querySelector("#sales-daily")?.closest("table")?.querySelector("thead tr");
+    if (salesHead) {
+        salesHead.innerHTML = "<th>Date</th><th>Gross Sales</th><th style='color:#ff4d6d'>Refunds</th><th>Net Sales</th><th>Cash Collected</th>";
+    }
+    setPrintDates("ph-sales-dates", data.date_from, data.date_to);
+    document.getElementById("sales-daily").innerHTML = data.daily.length
+        ? data.daily.map(d=>`<tr>
+            <td class="mono">${d.date}</td>
+            <td class="mono" style="color:var(--blue)">${d.gross_sales.toFixed(2)}</td>
+            <td class="mono" style="color:#ff4d6d;font-weight:${d.refunds>0?700:400}">${d.refunds>0?"−"+d.refunds.toFixed(2):"—"}</td>
+            <td class="mono" style="color:var(--green);font-weight:700">${d.net_sales.toFixed(2)}</td>
+            <td class="mono" style="color:var(--orange)">${d.cash_collected.toFixed(2)}</td>
+          </tr>`).join("")
+        : `<tr><td colspan="5" style="text-align:center;color:var(--muted);padding:30px">No sales in this period</td></tr>`;
+
+    let maxR = data.top_products.length ? data.top_products[0].revenue : 1;
+    document.getElementById("sales-top").innerHTML = data.top_products.length
+        ? data.top_products.map(p=>`<div class="bar-row">
+            <div class="bar-label">${p.name}</div>
+            <div class="bar-track"><div class="bar-fill" style="width:${(p.revenue/maxR*100).toFixed(1)}%;background:linear-gradient(90deg,var(--green),var(--lime))"></div></div>
+            <div class="bar-val" style="color:var(--green)">${p.revenue.toFixed(0)}</div>
+          </div>`).join("")
+        : `<div style="color:var(--muted);font-size:13px">No data</div>`;
+
+    let posHtml = `
+        <div class="table-title" style="margin-top:28px">POS Invoices — ${data.pos_records.length} transactions</div>
+        <div class="table-wrap">
+        <table><thead><tr><th>Invoice #</th><th>Date / Time</th><th>Customer</th><th>By</th><th>Payment</th><th>Items</th><th style="text-align:right">Gross</th><th style="text-align:right">Collected</th><th style="text-align:right">Outstanding</th></tr></thead><tbody>`;
+    if(data.pos_records.length){
+        posHtml += data.pos_records.map(inv=>`
+            <tr>
+                <td class="mono" style="font-size:11px;color:var(--blue)">${inv.invoice_number}</td>
+                <td class="mono" style="font-size:12px;color:var(--muted)">${inv.datetime}</td>
+                <td class="name" style="font-size:12px">${inv.customer}</td>
+                <td style="font-size:12px;color:var(--muted);white-space:nowrap">${inv.user_name}</td>
+                <td style="font-size:12px">${inv.payment}</td>
+                <td style="font-size:12px;color:var(--sub)">
+                    ${inv.items.map(it=>`<span style="display:inline-block;background:var(--card2);border:1px solid var(--border2);border-radius:5px;padding:1px 7px;margin:2px;white-space:nowrap">${it.qty%1===0?it.qty.toFixed(0):it.qty.toFixed(2)} × ${it.name} <span style="color:var(--muted)">${it.total.toFixed(2)}</span></span>`).join("")}
+                </td>
+                <td class="mono" style="text-align:right">${inv.total.toFixed(2)}</td>
+                <td class="mono" style="text-align:right;color:var(--green);font-weight:700">${inv.cash_collected.toFixed(2)}</td>
+                <td class="mono" style="text-align:right;color:${inv.outstanding>0?"var(--warn)":"var(--muted)"}">${inv.outstanding>0?inv.outstanding.toFixed(2):"—"}</td>
+            </tr>`).join("");
+    } else {
+        posHtml += `<tr><td colspan="9" style="text-align:center;color:var(--muted);padding:24px">No POS invoices</td></tr>`;
+    }
+    posHtml += `</tbody></table></div>`;
+
+    const typeLabel = {cash:"Cash", full_payment:"Full Payment", consignment:"Consignment"};
+    let b2bHtml = `
+        <div class="table-title" style="margin-top:22px">B2B Invoices — ${data.b2b_records.length} invoices</div>
+        <div class="table-wrap">
+        <table><thead><tr><th>Invoice #</th><th>Client</th><th>Date / Time</th><th>By</th><th>Type</th><th>Items</th><th style="text-align:right">Invoiced</th><th style="text-align:right">Paid</th><th style="text-align:right">Outstanding</th></tr></thead><tbody>`;
+    if(data.b2b_records.length){
+        b2bHtml += data.b2b_records.map(inv=>`
+            <tr>
+                <td class="mono" style="font-size:11px;color:var(--blue)">${inv.invoice_number}</td>
+                <td class="name" style="font-size:13px">${inv.client}</td>
+                <td class="mono" style="font-size:12px;color:var(--muted)">${inv.datetime}</td>
+                <td style="font-size:12px;color:var(--muted);white-space:nowrap">${inv.user_name}</td>
+                <td style="font-size:12px">${typeLabel[inv.invoice_type]||inv.invoice_type}</td>
+                <td style="font-size:12px;color:var(--sub)">${inv.items.map(it=>`<span style="display:inline-block;background:var(--card2);border:1px solid var(--border2);border-radius:5px;padding:1px 7px;margin:2px;white-space:nowrap">${it.qty%1===0?it.qty.toFixed(0):it.qty.toFixed(2)} × ${it.name} <span style="color:var(--muted)">${it.total.toFixed(2)}</span></span>`).join("")}</td>
+                <td class="mono" style="text-align:right">${inv.total.toFixed(2)}</td>
+                <td class="mono" style="text-align:right;color:var(--green)">${inv.amount_paid.toFixed(2)}</td>
+                <td class="mono" style="text-align:right;color:${inv.balance_due>0?"var(--warn)":"var(--muted)"};font-weight:${inv.balance_due>0?700:400}">${inv.balance_due>0?inv.balance_due.toFixed(2):"—"}</td>
+            </tr>`).join("");
+    } else {
+        b2bHtml += `<tr><td colspan="9" style="text-align:center;color:var(--muted);padding:24px">No B2B invoices</td></tr>`;
+    }
+    b2bHtml += `</tbody></table></div>`;
+
+    let refHtml = "";
+    if(data.refund_records && data.refund_records.length){
+        refHtml = `
+        <div style="margin-top:28px;display:flex;align-items:center;gap:14px;padding:14px 18px;background:rgba(255,77,109,.06);border:1px solid rgba(255,77,109,.2);border-radius:12px;">
+            <div>
+                <div style="font-size:13px;font-weight:700;color:#ff4d6d;letter-spacing:.3px">Refunds — ${data.refund_records.length} refund${data.refund_records.length!==1?"s":""}</div>
+                <div style="font-size:11px;color:rgba(255,77,109,.6);margin-top:2px">Shown separately from sales and collections</div>
+            </div>
+            <div style="margin-left:auto;font-family:var(--mono);font-size:22px;font-weight:800;color:#ff4d6d">−${data.refunds.toFixed(2)}</div>
+        </div>
+        <div class="table-wrap" style="border-color:rgba(255,77,109,.18);">
+        <table><thead style="background:rgba(255,77,109,.05)"><tr><th style="color:#ff4d6d">Ref #</th><th>Source</th><th>Counterparty</th><th>Date / Time</th><th>Processed By</th><th>Reason</th><th>Method</th><th style="text-align:right;color:#ff4d6d">Amount</th></tr></thead>
+        <tbody>
+            ${data.refund_records.map(row=>`<tr>
+                <td class="mono" style="font-size:11px;color:#ff4d6d;font-weight:700">${row.refund_number}</td>
+                <td>${row.source}</td>
+                <td class="name">${row.counterparty}</td>
+                <td class="mono" style="font-size:12px;color:var(--muted)">${row.datetime}</td>
+                <td style="font-size:12px;color:var(--muted)">${row.processed_by}</td>
+                <td style="font-size:12px;color:var(--sub)">${row.reason}</td>
+                <td style="font-size:12px">${row.refund_method}</td>
+                <td class="mono" style="text-align:right;font-weight:700;color:#ff4d6d">−${row.total.toFixed(2)}</td>
+            </tr>`).join("")}
+        </tbody></table></div>`;
+    }
+    document.getElementById("sales-records").innerHTML = posHtml + b2bHtml + refHtml;
+    return;
     document.getElementById("s-total").innerText   = data.grand_total.toFixed(2);
     document.getElementById("s-pos").innerText     = data.pos_total.toFixed(2);
     document.getElementById("s-b2b").innerText     = data.b2b_total.toFixed(2);
@@ -1897,20 +2722,72 @@ async function loadB2B(){
 
 /* ── INVENTORY ── */
 async function loadInventory(){
-    let data = await (await fetch("/reports/api/inventory")).json();
-    document.getElementById("inv-count").innerText = data.total_products;
-    document.getElementById("inv-value").innerText = data.total_value.toFixed(2);
-    document.getElementById("inv-low").innerText   = data.low_count;
-    document.getElementById("ph-inv-dates").innerText = `As of ${today()}`;
-    document.getElementById("inv-body").innerHTML = data.products.map(p=>`<tr>
-        <td class="mono" style="font-size:11px;color:var(--muted)">${p.sku}</td>
-        <td class="name">${p.name}</td>
-        <td class="mono" style="color:${p.low_stock?"var(--danger)":"var(--text)"};font-weight:700">${p.stock.toFixed(2)}</td>
-        <td style="font-size:12px;color:var(--muted)">${p.unit}</td>
-        <td class="mono">${p.price.toFixed(2)}</td>
-        <td class="mono" style="color:var(--blue)">${p.value.toFixed(2)}</td>
-        <td><span class="badge ${p.low_stock?"badge-low":"badge-ok"}">${p.low_stock?"Low Stock":"OK"}</span></td>
-      </tr>`).join("");
+    const mode = document.getElementById("inv-mode")?.value || "snapshot";
+    const from = document.getElementById("inv-from")?.value || "";
+    const to = document.getElementById("inv-to")?.value || "";
+    const url = mode === "movement"
+        ? `/reports/api/inventory?mode=movement&date_from=${from}&date_to=${to}`
+        : "/reports/api/inventory?mode=snapshot";
+    let data = await (await fetch(url)).json();
+    const filterBar = document.querySelector("#section-inventory .filter-bar");
+    if (filterBar && !document.getElementById("inv-mode")) {
+        filterBar.innerHTML = `
+            <label>Mode</label>
+            <select id="inv-mode">
+                <option value="snapshot">Stock Snapshot</option>
+                <option value="movement">Stock Movement</option>
+            </select>
+            <label>From</label><input type="date" id="inv-from">
+            <label>To</label><input type="date" id="inv-to">
+            <div class="filter-sep"></div>
+            <button class="btn btn-lime" onclick="loadInventory()">Apply</button>
+            <button class="btn btn-excel" onclick="exportSection('inventory')">â¬‡ Excel</button>
+            <button class="btn btn-print" onclick="window.print()">ðŸ–¨ Print</button>`;
+        document.getElementById("inv-mode").value = mode;
+        document.getElementById("inv-from").value = from || monthStart();
+        document.getElementById("inv-to").value = to || today();
+    }
+    if (data.mode === "movement") {
+        document.getElementById("inv-count").innerText = data.total_products;
+        document.getElementById("inv-value").innerText = data.summary.stock_in.toFixed(2);
+        document.getElementById("inv-low").innerText = data.summary.stock_out.toFixed(2);
+        document.getElementById("ph-inv-dates").innerText = `Movement period: ${data.date_from}  →  ${data.date_to}`;
+        document.getElementById("inv-body").closest("table").querySelector("thead").innerHTML = "<tr><th>SKU</th><th>Product</th><th>Category</th><th>Unit</th><th>Stock In</th><th>Stock Out</th><th>Receipts</th><th>Sales/Usage</th><th>Spoilage</th><th>Transfers In</th><th>Transfers Out</th><th>Adjustments Net</th><th>Net Movement</th></tr>";
+        document.getElementById("inv-body").innerHTML = data.products.length ? data.products.map(p=>`<tr>
+            <td class="mono" style="font-size:11px;color:var(--muted)">${p.sku}</td>
+            <td class="name">${p.name}</td>
+            <td>${p.category}</td>
+            <td>${p.unit}</td>
+            <td class="mono" style="color:var(--green)">${p.stock_in.toFixed(2)}</td>
+            <td class="mono" style="color:var(--danger)">${p.stock_out.toFixed(2)}</td>
+            <td class="mono">${p.receipts.toFixed(2)}</td>
+            <td class="mono">${p.sales_usage.toFixed(2)}</td>
+            <td class="mono">${p.spoilage.toFixed(2)}</td>
+            <td class="mono">${p.transfers_in.toFixed(2)}</td>
+            <td class="mono">${p.transfers_out.toFixed(2)}</td>
+            <td class="mono">${p.adjustments_net.toFixed(2)}</td>
+            <td class="mono" style="color:${p.net_movement>=0?"var(--green)":"var(--danger)"}">${p.net_movement.toFixed(2)}</td>
+          </tr>`).join("") : `<tr><td colspan="13" style="text-align:center;color:var(--muted);padding:30px">No movement in this period</td></tr>`;
+    } else {
+        document.getElementById("inv-count").innerText = data.total_products;
+        document.getElementById("inv-value").innerText = data.total_value.toFixed(2);
+        document.getElementById("inv-low").innerText = data.low_count;
+        document.getElementById("ph-inv-dates").innerText = `Snapshot as of ${today()}`;
+        document.getElementById("inv-body").closest("table").querySelector("thead").innerHTML = "<tr><th>SKU</th><th>Product</th><th>Category</th><th>Stock</th><th>Unit</th><th>Price</th><th>Stock Value</th><th>Threshold</th><th>Last Move</th><th>Status</th></tr>";
+        document.getElementById("inv-body").innerHTML = data.products.map(p=>`<tr>
+            <td class="mono" style="font-size:11px;color:var(--muted)">${p.sku}</td>
+            <td class="name">${p.name}</td>
+            <td>${p.category}</td>
+            <td class="mono" style="color:${p.low_stock?"var(--danger)":"var(--text)"};font-weight:700">${p.stock.toFixed(2)}</td>
+            <td style="font-size:12px;color:var(--muted)">${p.unit}</td>
+            <td class="mono">${p.price.toFixed(2)}</td>
+            <td class="mono" style="color:var(--blue)">${p.value.toFixed(2)}</td>
+            <td class="mono">${p.threshold.toFixed(2)}</td>
+            <td class="mono">${p.last_move_at}</td>
+            <td><span class="badge ${p.low_stock?"badge-low":"badge-ok"}">${p.low_stock?"Low Stock":"OK"}${p.dead_stock?" · Dead Stock":""}</span></td>
+          </tr>`).join("");
+    }
+    return;
 }
 
 /* ── FARM ── */
@@ -1918,6 +2795,44 @@ async function loadFarm(){
     let r = getRange("farm-from","farm-to");
     let data = await (await fetch(`/reports/api/farm-intake?date_from=${r.from}&date_to=${r.to}`)).json();
     setPrintDates("ph-farm-dates", r.from, r.to);
+    const summaryRows = data.summary.length
+        ? data.summary.map(row=>`<tr>
+            <td class="name">${row.farm}</td>
+            <td class="mono">${row.delivery_count}</td>
+            <td class="mono">${row.line_count}</td>
+            <td class="mono" style="color:var(--green)">${row.total_qty.toFixed(2)}</td>
+            <td>${row.top_product}</td>
+          </tr>`).join("")
+        : `<tr><td colspan="5" style="text-align:center;color:var(--muted);padding:24px">No farm intake summary in this period</td></tr>`;
+    const detailRows = data.detail.length
+        ? data.detail.map(row=>`<tr>
+            <td class="name">${row.farm}</td>
+            <td class="mono">${row.date}</td>
+            <td class="mono">${row.delivery_number}</td>
+            <td class="mono">${row.sku}</td>
+            <td>${row.product}</td>
+            <td class="mono">${row.qty.toFixed(2)}</td>
+            <td>${row.unit}</td>
+            <td>${row.received_by}</td>
+            <td>${row.user_name}</td>
+          </tr>`).join("")
+        : `<tr><td colspan="9" style="text-align:center;color:var(--muted);padding:24px">No farm intake detail in this period</td></tr>`;
+    document.getElementById("farm-content").innerHTML = `
+        <div class="stats-row">
+            <div class="stat-card sc-blue"><div class="stat-label">Farms</div><div class="stat-value sv-blue">${data.totals.farm_count}</div></div>
+            <div class="stat-card sc-green"><div class="stat-label">Deliveries</div><div class="stat-value sv-green">${data.totals.delivery_count}</div></div>
+            <div class="stat-card sc-orange"><div class="stat-label">Line Items</div><div class="stat-value sv-orange">${data.totals.line_count}</div></div>
+            <div class="stat-card sc-green"><div class="stat-label">Total Qty</div><div class="stat-value sv-green">${data.totals.total_qty.toFixed(2)}</div></div>
+        </div>
+        <div class="table-wrap" style="margin-bottom:18px">
+            <div class="table-title">Farm Intake Summary</div>
+            <table><thead><tr><th>Farm</th><th>Deliveries</th><th>Line Items</th><th>Total Qty</th><th>Top Product</th></tr></thead><tbody>${summaryRows}</tbody></table>
+        </div>
+        <div class="table-wrap">
+            <div class="table-title">Farm Intake Detail</div>
+            <table><thead><tr><th>Farm</th><th>Date</th><th>Delivery #</th><th>SKU</th><th>Product</th><th>Qty</th><th>Unit</th><th>Received By</th><th>Performed By</th></tr></thead><tbody>${detailRows}</tbody></table>
+        </div>`;
+    return;
     let summaryHtml = data.farms.map((farm,fi)=>{
         let color = fi===0?"var(--lime)":"var(--teal)";
         let maxQty = farm.products.length ? farm.products[0].total_qty : 1;
@@ -2073,7 +2988,7 @@ async function loadPL(){
                 <div class="stat-value ${isProfit?"sv-green":"sv-danger"}">${Math.abs(data.net_profit).toFixed(2)}</div>
             </div>
         </div>
-        ${data.used_balance_fallback ? `<div style="font-size:12px;color:var(--warn);margin-bottom:12px">Showing account-balance fallback because no dated journal entry details were found for this range.</div>` : ``}
+        ${data.warning ? `<div style="font-size:12px;color:var(--warn);margin-bottom:12px">${data.warning}</div>` : ``}
         <div style="font-size:12px;color:var(--muted);margin-bottom:12px">💡 Click any account line to expand its journal entries</div>
         <div class="pl-section">
             <div class="pl-header">Revenue</div>
@@ -2112,6 +3027,12 @@ function togglePLDetail(id){
     setEl("spl-from",   m); setEl("spl-to",    t);
     setEl("prod-from",  m); setEl("prod-to",   t);
     setEl("pl-from",    y); setEl("pl-to",     t);
+    const invMode = document.getElementById("inv-mode");
+    const invFrom = document.getElementById("inv-from");
+    const invTo = document.getElementById("inv-to");
+    if(invMode) invMode.value = "snapshot";
+    if(invFrom) invFrom.value = m;
+    if(invTo) invTo.value = t;
 })();
 
 loadSales();
