@@ -1149,11 +1149,11 @@ td{padding:8px 12px;border-top:1px solid var(--border);color:var(--sub);white-sp
         <div style="color:var(--muted);font-size:13px">Loading…</div>
     </div>
 
-    <div class="section-label" style="margin-top:32px">Farm Intake</div>
+<div class="section-label" style="margin-top:32px">Farm Intake</div>
     <div class="import-grid" style="grid-template-columns:minmax(340px,760px)">
         <div class="import-card">
             <div class="import-card-header">
-                <div class="import-card-icon" style="background:rgba(45,212,191,.12)">ðŸŒ¾</div>
+                <div class="import-card-icon" style="background:rgba(45,212,191,.12)">FI</div>
                 <div>
                     <div class="import-card-title">Farm Intake Import</div>
                     <div class="import-card-sub">Import farm delivery history from Excel and optionally record stock movement</div>
@@ -1162,23 +1162,23 @@ td{padding:8px 12px;border-top:1px solid var(--border);color:var(--sub);white-sp
             <div class="import-card-body">
                 <div class="col-map">
                     <div class="col-map-title">Expected Excel Columns</div>
-                    <div class="col-row"><span class="col-excel">SKU</span><span class="col-arrow">â†’</span><span class="col-field">Existing product SKU</span><span style="color:var(--danger);font-size:10px;margin-left:4px">required</span></div>
-                    <div class="col-row"><span class="col-excel">product</span><span class="col-arrow">â†’</span><span class="col-field">Product name / display hint</span><span class="col-opt">optional</span></div>
-                    <div class="col-row"><span class="col-excel">QTY</span><span class="col-arrow">â†’</span><span class="col-field">Delivered quantity (&gt; 0)</span><span style="color:var(--danger);font-size:10px;margin-left:4px">required</span></div>
-                    <div class="col-row"><span class="col-excel">Farm</span><span class="col-arrow">â†’</span><span class="col-field">Farm name â€” auto-created if new</span><span style="color:var(--danger);font-size:10px;margin-left:4px">required</span></div>
-                    <div class="col-row"><span class="col-excel">Date</span><span class="col-arrow">â†’</span><span class="col-field">Farm intake date</span><span style="color:var(--danger);font-size:10px;margin-left:4px">required</span></div>
+                    <div class="col-row"><span class="col-excel">SKU</span><span class="col-arrow">-></span><span class="col-field">Existing product SKU</span><span style="color:var(--danger);font-size:10px;margin-left:4px">required</span></div>
+                    <div class="col-row"><span class="col-excel">product</span><span class="col-arrow">-></span><span class="col-field">Product name / display hint</span><span class="col-opt">optional</span></div>
+                    <div class="col-row"><span class="col-excel">QTY</span><span class="col-arrow">-></span><span class="col-field">Delivered quantity (&gt; 0)</span><span style="color:var(--danger);font-size:10px;margin-left:4px">required</span></div>
+                    <div class="col-row"><span class="col-excel">Farm</span><span class="col-arrow">-></span><span class="col-field">Farm name - auto-created if new</span><span style="color:var(--danger);font-size:10px;margin-left:4px">required</span></div>
+                    <div class="col-row"><span class="col-excel">Date</span><span class="col-arrow">-></span><span class="col-field">Farm intake date</span><span style="color:var(--danger);font-size:10px;margin-left:4px">required</span></div>
                     <div style="margin-top:8px;font-size:11px;color:var(--sub);padding:8px 10px;background:rgba(45,212,191,.06);border-radius:6px;border:1px solid rgba(45,212,191,.15);">
                         Rows with the same Farm + Date are grouped into one farm delivery record so they appear like manual Farm Intake entries.
                     </div>
                     <div style="margin-top:6px">
-                        <a href="/import/api/farm-intake/template" download style="font-size:11px;color:var(--blue);text-decoration:none">â¬‡ Download Farm Intake template</a>
+                        <a href="/import/api/farm-intake/template" download style="font-size:11px;color:var(--blue);text-decoration:none">Download Farm Intake template</a>
                     </div>
                 </div>
 
                 <div style="display:flex;flex-direction:column;gap:8px;">
                     <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:13px;color:var(--sub)">
                         <input type="checkbox" id="chk-farm-dryrun" checked style="accent-color:var(--teal)">
-                        <span><b style="color:var(--text)">Dry run</b> â€” preview without saving (recommended first step)</span>
+                        <span><b style="color:var(--text)">Dry run</b> - preview without saving (recommended first step)</span>
                     </label>
                     <label style="display:flex;align-items:flex-start;gap:8px;cursor:pointer;font-size:13px;color:var(--sub)">
                         <input type="checkbox" id="chk-farm-stock" checked style="margin-top:2px;accent-color:var(--green)">
@@ -1188,21 +1188,21 @@ td{padding:8px 12px;border-top:1px solid var(--border);color:var(--sub);white-sp
 
                 <div class="drop-zone" id="drop-farm-intake" ondragover="onDrag(event,'farm-intake')" ondragleave="offDrag('farm-intake')" ondrop="onDrop(event,'farm-intake')">
                     <input type="file" accept=".xlsx,.xls" onchange="onFile(this,'farm-intake')">
-                    <div class="drop-icon">ðŸŒ¾</div>
+                    <div class="drop-icon">FI</div>
                     <div class="drop-text">Click or drag farm_intake.xlsx here</div>
                     <div class="drop-hint" id="hint-farm-intake">Grouped by Farm + Date into delivery records</div>
                 </div>
                 <div class="progress-wrap" id="prog-farm-intake"><div class="progress-fill" id="progfill-farm-intake" style="width:0%"></div></div>
                 <div id="preview-farm-intake"></div>
                 <div class="result-box" id="res-farm-intake"></div>
-                <button class="import-btn" style="background:linear-gradient(135deg,var(--teal),var(--green));color:#042118" id="btn-farm-intake" onclick="doImportFarmIntake()" disabled>â¬† Import Farm Intake</button>
+                <button class="import-btn" style="background:linear-gradient(135deg,var(--teal),var(--green));color:#042118" id="btn-farm-intake" onclick="doImportFarmIntake()" disabled>Import Farm Intake</button>
             </div>
         </div>
     </div>
 
     <div class="section-label">Recent Farm Intake Import Batches</div>
     <div id="farm-batches-panel" style="background:var(--card);border:1px solid var(--border);border-radius:12px;padding:18px 20px;">
-        <div style="color:var(--muted);font-size:13px">Loadingâ€¦</div>
+        <div style="color:var(--muted);font-size:13px">Loading...</div>
     </div>
 
     <div class="section-label" style="margin-top:32px">Historical B2B Sales</div>
@@ -1615,7 +1615,7 @@ async function doImportFarmIntake() {
 
     const btn = document.getElementById('btn-farm-intake');
     btn.disabled = true;
-    btn.innerHTML = 'â³ Processingâ€¦';
+    btn.innerHTML = 'Processing...';
     showProg('farm-intake', 40);
     showResult('farm-intake', '', '');
 
@@ -1634,26 +1634,26 @@ async function doImportFarmIntake() {
     } catch (e) {
         showProg('farm-intake', 100);
         btn.disabled = false;
-        btn.innerHTML = 'â¬† Import Farm Intake';
-        showResult('farm-intake', 'âœ— Network error: ' + e.message, 'err');
+        btn.innerHTML = 'Import Farm Intake';
+        showResult('farm-intake', 'Error: Network error: ' + e.message, 'err');
         return;
     }
 
     showProg('farm-intake', 100);
     btn.disabled = false;
-    btn.innerHTML = 'â¬† Import Farm Intake';
+    btn.innerHTML = 'Import Farm Intake';
 
     if (!res.ok) {
         const detail = data?.detail;
         const msg = Array.isArray(detail)
             ? detail.map(e => e.msg || JSON.stringify(e)).join('; ')
             : (detail || data?.error || `HTTP ${res.status}`);
-        showResult('farm-intake', 'âœ— ' + msg, 'err');
+        showResult('farm-intake', 'Error: ' + msg, 'err');
         return;
     }
 
     if (data.error) {
-        showResult('farm-intake', 'âœ— ' + data.error, 'err');
+        showResult('farm-intake', 'Error: ' + data.error, 'err');
         return;
     }
 
@@ -1663,28 +1663,28 @@ async function doImportFarmIntake() {
 
 function renderFarmIntakeResult(data) {
     if (!data || !data.summary) {
-        showResult('farm-intake', 'âœ— Unexpected response from server â€” no summary returned.', 'err');
+        showResult('farm-intake', 'Error: Unexpected response from server - no summary returned.', 'err');
         return;
     }
     const s = data.summary || {};
     const isDry = !!data.dry_run;
     const n = v => (v != null && !isNaN(+v)) ? +v : 0;
-    const txt = v => (v == null || v === '') ? 'â€“' : String(v);
+    const txt = v => (v == null || v === '') ? '-' : String(v);
 
     let html = `<div style="font-size:13px">
-        ${isDry ? '<span style="color:var(--warn)">âš  DRY RUN â€” nothing was saved</span><br>' : ''}
-        <b>${n(s.rows_read)}</b> rows read &nbsp;Â·&nbsp;
-        <b>${n(s.rows_imported)}</b> rows ${isDry ? 'valid for import' : 'imported'} &nbsp;Â·&nbsp;
+        ${isDry ? '<span style="color:var(--warn)">Dry run - nothing was saved</span><br>' : ''}
+        <b>${n(s.rows_read)}</b> rows read &nbsp;|&nbsp;
+        <b>${n(s.rows_imported)}</b> rows ${isDry ? 'valid for import' : 'imported'} &nbsp;|&nbsp;
         <b>${n(s.rows_skipped)}</b> skipped<br>
         <span style="color:var(--sub);font-size:12px">
-            Farm intake records ${isDry ? 'would create' : 'created'}: <b>${n(s.farm_deliveries_created)}</b> &nbsp;Â·&nbsp;
-            Farms ${isDry ? 'would create' : 'auto-created'}: <b>${n(s.farms_auto_created)}</b> &nbsp;Â·&nbsp;
+            Farm intake records ${isDry ? 'would create' : 'created'}: <b>${n(s.farm_deliveries_created)}</b> &nbsp;|&nbsp;
+            Farms ${isDry ? 'would create' : 'auto-created'}: <b>${n(s.farms_auto_created)}</b> &nbsp;|&nbsp;
             Products auto-created: <b>${n(s.products_auto_created)}</b>
         </span><br>
         <span style="color:var(--sub);font-size:12px">
-            Stock movement recorded: <b>${s.stock_movement_recorded ? 'Yes' : 'No'}</b> &nbsp;Â·&nbsp;
-            Stock move records ${isDry ? 'would create' : 'created'}: <b>${n(s.stock_moves_created)}</b> &nbsp;Â·&nbsp;
-            Date range: ${txt(s.earliest_date)} â†’ ${txt(s.latest_date)}
+            Stock movement recorded: <b>${s.stock_movement_recorded ? 'Yes' : 'No'}</b> &nbsp;|&nbsp;
+            Stock move records ${isDry ? 'would create' : 'created'}: <b>${n(s.stock_moves_created)}</b> &nbsp;|&nbsp;
+            Date range: ${txt(s.earliest_date)} -> ${txt(s.latest_date)}
         </span>`;
 
     if (data.batch_id) {
@@ -1702,7 +1702,7 @@ function renderFarmIntakeResult(data) {
     if (data.warnings && data.warnings.length) {
         html += `<br><div style="margin-top:6px;padding:8px 12px;background:rgba(255,181,71,.08);
             border:1px solid rgba(255,181,71,.2);border-radius:8px;font-size:12px;color:var(--warn)">
-            ${data.warnings.map(w=>`âš  ${w}`).join('<br>')}
+            ${data.warnings.map(w=>`Warning: ${w}`).join('<br>')}
         </div>`;
     }
 
@@ -1727,7 +1727,7 @@ function renderFarmIntakeResult(data) {
         <button onclick="runRealFarmIntakeImport()" style="width:100%;padding:10px;border-radius:8px;
             background:linear-gradient(135deg,var(--teal),var(--green));color:#042118;
             font-weight:800;font-size:13px;border:none;cursor:pointer;">
-            âœ“ Run real farm intake import
+            Run real farm intake import
         </button>`;
     }
 
@@ -1756,9 +1756,9 @@ async function loadFarmBatches() {
                 <th>Batch ID</th><th>File</th><th>Date</th><th>Deliveries</th><th>Rows</th><th>Stock</th><th></th>
             </tr></thead>
             <tbody>${batches.map(b=>`<tr>
-                <td style="font-family:var(--mono);font-size:10px">${b.batch_id.slice(0,12)}â€¦</td>
-                <td>${b.filename || 'â€“'}</td>
-                <td>${b.ran_on || 'â€“'}</td>
+                <td style="font-family:var(--mono);font-size:10px">${b.batch_id.slice(0,12)}...</td>
+                <td>${b.filename || '-'}</td>
+                <td>${b.ran_on || '-'}</td>
                 <td>${b.delivery_count}</td>
                 <td>${b.row_count}</td>
                 <td>${b.stock_recorded ? 'Yes' : 'No'}</td>
@@ -1776,13 +1776,13 @@ async function loadFarmBatches() {
 }
 
 async function revertFarmBatch(batchId) {
-    if (!confirm('Delete all farm intake records in batch ' + batchId.slice(0,8) + 'â€¦? This cannot be undone.')) return;
+    if (!confirm('Delete all farm intake records in batch ' + batchId.slice(0,8) + '...? This cannot be undone.')) return;
     const r = await fetch('/import/api/farm-intake/batch/' + batchId, { method: 'DELETE' });
     const d = await r.json();
     if (d.ok) {
-        showResult('farm-intake', `âœ“ Batch reverted â€” ${d.deleted_deliveries} deliveries deleted, ${d.deleted_stock_moves} stock moves removed.`, 'ok');
+        showResult('farm-intake', `Batch reverted - ${d.deleted_deliveries} deliveries deleted, ${d.deleted_stock_moves} stock moves removed.`, 'ok');
     } else {
-        showResult('farm-intake', 'âœ— Revert failed', 'err');
+        showResult('farm-intake', 'Error: Revert failed', 'err');
     }
     loadFarmBatches();
 }
