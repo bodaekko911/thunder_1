@@ -19,6 +19,11 @@ from app.models.b2b import B2BInvoice as B2BInvoiceModel, B2BInvoiceItem, Consig
 from app.models.supplier import PurchaseItem
 from app.services.sales_import_service import import_sales
 from app.services.b2b_sales_import_service import import_b2b_sales
+from app.services.farm_intake_import_service import (
+    import_farm_intake,
+    list_farm_intake_import_batches,
+    revert_farm_intake_import_batch,
+)
 
 router = APIRouter(
     prefix="/import",
@@ -741,6 +746,98 @@ async def delete_b2b_import_batch(
 
 
 # ── UI ─────────────────────────────────────────────────
+@router.post("/api/farm-intake")
+async def import_farm_intake_endpoint(
+    file: UploadFile = File(...),
+    dry_run: bool = Form(True),
+    record_stock_movement: bool = Form(True),
+    db: AsyncSession = Depends(get_async_session),
+    current_user=Depends(get_current_user),
+):
+    contents = await file.read()
+    return await import_farm_intake(
+        db=db,
+        workbook_bytes=contents,
+        filename=file.filename or "farm_intake.xlsx",
+        current_user_id=current_user.id,
+        dry_run=dry_run,
+        record_stock_movement=record_stock_movement,
+    )
+
+
+@router.get("/api/farm-intake/template")
+async def download_farm_intake_template(_=Depends(get_current_user)):
+    from openpyxl.styles import Font, PatternFill, Alignment
+    from openpyxl.utils import get_column_letter
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Farm Intake"
+
+    headers = ["SKU", "product", "QTY", "Farm", "Date"]
+    hdr_font = Font(bold=True, color="00FF9D")
+    hdr_fill = PatternFill("solid", fgColor="0F1424")
+    for col, header in enumerate(headers, 1):
+        cell = ws.cell(1, col, header)
+        cell.font = hdr_font
+        cell.fill = hdr_fill
+        cell.alignment = Alignment(horizontal="center")
+    for col, width in enumerate([14, 28, 10, 22, 14], 1):
+        ws.column_dimensions[get_column_letter(col)].width = width
+
+    ws.append(["SKU-001", "Tomatoes", 120, "Organic Farm", "2026-04-10"])
+    ws.append(["SKU-002", "Cucumbers", 75, "Organic Farm", "2026-04-10"])
+    ws.append(["SKU-003", "Mint", 24.5, "New Valley Farm", "2026-04-11"])
+
+    readme = wb.create_sheet("README")
+    readme.column_dimensions["A"].width = 20
+    readme.column_dimensions["B"].width = 78
+    readme.append(["Column", "Rules"])
+    readme["A1"].font = Font(bold=True)
+    readme["B1"].font = Font(bold=True)
+    rules = [
+        ("SKU", "Required. Used as the main product match key. Must match an existing product SKU. Numeric-looking SKUs are normalized."),
+        ("product", "Optional. Informational display name used only in preview/error messages."),
+        ("QTY", "Required. Numeric and must be greater than 0. Decimals are accepted."),
+        ("Farm", "Required. Existing farms are reused. Unknown farm names are auto-created during import."),
+        ("Date", "Required. Accepted formats: YYYY-MM-DD, DD/MM/YYYY, MM/DD/YYYY. Excel date cells are also accepted."),
+        ("", ""),
+        ("Grouping", "Rows with the same Farm + Date are grouped into one Farm Intake delivery record."),
+        ("Stock moves", "Keep 'Record stock movement / inventory history' checked to match normal Farm Intake behaviour. Uncheck it only when stock was already recorded elsewhere."),
+        ("Dry run", "Always preview with Dry run checked first. Uncheck Dry run only when you are ready to save."),
+    ]
+    for key, value in rules:
+        readme.append([key, value])
+        if key:
+            readme.cell(readme.max_row, 1).font = Font(bold=True)
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    return StreamingResponse(
+        buf,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": "attachment; filename=farm_intake_import_template.xlsx"},
+    )
+
+
+@router.get("/api/farm-intake/batches")
+async def list_farm_batches(
+    db: AsyncSession = Depends(get_async_session),
+    _=Depends(get_current_user),
+):
+    return await list_farm_intake_import_batches(db)
+
+
+@router.delete("/api/farm-intake/batch/{batch_id}")
+async def delete_farm_batch(
+    batch_id: str,
+    db: AsyncSession = Depends(get_async_session),
+    _=Depends(get_current_user),
+):
+    return await revert_farm_intake_import_batch(db, batch_id)
+
+
 @router.get("/", response_class=HTMLResponse)
 def import_ui():
     return """<!DOCTYPE html>
@@ -1052,6 +1149,62 @@ td{padding:8px 12px;border-top:1px solid var(--border);color:var(--sub);white-sp
         <div style="color:var(--muted);font-size:13px">Loading…</div>
     </div>
 
+    <div class="section-label" style="margin-top:32px">Farm Intake</div>
+    <div class="import-grid" style="grid-template-columns:minmax(340px,760px)">
+        <div class="import-card">
+            <div class="import-card-header">
+                <div class="import-card-icon" style="background:rgba(45,212,191,.12)">ðŸŒ¾</div>
+                <div>
+                    <div class="import-card-title">Farm Intake Import</div>
+                    <div class="import-card-sub">Import farm delivery history from Excel and optionally record stock movement</div>
+                </div>
+            </div>
+            <div class="import-card-body">
+                <div class="col-map">
+                    <div class="col-map-title">Expected Excel Columns</div>
+                    <div class="col-row"><span class="col-excel">SKU</span><span class="col-arrow">â†’</span><span class="col-field">Existing product SKU</span><span style="color:var(--danger);font-size:10px;margin-left:4px">required</span></div>
+                    <div class="col-row"><span class="col-excel">product</span><span class="col-arrow">â†’</span><span class="col-field">Product name / display hint</span><span class="col-opt">optional</span></div>
+                    <div class="col-row"><span class="col-excel">QTY</span><span class="col-arrow">â†’</span><span class="col-field">Delivered quantity (&gt; 0)</span><span style="color:var(--danger);font-size:10px;margin-left:4px">required</span></div>
+                    <div class="col-row"><span class="col-excel">Farm</span><span class="col-arrow">â†’</span><span class="col-field">Farm name â€” auto-created if new</span><span style="color:var(--danger);font-size:10px;margin-left:4px">required</span></div>
+                    <div class="col-row"><span class="col-excel">Date</span><span class="col-arrow">â†’</span><span class="col-field">Farm intake date</span><span style="color:var(--danger);font-size:10px;margin-left:4px">required</span></div>
+                    <div style="margin-top:8px;font-size:11px;color:var(--sub);padding:8px 10px;background:rgba(45,212,191,.06);border-radius:6px;border:1px solid rgba(45,212,191,.15);">
+                        Rows with the same Farm + Date are grouped into one farm delivery record so they appear like manual Farm Intake entries.
+                    </div>
+                    <div style="margin-top:6px">
+                        <a href="/import/api/farm-intake/template" download style="font-size:11px;color:var(--blue);text-decoration:none">â¬‡ Download Farm Intake template</a>
+                    </div>
+                </div>
+
+                <div style="display:flex;flex-direction:column;gap:8px;">
+                    <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:13px;color:var(--sub)">
+                        <input type="checkbox" id="chk-farm-dryrun" checked style="accent-color:var(--teal)">
+                        <span><b style="color:var(--text)">Dry run</b> â€” preview without saving (recommended first step)</span>
+                    </label>
+                    <label style="display:flex;align-items:flex-start;gap:8px;cursor:pointer;font-size:13px;color:var(--sub)">
+                        <input type="checkbox" id="chk-farm-stock" checked style="margin-top:2px;accent-color:var(--green)">
+                        <span><b style="color:var(--text)">Record stock movement / inventory history</b><br><span style="font-size:11px;color:var(--muted)">Checked by default to match normal Farm Intake behaviour. Uncheck only if stock was already recorded elsewhere.</span></span>
+                    </label>
+                </div>
+
+                <div class="drop-zone" id="drop-farm-intake" ondragover="onDrag(event,'farm-intake')" ondragleave="offDrag('farm-intake')" ondrop="onDrop(event,'farm-intake')">
+                    <input type="file" accept=".xlsx,.xls" onchange="onFile(this,'farm-intake')">
+                    <div class="drop-icon">ðŸŒ¾</div>
+                    <div class="drop-text">Click or drag farm_intake.xlsx here</div>
+                    <div class="drop-hint" id="hint-farm-intake">Grouped by Farm + Date into delivery records</div>
+                </div>
+                <div class="progress-wrap" id="prog-farm-intake"><div class="progress-fill" id="progfill-farm-intake" style="width:0%"></div></div>
+                <div id="preview-farm-intake"></div>
+                <div class="result-box" id="res-farm-intake"></div>
+                <button class="import-btn" style="background:linear-gradient(135deg,var(--teal),var(--green));color:#042118" id="btn-farm-intake" onclick="doImportFarmIntake()" disabled>â¬† Import Farm Intake</button>
+            </div>
+        </div>
+    </div>
+
+    <div class="section-label">Recent Farm Intake Import Batches</div>
+    <div id="farm-batches-panel" style="background:var(--card);border:1px solid var(--border);border-radius:12px;padding:18px 20px;">
+        <div style="color:var(--muted);font-size:13px">Loadingâ€¦</div>
+    </div>
+
     <div class="section-label" style="margin-top:32px">Historical B2B Sales</div>
     <div class="import-grid" style="grid-template-columns:minmax(340px,780px)">
 
@@ -1166,7 +1319,7 @@ async function logout(){
 }
   initializeColorMode();
   initUser();
-  const files = {products:null, stock:null, customers:null, sales:null, 'b2b-sales':null};
+  const files = {products:null, stock:null, customers:null, sales:null, 'farm-intake':null, 'b2b-sales':null};
 
 function onDrag(e,t){ e.preventDefault(); document.getElementById('drop-'+t).classList.add('drag-over'); }
 function offDrag(t){ document.getElementById('drop-'+t).classList.remove('drag-over'); }
@@ -1455,6 +1608,186 @@ async function revertBatch(batchId) {
 
 // Load batches on page load
 loadBatches();
+
+async function doImportFarmIntake() {
+    const f = files['farm-intake'];
+    if (!f) { showResult('farm-intake', 'Please select a file first', 'err'); return; }
+
+    const btn = document.getElementById('btn-farm-intake');
+    btn.disabled = true;
+    btn.innerHTML = 'â³ Processingâ€¦';
+    showProg('farm-intake', 40);
+    showResult('farm-intake', '', '');
+
+    const dryRun = document.getElementById('chk-farm-dryrun').checked;
+    const recordStock = document.getElementById('chk-farm-stock').checked;
+
+    const fd = new FormData();
+    fd.append('file', f);
+    fd.append('dry_run', dryRun ? 'true' : 'false');
+    fd.append('record_stock_movement', recordStock ? 'true' : 'false');
+
+    let res, data;
+    try {
+        res = await fetch('/import/api/farm-intake', { method: 'POST', body: fd });
+        data = await res.json();
+    } catch (e) {
+        showProg('farm-intake', 100);
+        btn.disabled = false;
+        btn.innerHTML = 'â¬† Import Farm Intake';
+        showResult('farm-intake', 'âœ— Network error: ' + e.message, 'err');
+        return;
+    }
+
+    showProg('farm-intake', 100);
+    btn.disabled = false;
+    btn.innerHTML = 'â¬† Import Farm Intake';
+
+    if (!res.ok) {
+        const detail = data?.detail;
+        const msg = Array.isArray(detail)
+            ? detail.map(e => e.msg || JSON.stringify(e)).join('; ')
+            : (detail || data?.error || `HTTP ${res.status}`);
+        showResult('farm-intake', 'âœ— ' + msg, 'err');
+        return;
+    }
+
+    if (data.error) {
+        showResult('farm-intake', 'âœ— ' + data.error, 'err');
+        return;
+    }
+
+    renderFarmIntakeResult(data);
+    loadFarmBatches();
+}
+
+function renderFarmIntakeResult(data) {
+    if (!data || !data.summary) {
+        showResult('farm-intake', 'âœ— Unexpected response from server â€” no summary returned.', 'err');
+        return;
+    }
+    const s = data.summary || {};
+    const isDry = !!data.dry_run;
+    const n = v => (v != null && !isNaN(+v)) ? +v : 0;
+    const txt = v => (v == null || v === '') ? 'â€“' : String(v);
+
+    let html = `<div style="font-size:13px">
+        ${isDry ? '<span style="color:var(--warn)">âš  DRY RUN â€” nothing was saved</span><br>' : ''}
+        <b>${n(s.rows_read)}</b> rows read &nbsp;Â·&nbsp;
+        <b>${n(s.rows_imported)}</b> rows ${isDry ? 'valid for import' : 'imported'} &nbsp;Â·&nbsp;
+        <b>${n(s.rows_skipped)}</b> skipped<br>
+        <span style="color:var(--sub);font-size:12px">
+            Farm intake records ${isDry ? 'would create' : 'created'}: <b>${n(s.farm_deliveries_created)}</b> &nbsp;Â·&nbsp;
+            Farms ${isDry ? 'would create' : 'auto-created'}: <b>${n(s.farms_auto_created)}</b> &nbsp;Â·&nbsp;
+            Products auto-created: <b>${n(s.products_auto_created)}</b>
+        </span><br>
+        <span style="color:var(--sub);font-size:12px">
+            Stock movement recorded: <b>${s.stock_movement_recorded ? 'Yes' : 'No'}</b> &nbsp;Â·&nbsp;
+            Stock move records ${isDry ? 'would create' : 'created'}: <b>${n(s.stock_moves_created)}</b> &nbsp;Â·&nbsp;
+            Date range: ${txt(s.earliest_date)} â†’ ${txt(s.latest_date)}
+        </span>`;
+
+    if (data.batch_id) {
+        html += `<br><span style="color:var(--muted);font-size:11px">Batch ID: ${data.batch_id}</span>`;
+    }
+
+    if (data.auto_created_farms && data.auto_created_farms.length) {
+        html += `<br><details style="margin-top:6px"><summary style="font-size:12px;cursor:pointer;color:var(--sub)">
+            Auto-created farms (${data.auto_created_farms.length})
+        </summary><div style="margin-top:4px;font-size:11px;color:var(--muted)">
+            ${data.auto_created_farms.map(f=>f.name).join(', ')}
+        </div></details>`;
+    }
+
+    if (data.warnings && data.warnings.length) {
+        html += `<br><div style="margin-top:6px;padding:8px 12px;background:rgba(255,181,71,.08);
+            border:1px solid rgba(255,181,71,.2);border-radius:8px;font-size:12px;color:var(--warn)">
+            ${data.warnings.map(w=>`âš  ${w}`).join('<br>')}
+        </div>`;
+    }
+
+    if (data.errors && data.errors.length) {
+        html += `<br><br><b style="color:var(--danger)">${data.errors.length} error(s):</b>
+        <div style="max-height:180px;overflow-y:auto;margin-top:6px">
+        <table style="font-size:11px;width:100%">
+            <thead><tr><th>Row</th><th>SKU</th><th>Product</th><th>Farm</th><th>Date</th><th>Reason</th></tr></thead>
+            <tbody>${data.errors.map(e=>`<tr>
+                <td>${e.row}</td>
+                <td style="font-family:var(--mono)">${e.sku || ''}</td>
+                <td>${e.product || ''}</td>
+                <td>${e.farm || ''}</td>
+                <td>${e.date || ''}</td>
+                <td style="color:var(--danger)">${e.reason}</td>
+            </tr>`).join('')}</tbody>
+        </table></div>`;
+    }
+
+    if (isDry && (!data.errors || data.errors.length === 0)) {
+        html += `<br><br>
+        <button onclick="runRealFarmIntakeImport()" style="width:100%;padding:10px;border-radius:8px;
+            background:linear-gradient(135deg,var(--teal),var(--green));color:#042118;
+            font-weight:800;font-size:13px;border:none;cursor:pointer;">
+            âœ“ Run real farm intake import
+        </button>`;
+    }
+
+    html += '</div>';
+    const kind = data.errors && data.errors.length ? 'warn' : 'ok';
+    showResult('farm-intake', html, kind);
+}
+
+async function runRealFarmIntakeImport() {
+    document.getElementById('chk-farm-dryrun').checked = false;
+    await doImportFarmIntake();
+}
+
+async function loadFarmBatches() {
+    const panel = document.getElementById('farm-batches-panel');
+    try {
+        const r = await fetch('/import/api/farm-intake/batches');
+        const d = await r.json();
+        const batches = d.batches || [];
+        if (!batches.length) {
+            panel.innerHTML = '<div style="color:var(--muted);font-size:12px">No Farm Intake import batches found.</div>';
+            return;
+        }
+        panel.innerHTML = `<table style="width:100%;font-size:12px">
+            <thead><tr>
+                <th>Batch ID</th><th>File</th><th>Date</th><th>Deliveries</th><th>Rows</th><th>Stock</th><th></th>
+            </tr></thead>
+            <tbody>${batches.map(b=>`<tr>
+                <td style="font-family:var(--mono);font-size:10px">${b.batch_id.slice(0,12)}â€¦</td>
+                <td>${b.filename || 'â€“'}</td>
+                <td>${b.ran_on || 'â€“'}</td>
+                <td>${b.delivery_count}</td>
+                <td>${b.row_count}</td>
+                <td>${b.stock_recorded ? 'Yes' : 'No'}</td>
+                <td><button onclick="revertFarmBatch('${b.batch_id}')"
+                    style="padding:4px 10px;border-radius:6px;border:1px solid var(--danger);
+                    background:rgba(255,77,109,.08);color:var(--danger);
+                    font-size:11px;cursor:pointer;font-family:var(--sans)">
+                    Revert
+                </button></td>
+            </tr>`).join('')}
+            </tbody></table>`;
+    } catch (e) {
+        panel.innerHTML = '<div style="color:var(--muted);font-size:12px">Could not load Farm Intake batches.</div>';
+    }
+}
+
+async function revertFarmBatch(batchId) {
+    if (!confirm('Delete all farm intake records in batch ' + batchId.slice(0,8) + 'â€¦? This cannot be undone.')) return;
+    const r = await fetch('/import/api/farm-intake/batch/' + batchId, { method: 'DELETE' });
+    const d = await r.json();
+    if (d.ok) {
+        showResult('farm-intake', `âœ“ Batch reverted â€” ${d.deleted_deliveries} deliveries deleted, ${d.deleted_stock_moves} stock moves removed.`, 'ok');
+    } else {
+        showResult('farm-intake', 'âœ— Revert failed', 'err');
+    }
+    loadFarmBatches();
+}
+
+loadFarmBatches();
 
 // ── Historical B2B Sales ────────────────────────────────────────────────────
 

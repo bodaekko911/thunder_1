@@ -14,6 +14,7 @@ from app.models.farm import Farm, FarmDelivery, FarmDeliveryItem, WeatherLog
 from app.models.product import Product
 from app.models.inventory import StockMove
 from app.models.user import User
+from app.services.farm_intake_service import create_farm_delivery
 
 router = APIRouter(
     prefix="/farm",
@@ -136,50 +137,33 @@ async def create_delivery(data: DeliveryCreate, db: AsyncSession = Depends(get_a
         raise HTTPException(status_code=404, detail="Farm not found")
     if not data.items:
         raise HTTPException(status_code=400, detail="Delivery must have at least one item")
+    try:
+        delivery_date = date.fromisoformat(data.delivery_date)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid delivery date")
 
-    max_id_result = await db.execute(select(func.max(FarmDelivery.id)))
-    max_id = max_id_result.scalar() or 0
-    number = f"FD-{str(max_id + 1).zfill(4)}"
-
-    delivery = FarmDelivery(
-        delivery_number=number,
-        farm_id=data.farm_id,
-        user_id=current_user.id,
-        delivery_date=date.fromisoformat(data.delivery_date),
-        received_by=data.received_by,
-        quality_notes=data.quality_notes,
-        notes=data.notes,
-    )
-    db.add(delivery); await db.flush()
-
-    for item in data.items:
-        prod_result = await db.execute(select(Product).where(Product.id == item.product_id))
-        product = prod_result.scalar_one_or_none()
-        if not product:
-            raise HTTPException(status_code=404, detail=f"Product not found: {item.product_id}")
-        db.add(FarmDeliveryItem(
-            delivery_id=delivery.id,
-            product_id=product.id,
-            qty=item.qty,
-            unit=product.unit,
-            notes=item.notes,
-        ))
-        before = float(product.stock)
-        after  = before + item.qty
-        product.stock = after
-        db.add(StockMove(
-            product_id=product.id, type="in",
+    try:
+        delivery, _stock_moves_created = await create_farm_delivery(
+            db,
+            farm=farm,
+            delivery_date=delivery_date,
             user_id=current_user.id,
-            qty=item.qty, qty_before=before, qty_after=after,
-            ref_type="farm_intake", ref_id=delivery.id,
-            note=f"{farm.name} — {number}",
-        ))
+            items=[
+                {"product_id": item.product_id, "qty": item.qty, "notes": item.notes}
+                for item in data.items
+            ],
+            received_by=data.received_by,
+            quality_notes=data.quality_notes,
+            notes=data.notes,
+            record_stock_movement=True,
+            activity_user=current_user,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
 
-    record(db, "Farm", "create_delivery",
-           f"Delivery {number} from {farm.name} — {len(data.items)} product(s)",
-           user=current_user, ref_type="farm_delivery", ref_id=delivery.id)
-    await db.commit(); await db.refresh(delivery)
-    return {"id": delivery.id, "delivery_number": number, "items_count": len(data.items)}
+    await db.commit()
+    await db.refresh(delivery)
+    return {"id": delivery.id, "delivery_number": delivery.delivery_number, "items_count": len(data.items)}
 
 @router.put("/api/deliveries/{delivery_id}")
 async def edit_delivery(delivery_id: int, data: DeliveryCreate, db: AsyncSession = Depends(get_async_session), current_user: User = Depends(get_current_user)):
