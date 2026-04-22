@@ -1374,6 +1374,37 @@ function debugJournalFilters(stage, details){
     console.debug("[Accounting][Journals]", stage, details);
 }
 
+async function tryJournalSessionRefresh(){
+    const rawFetch = window._origFetch || window.fetch;
+    const refreshRes = await rawFetch("/auth/refresh", {
+        method: "POST",
+        credentials: "same-origin",
+    });
+    debugJournalFilters("refresh-attempt", {ok: refreshRes.ok, status: refreshRes.status});
+    return refreshRes.ok;
+}
+
+async function fetchJournalsWithAuth(url, signal){
+    let res = await fetch(url, {
+        cache: "no-store",
+        credentials: "same-origin",
+        signal,
+    });
+    if(res.status !== 401) return res;
+
+    debugJournalFilters("unauthorized-response", {url, status: res.status});
+    const refreshed = await tryJournalSessionRefresh();
+    if(!refreshed) return res;
+
+    const retryRes = await fetch(url, {
+        cache: "no-store",
+        credentials: "same-origin",
+        signal,
+    });
+    debugJournalFilters("retry-response", {url, status: retryRes.status});
+    return retryRes;
+}
+
 function handleJournalFilterChange(){
     const {fromDate, toDate} = getJournalFilterValues();
     debugJournalFilters("ui-change", {fromDate, toDate});
@@ -1406,11 +1437,10 @@ async function loadJournals(){
     });
     setJournalsTableState("Loading...");
     try{
-        let res = await fetch(`/accounting/api/journals?${params.toString()}`, {
-            cache: "no-store",
-            credentials: "same-origin",
-            signal: journalsAbortController.signal,
-        });
+        let res = await fetchJournalsWithAuth(
+            `/accounting/api/journals?${params.toString()}`,
+            journalsAbortController.signal,
+        );
         let data = await res.json();
         if(requestSeq !== journalsRequestSeq) return;
         debugJournalFilters("response", {
