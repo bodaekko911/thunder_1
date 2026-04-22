@@ -3251,11 +3251,17 @@ function renderRefundRecords(refunds){
             <td style="font-size:12px;color:var(--muted)">${r.created_at}</td>
             <td><div style="display:flex;gap:6px;flex-wrap:wrap">
                 <button class="action-btn" onclick="window.open('/b2b/refund/${r.id}/print','_blank')">Print</button>
-                ${isAdmin ? `<button class="action-btn danger" onclick="deleteRefund(${r.id}, ${JSON.stringify(r.refund_number)})">Delete</button>` : ""}
+                ${isAdmin ? `<button class="action-btn danger js-delete-refund" data-refund-id="${r.id}" data-refund-number="${String(r.refund_number).replace(/"/g, "&quot;")}">Delete</button>` : ""}
             </div></td>
         </tr>
     `).join("");
 }
+
+document.addEventListener("click", function(event){
+    const btn = event.target.closest(".js-delete-refund");
+    if(!btn) return;
+    deleteRefund(parseInt(btn.dataset.refundId || "0"), btn.dataset.refundNumber || "");
+});
 
 async function deleteRefund(id, refundNumber){
     if(!confirm(`Are you sure you want to delete refund ${refundNumber}?`)) return;
