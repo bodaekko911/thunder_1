@@ -5,7 +5,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import selectinload
 from typing import Optional, List
 from pydantic import BaseModel, Field
-from datetime import date, datetime, time, timedelta
+from datetime import date, datetime, time, timedelta, timezone
 
 from app.database import get_async_session
 from app.core.permissions import get_current_user, require_permission
@@ -239,9 +239,9 @@ def _validate_date_range(from_date: Optional[date], to_date: Optional[date]) -> 
 def _apply_date_range(stmt, column, from_date: Optional[date], to_date: Optional[date]):
     _validate_date_range(from_date, to_date)
     if from_date:
-        stmt = stmt.where(column >= datetime.combine(from_date, time.min))
+        stmt = stmt.where(column >= datetime.combine(from_date, time.min, tzinfo=timezone.utc))
     if to_date:
-        stmt = stmt.where(column < datetime.combine(to_date + timedelta(days=1), time.min))
+        stmt = stmt.where(column < datetime.combine(to_date + timedelta(days=1), time.min, tzinfo=timezone.utc))
     return stmt
 
 

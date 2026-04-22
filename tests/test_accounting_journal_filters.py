@@ -18,8 +18,8 @@ def test_apply_date_range_uses_inclusive_start_and_exclusive_next_day_end() -> N
 
     compiled = str(statement.compile(compile_kwargs={"literal_binds": True}))
 
-    assert "journals.created_at >= '2026-04-02 00:00:00'" in compiled
-    assert "journals.created_at < '2026-04-04 00:00:00'" in compiled
+    assert "journals.created_at >= '2026-04-02 00:00:00+00:00'" in compiled
+    assert "journals.created_at < '2026-04-04 00:00:00+00:00'" in compiled
     assert "date(journals.created_at)" not in compiled
 
 
@@ -40,9 +40,9 @@ def test_apply_date_range_allows_open_ended_ranges() -> None:
     from_sql = str(from_only.compile(compile_kwargs={"literal_binds": True}))
     to_sql = str(to_only.compile(compile_kwargs={"literal_binds": True}))
 
-    assert "journals.created_at >= '2026-04-02 00:00:00'" in from_sql
-    assert "journals.created_at < '2026-04-04 00:00:00'" not in from_sql
-    assert "journals.created_at < '2026-04-04 00:00:00'" in to_sql
+    assert "journals.created_at >= '2026-04-02 00:00:00+00:00'" in from_sql
+    assert "journals.created_at < '2026-04-04 00:00:00+00:00'" not in from_sql
+    assert "journals.created_at < '2026-04-04 00:00:00+00:00'" in to_sql
     assert "journals.created_at >=" not in to_sql
 
 
