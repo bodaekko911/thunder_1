@@ -5,7 +5,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import selectinload
 from typing import Optional, List
 from pydantic import BaseModel, Field
-from datetime import date
+from datetime import date, datetime, time, timedelta
 
 from app.database import get_async_session
 from app.core.permissions import get_current_user, require_permission
@@ -239,9 +239,9 @@ def _validate_date_range(from_date: Optional[date], to_date: Optional[date]) -> 
 def _apply_date_range(stmt, column, from_date: Optional[date], to_date: Optional[date]):
     _validate_date_range(from_date, to_date)
     if from_date:
-        stmt = stmt.where(func.date(column) >= from_date)
+        stmt = stmt.where(column >= datetime.combine(from_date, time.min))
     if to_date:
-        stmt = stmt.where(func.date(column) <= to_date)
+        stmt = stmt.where(column < datetime.combine(to_date + timedelta(days=1), time.min))
     return stmt
 
 
@@ -1329,41 +1329,55 @@ async function deleteAccount(id,name){
 }
 
 /* ── JOURNALS ── */
+let journalsRequestSeq = 0;
+
+function setJournalsTableState(message, color="var(--muted)"){
+    document.getElementById("journals-body").innerHTML =
+        `<tr><td colspan="7" style="text-align:center;color:${color};padding:40px">${message}</td></tr>`;
+}
+
 async function loadJournals(){
+    const requestSeq = ++journalsRequestSeq;
     const params = new URLSearchParams();
     appendDateRangeParams(params, "journals-from-date", "journals-to-date");
-    let res = await fetch(`/accounting/api/journals?${params.toString()}`);
-    let data = await res.json();
-    if(!res.ok){
-        showToast("Error: " + (data.detail || "Unable to load journal entries"));
-        document.getElementById("journals-body").innerHTML =
-            `<tr><td colspan="7" style="text-align:center;color:var(--danger);padding:40px">${data.detail || "Unable to load journal entries"}</td></tr>`;
-        return;
+    setJournalsTableState("Loading...");
+    try{
+        let res = await fetch(`/accounting/api/journals?${params.toString()}`);
+        let data = await res.json();
+        if(requestSeq !== journalsRequestSeq) return;
+        if(!res.ok){
+            showToast("Error: " + (data.detail || "Unable to load journal entries"));
+            setJournalsTableState(data.detail || "Unable to load journal entries", "var(--danger)");
+            return;
+        }
+        if(!data.journals.length){
+            setJournalsTableState("No journal entries found for the selected date range.");
+            return;
+        }
+        document.getElementById("journals-body").innerHTML = data.journals.map(j=>{
+            const isRefund = j.ref_type === "retail_refund" || j.ref_type === "retail_refund_void";
+            const badgeClass = isRefund ? "type-refund"
+                : j.ref_type === "manual" ? "type-equity"
+                : j.ref_type.includes("b2b_refund") ? "type-refund"
+                : "type-revenue";
+            const rowStyle = isRefund ? 'style="background:rgba(255,77,109,.03);"' : '';
+            const amtColor = isRefund ? "var(--danger)" : "var(--green)";
+            const amtPrefix = isRefund ? "−" : "";
+            return `<tr ${rowStyle}>
+                <td style="font-family:var(--mono);color:var(--muted);font-size:12px">#${j.id}</td>
+                <td><span class="type-badge ${badgeClass}">${j.ref_type}</span></td>
+                <td class="name">${j.description}</td>
+                <td style="color:var(--sub)">${j.entries_count} lines</td>
+                <td class="dr" style="color:${amtColor}">${amtPrefix}${j.total_debit.toFixed(2)}</td>
+                <td style="font-size:12px;color:var(--muted)">${j.created_at}</td>
+                <td><button class="action-btn green" onclick="viewJournal(${j.id})">View</button></td>
+            </tr>`;
+        }).join("");
+    }catch(_err){
+        if(requestSeq !== journalsRequestSeq) return;
+        showToast("Error: Unable to load journal entries");
+        setJournalsTableState("Unable to load journal entries", "var(--danger)");
     }
-    if(!data.journals.length){
-        document.getElementById("journals-body").innerHTML =
-            `<tr><td colspan="7" style="text-align:center;color:var(--muted);padding:40px">No journal entries found for the selected date range.</td></tr>`;
-        return;
-    }
-    document.getElementById("journals-body").innerHTML = data.journals.map(j=>{
-        const isRefund = j.ref_type === "retail_refund" || j.ref_type === "retail_refund_void";
-        const badgeClass = isRefund ? "type-refund"
-            : j.ref_type === "manual" ? "type-equity"
-            : j.ref_type.includes("b2b_refund") ? "type-refund"
-            : "type-revenue";
-        const rowStyle = isRefund ? 'style="background:rgba(255,77,109,.03);"' : '';
-        const amtColor = isRefund ? "var(--danger)" : "var(--green)";
-        const amtPrefix = isRefund ? "−" : "";
-        return `<tr ${rowStyle}>
-            <td style="font-family:var(--mono);color:var(--muted);font-size:12px">#${j.id}</td>
-            <td><span class="type-badge ${badgeClass}">${j.ref_type}</span></td>
-            <td class="name">${j.description}</td>
-            <td style="color:var(--sub)">${j.entries_count} lines</td>
-            <td class="dr" style="color:${amtColor}">${amtPrefix}${j.total_debit.toFixed(2)}</td>
-            <td style="font-size:12px;color:var(--muted)">${j.created_at}</td>
-            <td><button class="action-btn green" onclick="viewJournal(${j.id})">View</button></td>
-        </tr>`;
-    }).join("");
 }
 
 function resetJournalFilters(){
