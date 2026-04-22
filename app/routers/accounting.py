@@ -129,12 +129,16 @@ async def get_journals(
     limit: int = Query(50, ge=1, le=200),
     from_date: Optional[date] = Query(None),
     to_date: Optional[date] = Query(None),
+    filter_date: Optional[str] = Query(None),
     db: AsyncSession = Depends(get_async_session),
 ):
     skip = int(skip) if isinstance(skip, (int, float, str)) else 0
     limit = int(limit) if isinstance(limit, (int, float, str)) else 50
     base_stmt = _apply_date_range(select(Journal), Journal.created_at, from_date, to_date)
     count_stmt = _apply_date_range(select(func.count()).select_from(Journal), Journal.created_at, from_date, to_date)
+    if filter_date:
+        base_stmt = base_stmt.where(func.date(Journal.created_at) == filter_date)
+        count_stmt = count_stmt.where(func.date(Journal.created_at) == filter_date)
     cnt_result = await db.execute(count_stmt)
     total = cnt_result.scalar()
     result = await db.execute(
@@ -846,6 +850,13 @@ td.cr { font-family:var(--mono); color:var(--blue); }
             </div>
             <button class="btn btn-outline" onclick="resetJournalFilters()">Clear</button>
         </div>
+        <div style="display:flex;align-items:end;gap:10px;flex-wrap:wrap;margin-bottom:14px;">
+            <div class="fld" style="margin:0;min-width:170px;">
+                <label>Filter Date</label>
+                <input type="date" id="journal-date-filter" onchange="loadJournals()">
+            </div>
+            <button class="btn btn-outline" onclick="document.getElementById('journal-date-filter').value=''; loadJournals()">Clear Filter</button>
+        </div>
         <div class="table-wrap">
             <table>
                 <thead><tr><th>ID</th><th>Type</th><th>Description</th><th>Entries</th><th>Total Debit</th><th>Date</th><th>Actions</th></tr></thead>
@@ -1332,6 +1343,10 @@ async function deleteAccount(id,name){
 async function loadJournals(){
     const params = new URLSearchParams();
     appendDateRangeParams(params, "journals-from-date", "journals-to-date");
+    const filterDate = document.getElementById("journal-date-filter")?.value;
+    if (filterDate) {
+        params.set("filter_date", filterDate);
+    }
     let res = await fetch(`/accounting/api/journals?${params.toString()}`);
     let data = await res.json();
     if(!res.ok){
