@@ -57,3 +57,21 @@ def test_apply_date_range_rejects_invalid_ranges() -> None:
 
     assert exc_info.value.status_code == 400
     assert exc_info.value.detail == "From date cannot be after To date"
+
+
+def test_normalize_journal_pagination_uses_page_and_page_size() -> None:
+    page, page_size, skip, limit = accounting_router._normalize_journal_pagination(3, 25, 0, 50)
+
+    assert page == 3
+    assert page_size == 25
+    assert skip == 50
+    assert limit == 25
+
+
+def test_normalize_journal_pagination_preserves_legacy_skip_limit() -> None:
+    page, page_size, skip, limit = accounting_router._normalize_journal_pagination(1, 50, 100, 25)
+
+    assert page == 5
+    assert page_size == 25
+    assert skip == 100
+    assert limit == 25

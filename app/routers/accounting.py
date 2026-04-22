@@ -127,16 +127,18 @@ async def seed_accounts(db: AsyncSession = Depends(get_async_session)):
 async def get_journals(
     skip: int = Query(0, ge=0),
     limit: int = Query(50, ge=1, le=200),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=200),
     from_date: Optional[date] = Query(None),
     to_date: Optional[date] = Query(None),
     db: AsyncSession = Depends(get_async_session),
 ):
-    skip = int(skip) if isinstance(skip, (int, float, str)) else 0
-    limit = int(limit) if isinstance(limit, (int, float, str)) else 50
+    page, page_size, skip, limit = _normalize_journal_pagination(page, page_size, skip, limit)
     base_stmt = _apply_date_range(select(Journal), Journal.created_at, from_date, to_date)
     count_stmt = _apply_date_range(select(func.count()).select_from(Journal), Journal.created_at, from_date, to_date)
     cnt_result = await db.execute(count_stmt)
-    total = cnt_result.scalar()
+    total = int(cnt_result.scalar() or 0)
+    total_pages = max(1, (total + page_size - 1) // page_size) if total else 1
     result = await db.execute(
         base_stmt
         .options(selectinload(Journal.entries).selectinload(JournalEntry.account))
@@ -147,6 +149,9 @@ async def get_journals(
     journals = result.scalars().all()
     return {
         "total": total,
+        "page": page,
+        "page_size": page_size,
+        "total_pages": total_pages,
         "journals": [
             {
                 "id":          j.id,
@@ -234,6 +239,35 @@ async def create_journal(data: JournalCreate, db: AsyncSession = Depends(get_asy
 def _validate_date_range(from_date: Optional[date], to_date: Optional[date]) -> None:
     if from_date and to_date and from_date > to_date:
         raise HTTPException(status_code=400, detail="From date cannot be after To date")
+
+
+def _normalize_journal_pagination(
+    page: int | str | float | None,
+    page_size: int | str | float | None,
+    skip: int | str | float | None,
+    limit: int | str | float | None,
+) -> tuple[int, int, int, int]:
+    page = int(page) if isinstance(page, (int, float, str)) else 1
+    page_size = int(page_size) if isinstance(page_size, (int, float, str)) else 50
+    if page < 1:
+        page = 1
+    if page_size < 1:
+        page_size = 50
+    if page_size > 200:
+        page_size = 200
+
+    # Keep backward compatibility for callers still sending skip/limit.
+    if isinstance(skip, (int, float, str)) and int(skip) > 0 and not (isinstance(page, int) and page > 1):
+        skip = int(skip)
+        limit = int(limit) if isinstance(limit, (int, float, str)) else page_size
+        limit = max(1, min(limit, 200))
+        page_size = limit
+        page = (skip // limit) + 1
+        return page, page_size, skip, limit
+
+    skip = (page - 1) * page_size
+    limit = page_size
+    return page, page_size, skip, limit
 
 
 def _apply_date_range(stmt, column, from_date: Optional[date], to_date: Optional[date]):
@@ -853,8 +887,15 @@ td.cr { font-family:var(--mono); color:var(--blue); }
                 <tbody id="journals-body"><tr><td colspan="7" style="text-align:center;color:var(--muted);padding:40px">Loading…</td></tr></tbody>
             </table>
         </div>
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-top:12px;">
+            <div id="journals-pagination-summary" style="font-size:12px;color:var(--muted)">Loading entries...</div>
+            <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+                <button class="btn btn-outline" id="journals-prev-btn" onclick="changeJournalPage(-1)">Previous</button>
+                <div id="journals-page-indicator" style="font-size:12px;color:var(--sub);min-width:96px;text-align:center">Page 1 of 1</div>
+                <button class="btn btn-outline" id="journals-next-btn" onclick="changeJournalPage(1)">Next</button>
+            </div>
+        </div>
     </div>
-
     <!-- P&L -->
     <div id="section-pl" style="display:none">
         <div style="display:flex;align-items:end;gap:10px;flex-wrap:wrap;margin-bottom:14px;">
@@ -1250,6 +1291,7 @@ async function init(){
     setupJournalFilters();
     const {fromDate, toDate} = getJournalFilterValues();
     updateJournalsActiveRange(fromDate, toDate);
+    updateJournalPaginationUi();
     await loadAccounts();
 }
 
@@ -1335,6 +1377,10 @@ async function deleteAccount(id,name){
 /* ── JOURNALS ── */
 let journalsRequestSeq = 0;
 let journalsAbortController = null;
+let journalsPage = 1;
+let journalsPageSize = 50;
+let journalsTotal = 0;
+let journalsTotalPages = 1;
 
 function setJournalsTableState(message, color="var(--muted)"){
     document.getElementById("journals-body").innerHTML =
@@ -1343,6 +1389,27 @@ function setJournalsTableState(message, color="var(--muted)"){
 
 function setJournalsUnauthorizedState(message="Your session expired or you do not have access to Journal Entries. Please sign in again."){
     setJournalsTableState(message, "var(--danger)");
+}
+
+function updateJournalPaginationUi(){
+    const summaryEl = document.getElementById("journals-pagination-summary");
+    const indicatorEl = document.getElementById("journals-page-indicator");
+    const prevBtn = document.getElementById("journals-prev-btn");
+    const nextBtn = document.getElementById("journals-next-btn");
+    if(summaryEl){
+        if(!journalsTotal){
+            summaryEl.textContent = "0 total entries";
+        }else{
+            const startRow = ((journalsPage - 1) * journalsPageSize) + 1;
+            const endRow = Math.min(journalsPage * journalsPageSize, journalsTotal);
+            summaryEl.textContent = `Showing ${startRow}-${endRow} of ${journalsTotal} entries`;
+        }
+    }
+    if(indicatorEl){
+        indicatorEl.textContent = `Page ${journalsPage} of ${journalsTotalPages}`;
+    }
+    if(prevBtn) prevBtn.disabled = journalsPage <= 1;
+    if(nextBtn) nextBtn.disabled = journalsPage >= journalsTotalPages || journalsTotal === 0;
 }
 
 function getJournalFilterValues(){
@@ -1408,6 +1475,7 @@ async function fetchJournalsWithAuth(url, signal){
 function handleJournalFilterChange(){
     const {fromDate, toDate} = getJournalFilterValues();
     debugJournalFilters("ui-change", {fromDate, toDate});
+    journalsPage = 1;
     loadJournals();
 }
 
@@ -1427,15 +1495,23 @@ async function loadJournals(){
     journalsAbortController = new AbortController();
     const params = new URLSearchParams();
     appendDateRangeParams(params, "journals-from-date", "journals-to-date");
+    params.set("page", String(journalsPage));
+    params.set("page_size", String(journalsPageSize));
     const {fromDate, toDate} = getJournalFilterValues();
     updateJournalsActiveRange(fromDate, toDate);
     debugJournalFilters("request", {
         requestSeq,
         fromDate,
         toDate,
+        page: journalsPage,
+        pageSize: journalsPageSize,
         url: `/accounting/api/journals?${params.toString()}`,
     });
     setJournalsTableState("Loading...");
+    const summaryEl = document.getElementById("journals-pagination-summary");
+    const indicatorEl = document.getElementById("journals-page-indicator");
+    if(summaryEl) summaryEl.textContent = "Loading entries...";
+    if(indicatorEl) indicatorEl.textContent = `Page ${journalsPage} of ${journalsTotalPages}`;
     try{
         let res = await fetchJournalsWithAuth(
             `/accounting/api/journals?${params.toString()}`,
@@ -1448,6 +1524,9 @@ async function loadJournals(){
             fromDate: data.from_date || null,
             toDate: data.to_date || null,
             total: data.total,
+            page: data.page,
+            pageSize: data.page_size,
+            totalPages: data.total_pages,
             rowCount: data.journals?.length || 0,
         });
         if(!res.ok){
@@ -1466,6 +1545,11 @@ async function loadJournals(){
             return;
         }
         updateJournalsActiveRange(data.from_date || "", data.to_date || "");
+        journalsTotal = Number(data.total || 0);
+        journalsPage = Math.max(1, Number(data.page || 1));
+        journalsPageSize = Math.max(1, Number(data.page_size || journalsPageSize));
+        journalsTotalPages = Math.max(1, Number(data.total_pages || 1));
+        updateJournalPaginationUi();
         if(!data.journals.length){
             debugJournalFilters("render-empty", {requestSeq});
             setJournalsTableState("No journal entries found for the selected date range.");
@@ -1514,6 +1598,14 @@ async function loadJournals(){
 function resetJournalFilters(){
     document.getElementById("journals-from-date").value = monthStartIso();
     document.getElementById("journals-to-date").value = todayIso();
+    journalsPage = 1;
+    loadJournals();
+}
+
+function changeJournalPage(direction){
+    const nextPage = journalsPage + direction;
+    if(nextPage < 1 || nextPage > journalsTotalPages) return;
+    journalsPage = nextPage;
     loadJournals();
 }
 
