@@ -2238,23 +2238,18 @@ async function logout(){
       return role === "admin" || perms.has(permission);
   }
   function configureReportsPermissions(){
-      const tabMap = [
-          {tab:"sales", permission:"tab_reports_sales"},
-          {tab:"transactions", permission:"tab_reports_transactions"},
-          {tab:"inventory", permission:"tab_reports_inventory"},
-          {tab:"pl", permission:"tab_reports_pl"},
-      ];
+      ensureTabMetadata();
       let firstAllowed = null;
-      document.querySelectorAll(".tabs .tab").forEach((btn, index) => {
-          const conf = tabMap[index];
-          if(!conf) return;
-          if(!hasPermission(conf.permission)){
+      document.querySelectorAll(".tabs .tab").forEach((btn) => {
+          const tab = btn.dataset.tab;
+          if(!tab) return;
+          if(!isTabAllowed(tab)){
               btn.style.display = "none";
           } else if(!firstAllowed) {
-              firstAllowed = conf.tab;
+              firstAllowed = tab;
           }
       });
-      if(!hasPermission(`tab_reports_${currentTab}`) && firstAllowed){
+      if(!isTabAllowed(currentTab) && firstAllowed){
           currentTab = firstAllowed;
       }
       if(!hasPermission("action_export_excel")){
@@ -2264,23 +2259,34 @@ async function logout(){
   initializeColorMode();
   let currentTab = "sales";
 let toastTimer = null;
-initUser().then(u => { if(u) configureReportsPermissions(); });
+initUser().then(u => {
+    if(!u) return;
+    configureReportsPermissions();
+    switchTab(currentTab);
+});
 
 function switchTab(tab){
-    const required = {
-        sales: "tab_reports_sales",
-        transactions: "tab_reports_transactions",
-        inventory: "tab_reports_inventory",
-        pl: "tab_reports_pl",
-    };
-    if(required[tab] && !hasPermission(required[tab])) return;
+    ensureTabMetadata();
+    if(!isTabAllowed(tab)){
+        const fallback = REPORT_TAB_ORDER.find(isTabAllowed);
+        if(!fallback){
+            showToast("No report tabs available for this account.");
+            return;
+        }
+        tab = fallback;
+    }
     currentTab = tab;
-    const tabs = ["sales","transactions","b2b","inventory","farm","spoilage","production","pl"];
-    document.querySelectorAll(".tab").forEach((btn,i) => btn.classList.toggle("active", tabs[i]===tab));
+    document.querySelectorAll(".tab").forEach(btn => btn.classList.toggle("active", btn.dataset.tab===tab));
     document.querySelectorAll(".section").forEach(s => s.classList.remove("active"));
-    document.getElementById("section-"+tab).classList.add("active");
+    const section = document.getElementById("section-"+tab);
+    if(!section) return;
+    section.classList.add("active");
     const loaders = {sales:loadSales, transactions:loadTransactions, b2b:loadB2B, inventory:loadInventory, farm:loadFarm, spoilage:loadSpoilage, production:loadProduction, pl:loadPL};
-    loaders[tab]();
+    if(loaders[tab]){
+        loaders[tab]();
+    } else {
+        setSectionStatus(tab, "error", "This report tab is not wired correctly.");
+    }
 }
 
 function today(){ return new Date().toISOString().split("T")[0]; }
@@ -2293,6 +2299,110 @@ function setPrintDates(id, from, to){ let el=document.getElementById(id); if(el)
 function showToast(msg){
     let t=document.getElementById("toast"); t.innerText=msg; t.classList.add("show");
     clearTimeout(toastTimer); toastTimer=setTimeout(()=>t.classList.remove("show"),3000);
+}
+
+const REPORT_TAB_ORDER = ["sales","transactions","b2b","inventory","farm","spoilage","production","pl"];
+const REPORT_TAB_PERMISSIONS = {
+    sales: "tab_reports_sales",
+    transactions: "tab_reports_transactions",
+    b2b: null,
+    inventory: "tab_reports_inventory",
+    farm: null,
+    spoilage: null,
+    production: null,
+    pl: "tab_reports_pl",
+};
+
+function ensureTabMetadata(){
+    document.querySelectorAll(".tabs .tab").forEach((btn, index) => {
+        if(!btn.dataset.tab && REPORT_TAB_ORDER[index]){
+            btn.dataset.tab = REPORT_TAB_ORDER[index];
+        }
+    });
+}
+
+function getTabPermission(tab){
+    return REPORT_TAB_PERMISSIONS[tab] || null;
+}
+
+function isTabAllowed(tab){
+    const permission = getTabPermission(tab);
+    return !permission || hasPermission(permission);
+}
+
+function getSectionElement(tab){
+    return document.getElementById(`section-${tab}`);
+}
+
+function ensureSectionStatus(tab){
+    const section = getSectionElement(tab);
+    if(!section) return null;
+    let status = section.querySelector(".report-status");
+    if(!status){
+        status = document.createElement("div");
+        status.className = "report-status";
+        status.style.cssText = "display:none;margin:0 0 14px;padding:12px 14px;border-radius:10px;border:1px solid var(--border2);font-size:13px;line-height:1.5;";
+        const firstChild = section.firstElementChild;
+        if(firstChild && firstChild.classList.contains("print-header")){
+            firstChild.insertAdjacentElement("afterend", status);
+        } else {
+            section.prepend(status);
+        }
+    }
+    return status;
+}
+
+function setSectionStatus(tab, kind, message){
+    const status = ensureSectionStatus(tab);
+    if(!status) return;
+    if(!message){
+        status.style.display = "none";
+        status.textContent = "";
+        return;
+    }
+    const palettes = {
+        info: "background:rgba(77,159,255,.08);border-color:rgba(77,159,255,.25);color:var(--blue);",
+        error: "background:rgba(255,77,109,.08);border-color:rgba(255,77,109,.25);color:var(--danger);",
+        empty: "background:rgba(255,181,71,.08);border-color:rgba(255,181,71,.25);color:var(--warn);",
+    };
+    status.style.cssText = `display:block;margin:0 0 14px;padding:12px 14px;border-radius:10px;border:1px solid var(--border2);font-size:13px;line-height:1.5;${palettes[kind] || palettes.info}`;
+    status.textContent = message;
+}
+
+async function fetchReportJson(url){
+    const response = await fetch(url, { credentials: "same-origin" });
+    const contentType = response.headers.get("content-type") || "";
+    let payload = null;
+    if(contentType.includes("application/json")){
+        payload = await response.json().catch(() => null);
+    } else {
+        const text = await response.text().catch(() => "");
+        if(!response.ok){
+            throw new Error(text || `Request failed (${response.status})`);
+        }
+        throw new Error("Unexpected non-JSON response from reports endpoint.");
+    }
+    if(!response.ok){
+        const detail = payload && (payload.detail || payload.message || payload.error);
+        throw new Error(detail || `Request failed (${response.status})`);
+    }
+    return payload;
+}
+
+async function runReportLoader(tab, loader){
+    if(!isTabAllowed(tab)){
+        setSectionStatus(tab, "error", "You do not have permission to view this report.");
+        return;
+    }
+    setSectionStatus(tab, "info", "Loading report...");
+    try{
+        await loader();
+        setSectionStatus(tab, "", "");
+    } catch(error){
+        console.error(`Report load failed for ${tab}:`, error);
+        setSectionStatus(tab, "error", error && error.message ? error.message : "Could not load this report.");
+        showToast(`Could not load ${tab} report`);
+    }
 }
 
 function getDownloadFilename(response, fallback){
@@ -2357,7 +2467,7 @@ async function loadTransactions(){
     let r      = getRange("tx-from","tx-to");
     let source = document.getElementById("tx-source").value;
     let url    = `/reports/api/transactions?date_from=${r.from}&date_to=${r.to}${source?"&source="+source:""}`;
-    let data   = await (await fetch(url)).json();
+    let data   = await fetchReportJson(url);
     const statsRow = document.querySelector("#section-transactions .stats-row");
     if (statsRow) {
         statsRow.innerHTML = `
@@ -2467,7 +2577,7 @@ async function loadTransactions(){
 /* ── SALES ── */
 async function loadSales(){
     let r = getRange("sales-from","sales-to");
-    let data = await (await fetch(`/reports/api/sales?date_from=${r.from}&date_to=${r.to}`)).json();
+    let data = await fetchReportJson(`/reports/api/sales?date_from=${r.from}&date_to=${r.to}`);
     const statsRow = document.querySelector("#section-sales .stats-row");
     if (statsRow) {
         statsRow.innerHTML = `
@@ -2702,7 +2812,7 @@ async function loadSales(){
 /* ── B2B ── */
 async function loadB2B(){
     let r = getRange("b2b-from","b2b-to");
-    let data = await (await fetch(`/reports/api/b2b-statement?date_from=${r.from}&date_to=${r.to}`)).json();
+    let data = await fetchReportJson(`/reports/api/b2b-statement?date_from=${r.from}&date_to=${r.to}`);
     document.getElementById("b-clients").innerText     = data.length;
     document.getElementById("b-invoiced").innerText    = data.reduce((s,c)=>s+c.total_invoiced,0).toFixed(2);
     document.getElementById("b-outstanding").innerText = data.reduce((s,c)=>s+c.outstanding,0).toFixed(2);
@@ -2728,7 +2838,7 @@ async function loadInventory(){
     const url = mode === "movement"
         ? `/reports/api/inventory?mode=movement&date_from=${from}&date_to=${to}`
         : "/reports/api/inventory?mode=snapshot";
-    let data = await (await fetch(url)).json();
+    let data = await fetchReportJson(url);
     const filterBar = document.querySelector("#section-inventory .filter-bar");
     if (filterBar && !document.getElementById("inv-mode")) {
         filterBar.innerHTML = `
@@ -2793,7 +2903,7 @@ async function loadInventory(){
 /* ── FARM ── */
 async function loadFarm(){
     let r = getRange("farm-from","farm-to");
-    let data = await (await fetch(`/reports/api/farm-intake?date_from=${r.from}&date_to=${r.to}`)).json();
+    let data = await fetchReportJson(`/reports/api/farm-intake?date_from=${r.from}&date_to=${r.to}`);
     setPrintDates("ph-farm-dates", r.from, r.to);
     const summaryRows = data.summary.length
         ? data.summary.map(row=>`<tr>
@@ -2877,7 +2987,7 @@ async function loadFarm(){
 /* ── SPOILAGE ── */
 async function loadSpoilage(){
     let r = getRange("spl-from","spl-to");
-    let data = await (await fetch(`/reports/api/spoilage?date_from=${r.from}&date_to=${r.to}`)).json();
+    let data = await fetchReportJson(`/reports/api/spoilage?date_from=${r.from}&date_to=${r.to}`);
     document.getElementById("spl-count").innerText = data.total_count;
     document.getElementById("spl-qty").innerText   = data.total_qty.toFixed(2);
     setPrintDates("ph-spl-dates", r.from, r.to);
@@ -2914,7 +3024,7 @@ async function loadSpoilage(){
 /* ── PRODUCTION ── */
 async function loadProduction(){
     let r = getRange("prod-from","prod-to");
-    let data = await (await fetch(`/reports/api/production?date_from=${r.from}&date_to=${r.to}`)).json();
+    let data = await fetchReportJson(`/reports/api/production?date_from=${r.from}&date_to=${r.to}`);
     document.getElementById("prod-proc").innerText = data.total_processing;
     document.getElementById("prod-pkg").innerText  = data.total_packaging;
     document.getElementById("prod-loss").innerText = data.avg_loss_pct.toFixed(1)+"%";
@@ -2937,7 +3047,7 @@ async function loadProduction(){
 /* ── P&L ── */
 async function loadPL(){
     let r = getRange("pl-from","pl-to");
-    let data = await (await fetch(`/reports/api/pl?date_from=${r.from}&date_to=${r.to}`)).json();
+    let data = await fetchReportJson(`/reports/api/pl?date_from=${r.from}&date_to=${r.to}`);
     setPrintDates("ph-pl-dates", data.date_from, data.date_to);
     let isProfit = data.net_profit >= 0;
 
@@ -3008,6 +3118,26 @@ async function loadPL(){
         </div>`;
 }
 
+const __rawReportLoaders = {
+    sales: loadSales,
+    transactions: loadTransactions,
+    b2b: loadB2B,
+    inventory: loadInventory,
+    farm: loadFarm,
+    spoilage: loadSpoilage,
+    production: loadProduction,
+    pl: loadPL,
+};
+
+loadSales = () => runReportLoader("sales", __rawReportLoaders.sales);
+loadTransactions = () => runReportLoader("transactions", __rawReportLoaders.transactions);
+loadB2B = () => runReportLoader("b2b", __rawReportLoaders.b2b);
+loadInventory = () => runReportLoader("inventory", __rawReportLoaders.inventory);
+loadFarm = () => runReportLoader("farm", __rawReportLoaders.farm);
+loadSpoilage = () => runReportLoader("spoilage", __rawReportLoaders.spoilage);
+loadProduction = () => runReportLoader("production", __rawReportLoaders.production);
+loadPL = () => runReportLoader("pl", __rawReportLoaders.pl);
+
 function togglePLDetail(id){
     let el   = document.getElementById(id);
     let icon = document.getElementById(id+"-icon");
@@ -3035,7 +3165,7 @@ function togglePLDetail(id){
     if(invTo) invTo.value = t;
 })();
 
-loadSales();
+ensureTabMetadata();
 </script>
 </body>
 </html>"""
