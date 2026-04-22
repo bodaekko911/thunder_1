@@ -576,7 +576,7 @@ function render(d){{
             <td><span class="badge ${{statusBadge}}">${{esc(o.status)}}</span></td>
             <td style="text-align:right" class="${{totalCls}}">${{totalSign}}${{fmt(Math.abs(o.total))}}</td>
             <td style="text-align:center">
-                <a href="${{isRefund ? `/refunds/print/${{o.id}}` : `/pos/print/${{o.id}}`}}"
+                <a href="${{isRefund ? `/refunds/print/${{o.id}}` : `/invoice/${{o.id}}`}}"
                    target="_blank"
                    style="text-decoration:none;font-size:16px"
                    title="Print"
@@ -1236,7 +1236,7 @@ async function openHistory(id, name, invCount, totalSpent){
             : `/invoice/${i.id}`;
         const printHref = isRefund
             ? `/refunds/print/${i.id}`
-            : `/pos/print/${i.id}`;
+            : `/invoice/${i.id}`;
         return `
         <div class="inv-card" style="${cardStyle}; cursor:pointer" onclick="window.open('${href}', '_blank')">
             <div>
