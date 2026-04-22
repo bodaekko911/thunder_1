@@ -30,39 +30,183 @@ router = APIRouter(
 
 
 # ── EXCEL HELPER ───────────────────────────────────────
-def to_xlsx(headers, rows, sheet_name="Report"):
+def _excel_dependencies():
     try:
         import openpyxl
         from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
         from openpyxl.utils import get_column_letter
-        wb = openpyxl.Workbook()
-        ws = wb.active
-        ws.title = sheet_name
-        hfill  = PatternFill("solid", fgColor="2a7a2a")
-        hfont  = Font(bold=True, color="FFFFFF", size=11)
-        thin   = Side(style="thin", color="DDDDDD")
-        border = Border(left=thin, right=thin, top=thin, bottom=thin)
-        for col, h in enumerate(headers, 1):
-            c = ws.cell(row=1, column=col, value=h)
-            c.fill = hfill; c.font = hfont
-            c.alignment = Alignment(horizontal="center", vertical="center")
-            c.border = border
-        for ri, row in enumerate(rows, 2):
-            for ci, val in enumerate(row, 1):
-                c = ws.cell(row=ri, column=ci, value=val)
-                c.border = border
-                c.alignment = Alignment(vertical="center")
-                if ri % 2 == 0:
-                    c.fill = PatternFill("solid", fgColor="F5FAF5")
-        for col in ws.columns:
-            mx = max((len(str(c.value or "")) for c in col), default=10)
-            ws.column_dimensions[col[0].column_letter].width = min(mx + 4, 40)
-        ws.row_dimensions[1].height = 20
-        buf = io.BytesIO()
-        wb.save(buf); buf.seek(0)
-        return buf
+        return openpyxl, Font, PatternFill, Alignment, Border, Side, get_column_letter
     except ImportError:
         raise Exception("Run: pip install openpyxl --break-system-packages")
+
+
+def _coerce_excel_value(value, fmt):
+    if value in (None, ""):
+        return value
+    if fmt == "date" and isinstance(value, str):
+        try:
+            return datetime.fromisoformat(value[:10]).date()
+        except ValueError:
+            return value
+    if fmt == "datetime" and isinstance(value, str):
+        normalized = value.replace("T", " ")
+        for parser in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"):
+            try:
+                return datetime.strptime(normalized, parser)
+            except ValueError:
+                continue
+    return value
+
+
+def _apply_excel_number_format(cell, fmt):
+    if fmt == "money":
+        cell.number_format = '#,##0.00'
+    elif fmt == "qty":
+        cell.number_format = '#,##0.00'
+    elif fmt == "int":
+        cell.number_format = '#,##0'
+    elif fmt == "percent":
+        cell.number_format = '0.00%'
+    elif fmt == "percent_value":
+        cell.number_format = '0.00"%"'
+    elif fmt == "date":
+        cell.number_format = 'yyyy-mm-dd'
+    elif fmt == "datetime":
+        cell.number_format = 'yyyy-mm-dd hh:mm'
+
+
+def _autosize_report_sheet(ws, get_column_letter, min_width=10, max_width=42):
+    for col_idx in range(1, ws.max_column + 1):
+        values = []
+        for row_idx in range(1, ws.max_row + 1):
+            value = ws.cell(row=row_idx, column=col_idx).value
+            if value is not None:
+                values.append(str(value))
+        max_len = max((len(v) for v in values), default=min_width)
+        ws.column_dimensions[get_column_letter(col_idx)].width = max(min(max_len + 3, max_width), min_width)
+
+
+def add_report_sheet(
+    wb,
+    *,
+    sheet_name,
+    report_title,
+    headers,
+    rows,
+    metadata=None,
+    column_formats=None,
+    wrap_columns=None,
+    total_row_indices=None,
+    tab_color="1F4E78",
+):
+    openpyxl, Font, PatternFill, Alignment, Border, Side, get_column_letter = _excel_dependencies()
+    ws = wb.create_sheet(title=sheet_name)
+    ws.sheet_view.showGridLines = False
+    ws.sheet_view.zoomScale = 90
+    ws.sheet_properties.tabColor = tab_color
+
+    title_fill = PatternFill("solid", fgColor="1F4E78")
+    meta_fill = PatternFill("solid", fgColor="EAF1FB")
+    header_fill = PatternFill("solid", fgColor="2F6F4F")
+    alt_fill = PatternFill("solid", fgColor="F7FAFC")
+    total_fill = PatternFill("solid", fgColor="E3F2E8")
+    thin = Side(style="thin", color="D9E2EC")
+    border = Border(left=thin, right=thin, top=thin, bottom=thin)
+
+    current_row = 1
+    ws.merge_cells(start_row=current_row, start_column=1, end_row=current_row, end_column=max(len(headers), 2))
+    title_cell = ws.cell(row=current_row, column=1, value=report_title)
+    title_cell.fill = title_fill
+    title_cell.font = Font(bold=True, color="FFFFFF", size=15)
+    title_cell.alignment = Alignment(horizontal="center", vertical="center")
+    title_cell.border = border
+    ws.row_dimensions[current_row].height = 24
+    current_row += 1
+
+    generated_cell = ws.cell(row=current_row, column=1, value=f"Generated on {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+    generated_cell.font = Font(italic=True, color="5B6B7A", size=10)
+    current_row += 1
+
+    for label, value in (metadata or []):
+        label_cell = ws.cell(row=current_row, column=1, value=label)
+        value_cell = ws.cell(row=current_row, column=2, value=value)
+        label_cell.font = Font(bold=True, color="334E68")
+        label_cell.fill = meta_fill
+        value_cell.fill = meta_fill
+        label_cell.border = border
+        value_cell.border = border
+        current_row += 1
+
+    current_row += 1
+    header_row = current_row
+    for col_no, header in enumerate(headers, 1):
+        cell = ws.cell(row=header_row, column=col_no, value=header)
+        cell.fill = header_fill
+        cell.font = Font(bold=True, color="FFFFFF", size=11)
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+        cell.border = border
+    ws.row_dimensions[header_row].height = 20
+
+    column_formats = column_formats or {}
+    wrap_columns = set(wrap_columns or [])
+    total_row_indices = set(total_row_indices or [])
+    for row_idx, row in enumerate(rows, start=1):
+        excel_row = header_row + row_idx
+        is_total_row = row_idx in total_row_indices
+        for col_idx, value in enumerate(row, 1):
+            header = headers[col_idx - 1]
+            fmt = column_formats.get(header)
+            cell = ws.cell(row=excel_row, column=col_idx, value=_coerce_excel_value(value, fmt))
+            cell.border = border
+            if is_total_row:
+                cell.fill = total_fill
+                cell.font = Font(bold=True)
+            elif row_idx % 2 == 1:
+                cell.fill = alt_fill
+            horizontal = "left"
+            if fmt in {"money", "qty", "int", "percent", "percent_value"}:
+                horizontal = "right"
+            elif fmt in {"date", "datetime"}:
+                horizontal = "center"
+            cell.alignment = Alignment(horizontal=horizontal, vertical="top", wrap_text=(header in wrap_columns))
+            _apply_excel_number_format(cell, fmt)
+
+    ws.freeze_panes = f"A{header_row + 1}"
+    ws.auto_filter.ref = f"A{header_row}:{get_column_letter(len(headers))}{header_row}"
+    _autosize_report_sheet(ws, get_column_letter)
+    return ws
+
+
+def build_report_workbook(sheet_specs):
+    openpyxl, *_ = _excel_dependencies()
+    wb = openpyxl.Workbook()
+    wb.remove(wb.active)
+    for spec in sheet_specs:
+        add_report_sheet(wb, **spec)
+    return wb
+
+
+def workbook_to_buffer(wb):
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    return buf
+
+
+def to_xlsx(headers, rows, sheet_name="Report", report_title=None, metadata=None, column_formats=None, wrap_columns=None, total_row_indices=None):
+    wb = build_report_workbook([
+        {
+            "sheet_name": sheet_name,
+            "report_title": report_title or sheet_name,
+            "headers": headers,
+            "rows": rows,
+            "metadata": metadata or [],
+            "column_formats": column_formats or {},
+            "wrap_columns": wrap_columns or set(),
+            "total_row_indices": total_row_indices or set(),
+        }
+    ])
+    return workbook_to_buffer(wb)
 
 
 def parse_dates(date_from, date_to):
@@ -433,222 +577,104 @@ async def sales_report(date_from: Optional[str] = None, date_to: Optional[str] =
 async def export_sales(date_from: str = None, date_to: str = None, db: AsyncSession = Depends(get_async_session)):
     d_from, d_to = parse_dates(date_from, date_to)
     data = await _build_sales_report(db, d_from=d_from, d_to=d_to, include_all=True)
-    try:
-        import openpyxl
+    wb = build_report_workbook([
+        {
+            "sheet_name": "Summary",
+            "report_title": "Sales Report Summary",
+            "headers": ["Metric", "Value"],
+            "rows": [
+                ["Gross Sales", data["gross_sales"]],
+                ["Refunds", data["refunds"]],
+                ["Net Sales", data["net_sales"]],
+                ["Cash Collected", data["cash_collected"]],
+                ["Outstanding", data["outstanding"]],
+                ["POS Gross Sales", data["channels"]["pos"]["gross_sales"]],
+                ["POS Cash Collected", data["channels"]["pos"]["cash_collected"]],
+                ["POS Outstanding", data["channels"]["pos"]["outstanding"]],
+                ["B2B Gross Sales", data["channels"]["b2b"]["gross_sales"]],
+                ["B2B Cash Collected", data["channels"]["b2b"]["cash_collected"]],
+                ["B2B Outstanding", data["channels"]["b2b"]["outstanding"]],
+                ["Retail Refunds", data["refund_breakdown"]["retail"]],
+                ["B2B Refunds", data["refund_breakdown"]["b2b"]],
+            ],
+            "metadata": [
+                ("Date Range", f"{data['date_from']} to {data['date_to']}"),
+                ("POS Invoices", data["pos_count"]),
+                ("B2B Invoices", data["b2b_count"]),
+                ("Refund Records", data["refund_count"]),
+            ],
+            "column_formats": {"Value": "money"},
+            "total_row_indices": {1, 2, 3, 4, 5},
+            "tab_color": "1F4E78",
+        },
+        {
+            "sheet_name": "Daily",
+            "report_title": "Sales Daily Breakdown",
+            "headers": ["Date", "Gross Sales", "Refunds", "Net Sales", "Cash Collected"],
+            "rows": [[row["date"], row["gross_sales"], row["refunds"], row["net_sales"], row["cash_collected"]] for row in data["daily"]],
+            "metadata": [("Date Range", f"{data['date_from']} to {data['date_to']}")],
+            "column_formats": {"Date": "date", "Gross Sales": "money", "Refunds": "money", "Net Sales": "money", "Cash Collected": "money"},
+            "tab_color": "2F6F4F",
+        },
+        {
+            "sheet_name": "POS Invoices",
+            "report_title": "POS Invoice Detail",
+            "headers": ["Invoice #", "Date / Time", "Customer", "User", "Payment", "Status", "Invoice Total", "Cash Collected", "Outstanding"],
+            "rows": [[row["invoice_number"], row["datetime"], row["customer"], row["user_name"], row["payment"], row["status"], row["total"], row["cash_collected"], row["outstanding"]] for row in data["pos_records"]],
+            "metadata": [("Date Range", f"{data['date_from']} to {data['date_to']}"), ("Records", len(data["pos_records"]))],
+            "column_formats": {"Date / Time": "datetime", "Invoice Total": "money", "Cash Collected": "money", "Outstanding": "money"},
+            "tab_color": "4F81BD",
+        },
+        {
+            "sheet_name": "B2B Invoices",
+            "report_title": "B2B Invoice Detail",
+            "headers": ["Invoice #", "Client", "Date / Time", "User", "Type", "Status", "Total Invoiced", "Amount Paid", "Outstanding"],
+            "rows": [[row["invoice_number"], row["client"], row["datetime"], row["user_name"], row["invoice_type"], row["status"], row["total"], row["amount_paid"], row["balance_due"]] for row in data["b2b_records"]],
+            "metadata": [("Date Range", f"{data['date_from']} to {data['date_to']}"), ("Records", len(data["b2b_records"]))],
+            "column_formats": {"Date / Time": "datetime", "Total Invoiced": "money", "Amount Paid": "money", "Outstanding": "money"},
+            "tab_color": "C55A11",
+        },
+        {
+            "sheet_name": "Refunds",
+            "report_title": "Refund Detail",
+            "headers": ["Refund #", "Source", "Counterparty", "Date / Time", "Processed By", "Method", "Reason", "Amount"],
+            "rows": [[row["refund_number"], row["source"], row["counterparty"], row["datetime"], row["processed_by"], row["refund_method"], row["reason"], row["total"]] for row in data["refund_records"]],
+            "metadata": [("Date Range", f"{data['date_from']} to {data['date_to']}"), ("Records", len(data["refund_records"]))],
+            "column_formats": {"Date / Time": "datetime", "Amount": "money"},
+            "wrap_columns": {"Reason"},
+            "tab_color": "C00000",
+        },
+        {
+            "sheet_name": "Top Products",
+            "report_title": "Top Products",
+            "headers": ["Product", "Qty Sold", "Gross Sales"],
+            "rows": [[row["name"], row["qty"], row["revenue"]] for row in data["top_products"]],
+            "metadata": [("Date Range", f"{data['date_from']} to {data['date_to']}")],
+            "column_formats": {"Qty Sold": "qty", "Gross Sales": "money"},
+            "tab_color": "70AD47",
+        },
+    ])
+    buf = workbook_to_buffer(wb)
+    return StreamingResponse(
+        buf,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f"attachment; filename=sales_report_{date.today()}.xlsx"},
+    )
 
-        wb = openpyxl.Workbook()
-        ws1 = wb.active
-        ws1.title = "Summary"
-        ws1.append(["Metric", "Value"])
-        for row in [
-            ["Period", f"{data['date_from']} -> {data['date_to']}"],
-            ["Gross Sales", data["gross_sales"]],
-            ["Refunds", data["refunds"]],
-            ["Net Sales", data["net_sales"]],
-            ["Cash Collected", data["cash_collected"]],
-            ["Outstanding", data["outstanding"]],
-            ["POS Gross Sales", data["channels"]["pos"]["gross_sales"]],
-            ["POS Cash Collected", data["channels"]["pos"]["cash_collected"]],
-            ["POS Outstanding", data["channels"]["pos"]["outstanding"]],
-            ["B2B Gross Sales", data["channels"]["b2b"]["gross_sales"]],
-            ["B2B Cash Collected", data["channels"]["b2b"]["cash_collected"]],
-            ["B2B Outstanding", data["channels"]["b2b"]["outstanding"]],
-        ]:
-            ws1.append(row)
-
-        ws2 = wb.create_sheet("Daily")
-        ws2.append(["Date", "Gross Sales", "Refunds", "Net Sales", "Cash Collected"])
-        for row in data["daily"]:
-            ws2.append([row["date"], row["gross_sales"], row["refunds"], row["net_sales"], row["cash_collected"]])
-
-        ws3 = wb.create_sheet("POS Invoices")
-        ws3.append(["Invoice #", "Date / Time", "Customer", "User", "Payment", "Status", "Invoice Total", "Cash Collected", "Outstanding"])
-        for row in data["pos_records"]:
-            ws3.append([row["invoice_number"], row["datetime"], row["customer"], row["user_name"], row["payment"], row["status"], row["total"], row["cash_collected"], row["outstanding"]])
-
-        ws4 = wb.create_sheet("B2B Invoices")
-        ws4.append(["Invoice #", "Client", "Date / Time", "User", "Type", "Status", "Total Invoiced", "Amount Paid", "Outstanding"])
-        for row in data["b2b_records"]:
-            ws4.append([row["invoice_number"], row["client"], row["datetime"], row["user_name"], row["invoice_type"], row["status"], row["total"], row["amount_paid"], row["balance_due"]])
-
-        ws5 = wb.create_sheet("Refunds")
-        ws5.append(["Refund #", "Source", "Counterparty", "Date / Time", "Processed By", "Method", "Reason", "Amount"])
-        for row in data["refund_records"]:
-            ws5.append([row["refund_number"], row["source"], row["counterparty"], row["datetime"], row["processed_by"], row["refund_method"], row["reason"], row["total"]])
-
-        ws6 = wb.create_sheet("Top Products")
-        ws6.append(["Product", "Qty Sold", "Gross Sales"])
-        for row in data["top_products"]:
-            ws6.append([row["name"], row["qty"], row["revenue"]])
-
-        for ws in wb.worksheets:
-            for column in ws.columns:
-                width = max((len(str(cell.value or "")) for cell in column), default=10)
-                ws.column_dimensions[column[0].column_letter].width = min(width + 3, 40)
-
-        buf = io.BytesIO()
-        wb.save(buf)
-        buf.seek(0)
-        return StreamingResponse(
-            buf,
-            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            headers={"Content-Disposition": f"attachment; filename=sales_report_{date.today()}.xlsx"},
-        )
-    except ImportError:
-        raise Exception("Run: pip install openpyxl --break-system-packages")
-    try:
-        import openpyxl
-        from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
-        from openpyxl.utils import get_column_letter
-
-        wb = openpyxl.Workbook()
-
-        green_fill  = PatternFill("solid", fgColor="2a7a2a")
-        blue_fill   = PatternFill("solid", fgColor="1a4a8a")
-        orange_fill = PatternFill("solid", fgColor="8a4a00")
-        white_font  = Font(bold=True, color="FFFFFF", size=11)
-        thin  = Side(style="thin", color="CCCCCC")
-        bord  = Border(left=thin, right=thin, top=thin, bottom=thin)
-        alt   = PatternFill("solid", fgColor="F5FAF5")
-        total_fill = PatternFill("solid", fgColor="E8F5E8")
-        total_font = Font(bold=True, size=11)
-
-        def style_header(ws, headers, fill, font=white_font):
-            for ci, h in enumerate(headers, 1):
-                c = ws.cell(row=1, column=ci, value=h)
-                c.fill = fill; c.font = font
-                c.alignment = Alignment(horizontal="center", vertical="center")
-                c.border = bord
-            ws.row_dimensions[1].height = 22
-
-        def auto_width(ws):
-            for ci, col in enumerate(ws.columns, 1):
-                mx = max((len(str(c.value or "")) for c in col), default=10)
-                ws.column_dimensions[get_column_letter(ci)].width = min(mx + 4, 50)
-
-        def add_row(ws, ri, values, fill=None, font=None, bold=False):
-            for ci, val in enumerate(values, 1):
-                c = ws.cell(row=ri, column=ci, value=val)
-                c.border = bord
-                c.alignment = Alignment(vertical="center", wrap_text=True)
-                if fill: c.fill = fill
-                if font: c.font = font
-                elif bold: c.font = Font(bold=True)
-                elif ri % 2 == 0: c.fill = alt
-
-        # ── Sheet 1: Summary ──
-        ws1 = wb.active
-        ws1.title = "Summary"
-        style_header(ws1, ["Period","Grand Total (EGP)","POS Revenue","B2B Revenue","POS Orders","B2B Invoices"], green_fill)
-        add_row(ws1, 2, [
-            f"{data['date_from']} → {data['date_to']}",
-            data["grand_total"], data["pos_total"], data["b2b_total"],
-            data["pos_count"], data["b2b_count"]
-        ], fill=total_fill, font=total_font)
-        ws1.append([])
-        style_header_row = ws1.max_row + 1
-        for ci, h in enumerate(["Date","POS (EGP)","B2B (EGP)","Total (EGP)"], 1):
-            c = ws1.cell(row=style_header_row, column=ci, value=h)
-            c.fill = green_fill; c.font = white_font; c.border = bord
-            c.alignment = Alignment(horizontal="center")
-        for ri, d in enumerate(data["daily"], style_header_row + 1):
-            add_row(ws1, ri, [d["date"], d["pos"], d["b2b"], d["total"]])
-        total_ri = ws1.max_row + 1
-        add_row(ws1, total_ri, ["TOTAL", data["pos_total"], data["b2b_total"], data["grand_total"]], fill=total_fill, bold=True)
-        auto_width(ws1)
-
-        # ── Sheet 2: POS Invoices ──
-        ws2 = wb.create_sheet("POS Invoices")
-        style_header(ws2, ["Invoice #","Date / Time","User","Payment","Product","Qty","Unit Price (EGP)","Line Total (EGP)","Invoice Total (EGP)"], blue_fill)
-        ri = 2
-        for inv in data["pos_records"]:
-            for i, item in enumerate(inv["items"]):
-                add_row(ws2, ri, [
-                    inv["invoice_number"] if i == 0 else "",
-                    inv["datetime"] if i == 0 else "",
-                    inv["user_name"] if i == 0 else "",
-                    inv["payment"] if i == 0 else "",
-                    item["name"], item["qty"], item["unit_price"], item["total"],
-                    inv["total"] if i == 0 else ""
-                ])
-                ri += 1
-            if not inv["items"]:
-                add_row(ws2, ri, [inv["invoice_number"], inv["datetime"], inv["user_name"], inv["payment"], "—", "", "", "", inv["total"]])
-                ri += 1
-        auto_width(ws2)
-
-        # ── Sheet 3: B2B Invoices ──
-        ws3 = wb.create_sheet("B2B Invoices")
-        style_header(ws3, ["Invoice #","Client","Date / Time","User","Type","Product","Qty","Unit Price (EGP)","Line Total (EGP)","Invoice Total","Amount Paid","Balance Due"], orange_fill)
-        ri = 2
-        for inv in data["b2b_records"]:
-            for i, item in enumerate(inv["items"]):
-                add_row(ws3, ri, [
-                    inv["invoice_number"] if i == 0 else "",
-                    inv["client"] if i == 0 else "",
-                    inv["datetime"] if i == 0 else "",
-                    inv["user_name"] if i == 0 else "",
-                    inv["invoice_type"] if i == 0 else "",
-                    item["name"], item["qty"], item["unit_price"], item["total"],
-                    inv["total"] if i == 0 else "",
-                    inv["amount_paid"] if i == 0 else "",
-                    inv["balance_due"] if i == 0 else ""
-                ])
-                ri += 1
-            if not inv["items"]:
-                add_row(ws3, ri, [inv["invoice_number"], inv["client"], inv["datetime"], inv["user_name"], inv["invoice_type"], "—", "", "", "", inv["total"], inv["amount_paid"], inv["balance_due"]])
-                ri += 1
-        auto_width(ws3)
-
-        # ── Sheet 4: Top Products ──
-        ws4 = wb.create_sheet("Top Products")
-        style_header(ws4, ["Product","Qty Sold","Revenue (EGP)"], green_fill)
-        for ri, p in enumerate(data["top_products"], 2):
-            add_row(ws4, ri, [p["name"], p["qty"], p["revenue"]])
-        auto_width(ws4)
-
-        buf = io.BytesIO()
-        wb.save(buf); buf.seek(0)
-        return StreamingResponse(buf, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            headers={"Content-Disposition": f"attachment; filename=sales_report_{date.today()}.xlsx"})
-    except ImportError:
-        raise Exception("Run: pip install openpyxl --break-system-packages")
-
-
-# ── B2B STATEMENT ──────────────────────────────────────
-@router.get("/api/b2b-statement")
-async def b2b_statement(date_from: Optional[str] = None, date_to: Optional[str] = None, skip: int = 0, limit: int = Query(default=100, le=500), db: AsyncSession = Depends(get_async_session)):
-    d_from, d_to = parse_dates(date_from, date_to)
-    if (d_to - d_from).days > 366:
-        raise HTTPException(status_code=400, detail="Date range cannot exceed 1 year")
-    skip, limit = _resolve_pagination(skip, limit)
-    res = await db.execute(select(B2BClient).where(B2BClient.is_active == True).order_by(B2BClient.name))
-    clients = res.scalars().all()
-    result = []
-    for c in clients:
-        agg_res = await db.execute(
-            select(
-                func.count(B2BInvoice.id),
-                func.sum(B2BInvoice.total),
-                func.sum(B2BInvoice.amount_paid),
-            ).where(B2BInvoice.client_id == c.id, B2BInvoice.created_at >= d_from, B2BInvoice.created_at <= d_to)
-        )
-        row = agg_res.one()
-        invoice_count, total_invoiced, total_paid = row
-        if not invoice_count: continue
-        total_invoiced = float(total_invoiced or 0)
-        total_paid     = float(total_paid or 0)
-        result.append({"id":c.id,"name":c.name,"phone":c.phone or "—","payment_terms":c.payment_terms,
-            "total_invoiced":round(total_invoiced,2),"total_paid":round(total_paid,2),
-            "outstanding":round(total_invoiced-total_paid,2),"invoice_count":invoice_count})
-    result = result[skip : skip + limit]
-    return result
 
 @router.get("/export/b2b-statement", dependencies=[Depends(require_permission("action_export_excel"))])
 async def export_b2b(date_from: str = None, date_to: str = None, db: AsyncSession = Depends(get_async_session)):
+    d_from, d_to = parse_dates(date_from, date_to)
     data = await b2b_statement(date_from=date_from, date_to=date_to, skip=0, limit=100000, db=db)
     rows = [[d["name"],d["phone"],d["payment_terms"],d["total_invoiced"],d["total_paid"],d["outstanding"],d["invoice_count"]] for d in data]
-    buf = to_xlsx(["Client","Phone","Payment Terms","Total Invoiced","Total Paid","Outstanding","Invoices"], rows, "B2B Statement")
+    buf = to_xlsx(
+        ["Client","Phone","Payment Terms","Total Invoiced","Total Paid","Outstanding","Invoices"],
+        rows,
+        "B2B Statement",
+        report_title="B2B Statement",
+        metadata=[("Date Range", f"{d_from.strftime('%Y-%m-%d')} to {d_to.strftime('%Y-%m-%d')}"), ("Rows Exported", len(rows))],
+        column_formats={"Total Invoiced": "money", "Total Paid": "money", "Outstanding": "money", "Invoices": "int"},
+    )
     return StreamingResponse(buf, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={"Content-Disposition": f"attachment; filename=b2b_statement_{date.today()}.xlsx"})
 
@@ -817,11 +843,33 @@ async def export_inventory(mode: str = "snapshot", date_from: Optional[str] = No
         d_from, d_to = parse_dates(date_from, date_to)
         data = await _build_inventory_report(db, mode="movement", d_from=d_from, d_to=d_to, include_all=True)
         rows = [[p["sku"], p["name"], p["category"], p["unit"], p["stock_in"], p["stock_out"], p["receipts"], p["sales_usage"], p["spoilage"], p["transfers_in"], p["transfers_out"], p["adjustments_net"], p["net_movement"]] for p in data["products"]]
-        buf = to_xlsx(["SKU","Product","Category","Unit","Stock In","Stock Out","Receipts","Sales/Usage","Spoilage","Transfers In","Transfers Out","Adjustments Net","Net Movement"], rows, "Inventory Movement")
+        buf = to_xlsx(
+            ["SKU","Product","Category","Unit","Stock In","Stock Out","Receipts","Sales/Usage","Spoilage","Transfers In","Transfers Out","Adjustments Net","Net Movement"],
+            rows,
+            "Inventory Movement",
+            report_title="Inventory Movement Report",
+            metadata=[
+                ("Date Range", f"{data['date_from']} to {data['date_to']}"),
+                ("Products", data["total_products"]),
+            ],
+            column_formats={"Stock In": "qty", "Stock Out": "qty", "Receipts": "qty", "Sales/Usage": "qty", "Spoilage": "qty", "Transfers In": "qty", "Transfers Out": "qty", "Adjustments Net": "qty", "Net Movement": "qty"},
+        )
     else:
         data = await _build_inventory_report(db, mode="snapshot", include_all=True)
         rows = [[p["sku"], p["name"], p["category"], p["stock"], p["unit"], p["price"], p["value"], p["threshold"], p["reorder_qty"], p["last_move_at"], "YES" if p["low_stock"] else "", "YES" if p["dead_stock"] else ""] for p in data["products"]]
-        buf = to_xlsx(["SKU","Product","Category","Stock","Unit","Price (EGP)","Stock Value","Threshold","Reorder Qty","Last Move","Low Stock","Dead Stock"], rows, "Inventory Snapshot")
+        buf = to_xlsx(
+            ["SKU","Product","Category","Stock","Unit","Price (EGP)","Stock Value","Threshold","Reorder Qty","Last Move","Low Stock","Dead Stock"],
+            rows,
+            "Inventory Snapshot",
+            report_title="Inventory Snapshot Report",
+            metadata=[
+                ("Products", data["total_products"]),
+                ("Low Stock Items", data["low_count"]),
+                ("Dead Stock Items", data["dead_stock_count"]),
+                ("Total Stock Value", f"{data['total_value']:.2f}"),
+            ],
+            column_formats={"Stock": "qty", "Price (EGP)": "money", "Stock Value": "money", "Threshold": "qty", "Reorder Qty": "qty", "Last Move": "date"},
+        )
     return StreamingResponse(buf, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={"Content-Disposition": f"attachment; filename=inventory_{date.today()}.xlsx"})
 
@@ -955,33 +1003,36 @@ async def farm_intake_report(date_from: Optional[str] = None, date_to: Optional[
 async def export_farm(date_from: str = None, date_to: str = None, db: AsyncSession = Depends(get_async_session)):
     d_from, d_to = parse_dates(date_from, date_to)
     data = await _build_farm_intake_report(db, d_from=d_from, d_to=d_to, include_all=True)
-    try:
-        import openpyxl
-
-        wb = openpyxl.Workbook()
-        ws1 = wb.active
-        ws1.title = "Farm Intake Summary"
-        ws1.append(["Farm", "Deliveries", "Line Items", "Total Qty", "Top Product"])
-        for row in data["summary"]:
-            ws1.append([row["farm"], row["delivery_count"], row["line_count"], row["total_qty"], row["top_product"]])
-
-        ws2 = wb.create_sheet("Farm Intake Detail")
-        ws2.append(["Farm", "Date", "Delivery #", "SKU", "Product", "Qty", "Unit", "Received By", "Performed By", "Notes"])
-        for row in data["detail"]:
-            ws2.append([row["farm"], row["date"], row["delivery_number"], row["sku"], row["product"], row["qty"], row["unit"], row["received_by"], row["user_name"], row["notes"]])
-
-        for ws in wb.worksheets:
-            for column in ws.columns:
-                width = max((len(str(cell.value or "")) for cell in column), default=10)
-                ws.column_dimensions[column[0].column_letter].width = min(width + 3, 40)
-
-        buf = io.BytesIO()
-        wb.save(buf)
-        buf.seek(0)
-        return StreamingResponse(buf, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            headers={"Content-Disposition": f"attachment; filename=farm_intake_{date.today()}.xlsx"})
-    except ImportError:
-        raise Exception("Run: pip install openpyxl --break-system-packages")
+    wb = build_report_workbook([
+        {
+            "sheet_name": "Farm Intake Summary",
+            "report_title": "Farm Intake Summary",
+            "headers": ["Farm", "Deliveries", "Line Items", "Total Qty", "Top Product"],
+            "rows": [[row["farm"], row["delivery_count"], row["line_count"], row["total_qty"], row["top_product"]] for row in data["summary"]],
+            "metadata": [
+                ("Date Range", f"{data['date_from']} to {data['date_to']}"),
+                ("Farms", data["totals"]["farm_count"]),
+                ("Deliveries", data["totals"]["delivery_count"]),
+                ("Line Items", data["totals"]["line_count"]),
+                ("Total Qty", data["totals"]["total_qty"]),
+            ],
+            "column_formats": {"Deliveries": "int", "Line Items": "int", "Total Qty": "qty"},
+            "tab_color": "70AD47",
+        },
+        {
+            "sheet_name": "Farm Intake Detail",
+            "report_title": "Farm Intake Detail",
+            "headers": ["Farm", "Date", "Delivery #", "SKU", "Product", "Qty", "Unit", "Received By", "Performed By", "Notes"],
+            "rows": [[row["farm"], row["date"], row["delivery_number"], row["sku"], row["product"], row["qty"], row["unit"], row["received_by"], row["user_name"], row["notes"]] for row in data["detail"]],
+            "metadata": [("Date Range", f"{data['date_from']} to {data['date_to']}"), ("Rows Exported", len(data["detail"]))],
+            "column_formats": {"Date": "date", "Qty": "qty"},
+            "wrap_columns": {"Notes"},
+            "tab_color": "548235",
+        },
+    ])
+    buf = workbook_to_buffer(wb)
+    return StreamingResponse(buf, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f"attachment; filename=farm_intake_{date.today()}.xlsx"})
 
 
 # ── SPOILAGE ───────────────────────────────────────────
@@ -1013,9 +1064,18 @@ async def spoilage_report(date_from: Optional[str] = None, date_to: Optional[str
 
 @router.get("/export/spoilage", dependencies=[Depends(require_permission("action_export_excel"))])
 async def export_spoilage(date_from: str = None, date_to: str = None, db: AsyncSession = Depends(get_async_session)):
+    d_from, d_to = parse_dates(date_from, date_to)
     data = await spoilage_report(date_from=date_from, date_to=date_to, skip=0, limit=100000, db=db)
     rows = [[r["ref"],r["product"],r["qty"],r["unit"],r["reason"],r["farm"],r["date"],r["user_name"],r["notes"]] for r in data["records"]]
-    buf = to_xlsx(["Ref #","Product","Qty","Unit","Reason","Farm","Date","Performed By","Notes"], rows, "Spoilage")
+    buf = to_xlsx(
+        ["Ref #","Product","Qty","Unit","Reason","Farm","Date","Performed By","Notes"],
+        rows,
+        "Spoilage",
+        report_title="Spoilage Report",
+        metadata=[("Date Range", f"{d_from.strftime('%Y-%m-%d')} to {d_to.strftime('%Y-%m-%d')}"), ("Records", data["total_count"]), ("Total Qty", data["total_qty"])],
+        column_formats={"Qty": "qty", "Date": "date"},
+        wrap_columns={"Notes", "Reason"},
+    )
     return StreamingResponse(buf, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={"Content-Disposition": f"attachment; filename=spoilage_{date.today()}.xlsx"})
 
@@ -1054,9 +1114,24 @@ async def production_report(date_from: Optional[str] = None, date_to: Optional[s
 
 @router.get("/export/production", dependencies=[Depends(require_permission("action_export_excel"))])
 async def export_production(date_from: str = None, date_to: str = None, db: AsyncSession = Depends(get_async_session)):
+    d_from, d_to = parse_dates(date_from, date_to)
     data = await production_report(date_from=date_from, date_to=date_to, skip=0, limit=100000, db=db)
     rows = [[b["batch_number"],b["type"],b["recipe"],b["inputs_str"],b["outputs_str"],b["waste_pct"],b["date"],b["user_name"],b["notes"]] for b in data["batches"]]
-    buf = to_xlsx(["Batch #","Type","Recipe","Inputs","Outputs","Loss %","Date","Performed By","Notes"], rows, "Production")
+    buf = to_xlsx(
+        ["Batch #","Type","Recipe","Inputs","Outputs","Loss %","Date","Performed By","Notes"],
+        rows,
+        "Production",
+        report_title="Production Report",
+        metadata=[
+            ("Date Range", f"{d_from.strftime('%Y-%m-%d')} to {d_to.strftime('%Y-%m-%d')}"),
+            ("Total Batches", data["total_batches"]),
+            ("Processing Batches", data["total_processing"]),
+            ("Packaging Batches", data["total_packaging"]),
+            ("Average Loss %", f"{data['avg_loss_pct']:.2f}%"),
+        ],
+        column_formats={"Loss %": "percent_value", "Date": "date"},
+        wrap_columns={"Inputs", "Outputs", "Notes"},
+    )
     return StreamingResponse(buf, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={"Content-Disposition": f"attachment; filename=production_{date.today()}.xlsx"})
 
@@ -1656,12 +1731,32 @@ async def transactions_report(
 async def export_transactions(date_from: str = None, date_to: str = None, source: str = None, db: AsyncSession = Depends(get_async_session)):
     d_from, d_to = parse_dates(date_from, date_to)
     data = await _build_transactions_report(db, d_from=d_from, d_to=d_to, source=source)
-    headers = ["Date","Reference","Transaction Type","Source","Counterparty Type","Counterparty","Performed By","SKU","Product","Qty","Unit Price","Money Effect","Stock Effect","Direction","Payment Method","Status","Notes"]
-    rows = [[r["date"], r["reference"], r["transaction_type"], r["source"], r["counterparty_type"], r["counterparty_name"], r["user_name"], r["sku"], r["product"], r["qty"], r["unit_price"], r["money_effect"], r["stock_effect"], r["direction"], r["payment_method"], r["status"], r["notes"]] for r in data["rows"]]
-    rows.append(["","","","","","","","","","","Money In",data["money_in"],"","","","",""])
-    rows.append(["","","","","","","","","","","Money Out",data["money_out"],"","","","",""])
-    rows.append(["","","","","","","","","","","Net Money",data["net_money"],"","","","",""])
-    buf = to_xlsx(headers, rows, "Transactions")
+    wb = build_report_workbook([
+        {
+            "sheet_name": "Summary",
+            "report_title": "Transactions Summary",
+            "headers": ["Metric", "Value"],
+            "rows": [
+                ["Money In", data["money_in"]],
+                ["Money Out", data["money_out"]],
+                ["Net Money", data["net_money"]],
+            ],
+            "metadata": [("Date Range", f"{d_from.strftime('%Y-%m-%d')} to {d_to.strftime('%Y-%m-%d')}"), ("Source Filter", source or "All"), ("Rows", data["total_rows"])],
+            "column_formats": {"Value": "money"},
+            "tab_color": "1F4E78",
+        },
+        {
+            "sheet_name": "Transactions",
+            "report_title": "Transaction Detail",
+            "headers": ["Date","Reference","Transaction Type","Source","Counterparty Type","Counterparty","Performed By","SKU","Product","Qty","Unit Price","Money Effect","Stock Effect","Direction","Payment Method","Status","Notes"],
+            "rows": [[r["date"], r["reference"], r["transaction_type"], r["source"], r["counterparty_type"], r["counterparty_name"], r["user_name"], r["sku"], r["product"], r["qty"], r["unit_price"], r["money_effect"], r["stock_effect"], r["direction"], r["payment_method"], r["status"], r["notes"]] for r in data["rows"]],
+            "metadata": [("Date Range", f"{d_from.strftime('%Y-%m-%d')} to {d_to.strftime('%Y-%m-%d')}"), ("Source Filter", source or "All"), ("Rows Exported", data["total_rows"])],
+            "column_formats": {"Date": "datetime", "Qty": "qty", "Unit Price": "money", "Money Effect": "money", "Stock Effect": "qty"},
+            "wrap_columns": {"Notes"},
+            "tab_color": "2F6F4F",
+        },
+    ])
+    buf = workbook_to_buffer(wb)
     return StreamingResponse(buf, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={"Content-Disposition": f"attachment; filename=transactions_{date.today()}.xlsx"})
 
