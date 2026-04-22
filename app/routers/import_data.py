@@ -19,6 +19,7 @@ from app.models.b2b import B2BInvoice as B2BInvoiceModel, B2BInvoiceItem, Consig
 from app.models.supplier import PurchaseItem
 from app.services.sales_import_service import import_sales
 from app.services.b2b_sales_import_service import import_b2b_sales
+from app.services.expense_import_service import import_expenses
 from app.services.farm_intake_import_service import (
     import_farm_intake,
     list_farm_intake_import_batches,
@@ -821,6 +822,76 @@ async def download_farm_intake_template(_=Depends(get_current_user)):
     )
 
 
+@router.post("/api/expenses")
+async def import_expenses_endpoint(
+    file: UploadFile = File(...),
+    dry_run: bool = Form(True),
+    db: AsyncSession = Depends(get_async_session),
+    current_user=Depends(get_current_user),
+):
+    contents = await file.read()
+    return await import_expenses(
+        db=db,
+        workbook_bytes=contents,
+        filename=file.filename or "expenses.xlsx",
+        current_user=current_user,
+        dry_run=dry_run,
+    )
+
+
+@router.get("/api/expenses/template")
+async def download_expenses_template(_=Depends(get_current_user)):
+    from openpyxl.styles import Alignment, Font, PatternFill
+    from openpyxl.utils import get_column_letter
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Expenses"
+
+    headers = ["Category", "Amount", "Farm", "Date"]
+    hdr_font = Font(bold=True, color="FB923C")
+    hdr_fill = PatternFill("solid", fgColor="0F1424")
+    for col, header in enumerate(headers, 1):
+        cell = ws.cell(1, col, header)
+        cell.font = hdr_font
+        cell.fill = hdr_fill
+        cell.alignment = Alignment(horizontal="center")
+    for col, width in enumerate([24, 14, 24, 14], 1):
+        ws.column_dimensions[get_column_letter(col)].width = width
+
+    ws.append(["Fuel", 850.50, "North Farm", "2026-04-10"])
+    ws.append(["Office Supplies", 120.00, "", "2026-04-11"])
+
+    readme = wb.create_sheet("README")
+    readme.column_dimensions["A"].width = 20
+    readme.column_dimensions["B"].width = 78
+    readme.append(["Column", "Rules"])
+    readme["A1"].font = Font(bold=True)
+    readme["B1"].font = Font(bold=True)
+    rules = [
+        ("Category", "Required. Matched case-insensitively after trimming whitespace. Missing categories are auto-created during import."),
+        ("Amount", "Required. Must be numeric and greater than 0. Excel numeric cells and common formatted values are accepted."),
+        ("Farm", "Optional. Existing farms are matched case-insensitively. Leave blank to record the row as General Expense."),
+        ("Date", "Required. Accepted formats: YYYY-MM-DD, DD/MM/YYYY, MM/DD/YYYY. Excel date cells are also accepted."),
+        ("", ""),
+        ("General Expense", "A blank Farm keeps the expense unassigned to a farm by saving farm_id as empty/null."),
+        ("Dry run", "Preview with Dry run checked first. Uncheck Dry run only when you are ready to save the expenses."),
+    ]
+    for key, value in rules:
+        readme.append([key, value])
+        if key:
+            readme.cell(readme.max_row, 1).font = Font(bold=True)
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    return StreamingResponse(
+        buf,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": "attachment; filename=expenses_import_template.xlsx"},
+    )
+
+
 @router.get("/api/farm-intake/batches")
 async def list_farm_batches(
     db: AsyncSession = Depends(get_async_session),
@@ -949,7 +1020,7 @@ td{padding:8px 12px;border-top:1px solid var(--border);color:var(--sub);white-sp
 <div class="content">
     <div>
         <div class="page-title">Import Data</div>
-        <div class="page-sub">Import or update products, stock, and customers from Excel (.xlsx)</div>
+        <div class="page-sub">Import or update products, stock, customers, and expenses from Excel (.xlsx)</div>
     </div>
 
     <div class="section-label">Products & Stock</div>
@@ -1055,6 +1126,52 @@ td{padding:8px 12px;border-top:1px solid var(--border);color:var(--sub);white-sp
             </div>
         </div>
 
+    </div>
+
+    <div class="section-label">Expenses</div>
+    <div class="import-grid" style="grid-template-columns:minmax(340px,680px)">
+        <div class="import-card">
+            <div class="import-card-header">
+                <div class="import-card-icon" style="background:rgba(251,146,60,.12)">&#128184;</div>
+                <div>
+                    <div class="import-card-title">Expenses Import</div>
+                    <div class="import-card-sub">Import expenses with preview, validation, and General Expense handling</div>
+                </div>
+            </div>
+            <div class="import-card-body">
+                <div class="col-map">
+                    <div class="col-map-title">Expected Excel Columns</div>
+                    <div class="col-row"><span class="col-excel">Category</span><span class="col-arrow">-></span><span class="col-field">Expense category</span><span style="color:var(--danger);font-size:10px;margin-left:4px">required</span></div>
+                    <div class="col-row"><span class="col-excel">Amount</span><span class="col-arrow">-></span><span class="col-field">Expense amount</span><span style="color:var(--danger);font-size:10px;margin-left:4px">required</span></div>
+                    <div class="col-row"><span class="col-excel">Farm</span><span class="col-arrow">-></span><span class="col-field">Existing farm name</span><span class="col-opt">blank becomes General Expense</span></div>
+                    <div class="col-row"><span class="col-excel">Date</span><span class="col-arrow">-></span><span class="col-field">Expense date</span><span style="color:var(--danger);font-size:10px;margin-left:4px">required</span></div>
+                    <div style="margin-top:8px;font-size:11px;color:var(--sub);padding:8px 10px;background:rgba(251,146,60,.08);border-radius:6px;border:1px solid rgba(251,146,60,.18);">
+                        Existing categories are reused case-insensitively. Missing categories are auto-created. Blank Farm rows are imported as General Expense.
+                    </div>
+                    <div style="margin-top:6px">
+                        <a href="/import/api/expenses/template" download style="font-size:11px;color:var(--blue);text-decoration:none">Download Expenses template</a>
+                    </div>
+                </div>
+
+                <div style="display:flex;flex-direction:column;gap:8px;">
+                    <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:13px;color:var(--sub)">
+                        <input type="checkbox" id="chk-expenses-dryrun" checked style="accent-color:var(--orange)">
+                        <span><b style="color:var(--text)">Dry run</b> - preview without saving (recommended first step)</span>
+                    </label>
+                </div>
+
+                <div class="drop-zone" id="drop-expenses" ondragover="onDrag(event,'expenses')" ondragleave="offDrag('expenses')" ondrop="onDrop(event,'expenses')">
+                    <input type="file" accept=".xlsx,.xls" onchange="onFile(this,'expenses')">
+                    <div class="drop-icon">&#128184;</div>
+                    <div class="drop-text">Click or drag expenses.xlsx here</div>
+                    <div class="drop-hint" id="hint-expenses">Blank Farm rows are recorded as General Expense</div>
+                </div>
+                <div class="progress-wrap" id="prog-expenses"><div class="progress-fill" id="progfill-expenses" style="width:0%"></div></div>
+                <div id="preview-expenses"></div>
+                <div class="result-box" id="res-expenses"></div>
+                <button class="import-btn" style="background:linear-gradient(135deg,var(--orange),#ffd166);color:#2e1300" id="btn-expenses" onclick="doImportExpenses()" disabled>Import Expenses</button>
+            </div>
+        </div>
     </div>
 
     <div class="section-label">Historical Sales</div>
@@ -1319,7 +1436,7 @@ async function logout(){
 }
   initializeColorMode();
   initUser();
-  const files = {products:null, stock:null, customers:null, sales:null, 'farm-intake':null, 'b2b-sales':null};
+  const files = {products:null, stock:null, customers:null, expenses:null, sales:null, 'farm-intake':null, 'b2b-sales':null};
 
 function onDrag(e,t){ e.preventDefault(); document.getElementById('drop-'+t).classList.add('drag-over'); }
 function offDrag(t){ document.getElementById('drop-'+t).classList.remove('drag-over'); }
@@ -1399,6 +1516,132 @@ async function doImport(type){
 }
 
 // ── Historical Sales ────────────────────────────────────────────────────────
+
+async function doImportExpenses() {
+    const f = files['expenses'];
+    if (!f) { showResult('expenses', 'Please select a file first', 'err'); return; }
+
+    const btn = document.getElementById('btn-expenses');
+    btn.disabled = true;
+    btn.innerHTML = 'Processing...';
+    showProg('expenses', 40);
+    showResult('expenses', '', '');
+
+    const dryRun = document.getElementById('chk-expenses-dryrun').checked;
+    const fd = new FormData();
+    fd.append('file', f);
+    fd.append('dry_run', dryRun ? 'true' : 'false');
+
+    let res, data;
+    try {
+        res = await fetch('/import/api/expenses', { method: 'POST', body: fd });
+        data = await res.json();
+    } catch (e) {
+        showProg('expenses', 100);
+        btn.disabled = false;
+        btn.innerHTML = 'Import Expenses';
+        showResult('expenses', 'Error: Network error: ' + e.message, 'err');
+        return;
+    }
+
+    showProg('expenses', 100);
+    btn.disabled = false;
+    btn.innerHTML = 'Import Expenses';
+
+    if (!res.ok) {
+        const detail = data?.detail;
+        const msg = Array.isArray(detail)
+            ? detail.map(e => e.msg || JSON.stringify(e)).join('; ')
+            : (detail || data?.error || `HTTP ${res.status}`);
+        showResult('expenses', 'Error: ' + msg, 'err');
+        return;
+    }
+
+    if (data.error) {
+        showResult('expenses', 'Error: ' + data.error, 'err');
+        return;
+    }
+
+    renderExpensesResult(data);
+}
+
+function renderExpensesResult(data) {
+    if (!data || !data.summary) {
+        showResult('expenses', 'Error: Unexpected response from server - no summary returned.', 'err');
+        return;
+    }
+    const s = data.summary || {};
+    const isDry = !!data.dry_run;
+    const n = value => {
+        const parsed = Number(value);
+        return Number.isFinite(parsed) ? parsed : 0;
+    };
+    const txt = value => (value === undefined || value === null || value === '') ? '-' : String(value);
+
+    let html = `<div style="font-size:13px">
+        ${isDry ? '<span style="color:var(--warn)">Dry run - nothing was saved</span><br>' : ''}
+        <b>${n(s.rows_read)}</b> rows read &nbsp;|&nbsp;
+        <b>${n(isDry ? s.expenses_would_create : s.expenses_created)}</b> expense records ${isDry ? 'valid for import' : 'created'} &nbsp;|&nbsp;
+        <b>${n(s.rows_skipped)}</b> skipped<br>
+        <span style="color:var(--sub);font-size:12px">
+            Categories ${isDry ? 'to auto-create' : 'auto-created'}: <b>${n(s.categories_auto_created)}</b> &nbsp;|&nbsp;
+            Farm-linked rows: <b>${n(s.farms_resolved)}</b> &nbsp;|&nbsp;
+            General Expense rows: <b>${n(s.general_expense_rows)}</b>
+        </span><br>
+        <span style="color:var(--sub);font-size:12px">
+            Date range: ${txt(s.earliest_date)} -> ${txt(s.latest_date)} &nbsp;|&nbsp;
+            Total amount: <b>${n(s.total_amount).toFixed(2)}</b>
+        </span>`;
+
+    if (data.auto_created_categories && data.auto_created_categories.length) {
+        html += `<br><details style="margin-top:6px" ${isDry ? 'open' : ''}><summary style="font-size:12px;cursor:pointer;color:var(--sub)">
+            ${isDry ? 'Categories to auto-create' : 'Auto-created categories'} (${data.auto_created_categories.length})
+        </summary><div style="margin-top:4px;font-size:11px;color:var(--muted)">
+            ${data.auto_created_categories.map(c => c.account_code ? `${c.name} (${c.account_code})` : c.name).join(', ')}
+        </div></details>`;
+    }
+
+    if (data.warnings && data.warnings.length) {
+        html += `<br><div style="margin-top:6px;padding:8px 12px;background:rgba(255,181,71,.08);
+            border:1px solid rgba(255,181,71,.2);border-radius:8px;font-size:12px;color:var(--warn)">
+            ${data.warnings.map(w => `Warning: ${w}`).join('<br>')}
+        </div>`;
+    }
+
+    if (data.errors && data.errors.length) {
+        html += `<br><br><b style="color:var(--danger)">${data.errors.length} error(s):</b>
+        <div style="max-height:180px;overflow-y:auto;margin-top:6px">
+        <table style="font-size:11px;width:100%">
+            <thead><tr><th>Row</th><th>Category</th><th>Amount</th><th>Farm</th><th>Date</th><th>Reason</th></tr></thead>
+            <tbody>${data.errors.map(e => `<tr>
+                <td>${e.row}</td>
+                <td>${e.category || ''}</td>
+                <td>${e.amount || ''}</td>
+                <td>${e.farm || 'General Expense'}</td>
+                <td>${e.date || ''}</td>
+                <td style="color:var(--danger)">${e.reason}</td>
+            </tr>`).join('')}</tbody>
+        </table></div>`;
+    }
+
+    if (isDry && (!data.errors || data.errors.length === 0)) {
+        html += `<br><br>
+        <button onclick="runRealExpensesImport()" style="width:100%;padding:10px;border-radius:8px;
+            background:linear-gradient(135deg,var(--orange),#ffd166);color:#2e1300;
+            font-weight:800;font-size:13px;border:none;cursor:pointer;">
+            Run real expenses import
+        </button>`;
+    }
+
+    html += '</div>';
+    const kind = data.errors && data.errors.length ? 'warn' : 'ok';
+    showResult('expenses', html, kind);
+}
+
+async function runRealExpensesImport() {
+    document.getElementById('chk-expenses-dryrun').checked = false;
+    await doImportExpenses();
+}
 
 async function doImportSales() {
     const f = files['sales'];
