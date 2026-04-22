@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import io
+import json
+import uuid
 from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
@@ -11,10 +13,16 @@ from openpyxl.utils.datetime import from_excel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.log import ActivityLog, record
 from app.models.expense import ExpenseCategory
 from app.models.farm import Farm
+from app.models.user import User
 from app.schemas.expense import ExpenseCategoryCreate, ExpenseCreate
-from app.services.expense_service import create_category, create_expense_entry
+from app.services.expense_service import (
+    create_category,
+    create_expense_entry,
+    delete_expense_entry,
+)
 
 
 @dataclass
@@ -26,6 +34,7 @@ class ParsedExpenseRow:
     farm_id: int | None
     farm_name: str | None
     general_expense: bool
+    notes: str | None
 
 
 def _normalize_key(value: object) -> str:
@@ -116,6 +125,139 @@ def _empty_row(values: list[object]) -> bool:
     return all(str(value or "").strip() == "" for value in values)
 
 
+def _clean_notes(value: object) -> str | None:
+    text = _normalize_name(value)
+    return text or None
+
+
+def _batch_payload_from_log(log: ActivityLog) -> dict:
+    try:
+        payload = json.loads(log.description or "{}")
+    except json.JSONDecodeError:
+        payload = {}
+    if not isinstance(payload, dict):
+        payload = {}
+    return payload
+
+
+async def list_expense_import_batches(db: AsyncSession) -> dict:
+    result = await db.execute(
+        select(ActivityLog)
+        .where(
+            ActivityLog.module == "Import",
+            ActivityLog.action.in_(["expense_import_batch", "expense_import_revert"]),
+        )
+        .order_by(ActivityLog.created_at.desc())
+    )
+    logs = result.scalars().all()
+    batches: dict[str, dict] = {}
+
+    for log in logs:
+        batch_id = log.ref_id
+        if not batch_id:
+            continue
+        if log.action == "expense_import_batch":
+            payload = _batch_payload_from_log(log)
+            batches[batch_id] = {
+                "batch_id": batch_id,
+                "filename": payload.get("filename") or "expenses.xlsx",
+                "ran_on": log.created_at.date().isoformat() if log.created_at else None,
+                "rows_read": payload.get("rows_read", 0),
+                "rows_imported": payload.get("rows_imported", 0),
+                "rows_skipped": payload.get("rows_skipped", 0),
+                "expense_records_created": payload.get("expense_records_created", 0),
+                "notes_imported": payload.get("notes_imported", 0),
+                "general_expense_rows": payload.get("general_expense_rows", 0),
+                "reverted": False,
+                "reverted_on": None,
+            }
+        elif log.action == "expense_import_revert" and batch_id in batches:
+            batches[batch_id]["reverted"] = True
+            batches[batch_id]["reverted_on"] = log.created_at.date().isoformat() if log.created_at else None
+
+    ordered = sorted(
+        batches.values(),
+        key=lambda item: (item["ran_on"] or "", item["batch_id"]),
+        reverse=True,
+    )
+    return {"batches": ordered}
+
+
+async def revert_expense_import_batch(
+    db: AsyncSession,
+    batch_id: str,
+    current_user: User,
+) -> dict:
+    summary_result = await db.execute(
+        select(ActivityLog).where(
+            ActivityLog.module == "Import",
+            ActivityLog.action == "expense_import_batch",
+            ActivityLog.ref_id == batch_id,
+        )
+    )
+    summary_log = summary_result.scalar_one_or_none()
+    if not summary_log:
+        raise HTTPException(status_code=404, detail="Expense import batch not found")
+
+    reverted_result = await db.execute(
+        select(ActivityLog).where(
+            ActivityLog.module == "Import",
+            ActivityLog.action == "expense_import_revert",
+            ActivityLog.ref_id == batch_id,
+        )
+    )
+    if reverted_result.scalar_one_or_none():
+        return {"ok": True, "batch_id": batch_id, "already_reverted": True, "deleted_expenses": 0}
+
+    item_result = await db.execute(
+        select(ActivityLog)
+        .where(
+            ActivityLog.module == "Import",
+            ActivityLog.action == "expense_import_item",
+            ActivityLog.ref_type == batch_id,
+        )
+        .order_by(ActivityLog.id.desc())
+    )
+    item_logs = item_result.scalars().all()
+
+    deleted_expenses = 0
+    skipped_missing = 0
+    seen_expense_ids: set[int] = set()
+    for log in item_logs:
+        try:
+            expense_id = int(log.ref_id)
+        except (TypeError, ValueError):
+            continue
+        if expense_id in seen_expense_ids:
+            continue
+        seen_expense_ids.add(expense_id)
+        try:
+            await delete_expense_entry(db, expense_id, current_user)
+            deleted_expenses += 1
+        except HTTPException as exc:
+            if exc.status_code == 404:
+                skipped_missing += 1
+                continue
+            raise
+
+    record(
+        db,
+        "Import",
+        "expense_import_revert",
+        json.dumps({"batch_id": batch_id, "deleted_expenses": deleted_expenses, "skipped_missing": skipped_missing}),
+        user=current_user,
+        ref_type="expense_import_batch",
+        ref_id=batch_id,
+    )
+    await db.commit()
+    return {
+        "ok": True,
+        "batch_id": batch_id,
+        "deleted_expenses": deleted_expenses,
+        "skipped_missing": skipped_missing,
+    }
+
+
 async def import_expenses(
     *,
     db: AsyncSession,
@@ -132,6 +274,7 @@ async def import_expenses(
     col_amount = _find_header_index(headers, ["Amount", "Expense Amount", "Value"])
     col_farm = _find_header_index(headers, ["Farm", "Farm Name"])
     col_date = _find_header_index(headers, ["Date", "Expense Date"])
+    col_notes = _find_header_index(headers, ["Notes", "Note", "Description", "Expense Notes"])
 
     missing = []
     if not col_category:
@@ -165,11 +308,13 @@ async def import_expenses(
         raw_amount = sheet.cell(row_idx, col_amount).value if col_amount else None
         raw_farm = sheet.cell(row_idx, col_farm).value if col_farm else None
         raw_date = sheet.cell(row_idx, col_date).value if col_date else None
+        raw_notes = sheet.cell(row_idx, col_notes).value if col_notes else None
 
         category_name = _normalize_name(raw_category)
         amount = _parse_amount(raw_amount)
         expense_date = _parse_date_value(raw_date)
         farm_name = _normalize_name(raw_farm)
+        notes = _clean_notes(raw_notes)
 
         row_errors: list[str] = []
         if not category_name:
@@ -215,6 +360,7 @@ async def import_expenses(
                 farm_id=farm.id if farm else None,
                 farm_name=farm.name if farm else None,
                 general_expense=general_expense,
+                notes=notes,
             )
         )
         if general_expense:
@@ -225,6 +371,7 @@ async def import_expenses(
         date_values.append(expense_date)
 
     auto_created_categories: list[dict] = []
+    batch_id = str(uuid.uuid4())
     if not dry_run and missing_categories:
         for category_name in missing_categories.values():
             created = await create_category(
@@ -235,6 +382,7 @@ async def import_expenses(
         category_map = await _load_category_map(db)
 
     expenses_created = 0
+    notes_imported = 0
     if not dry_run:
         for row in rows:
             category = category_map.get(row.category_name.lower())
@@ -255,13 +403,57 @@ async def import_expenses(
                 expense_date=row.expense_date.isoformat(),
                 amount=float(row.amount),
                 payment_method="cash",
+                description=row.notes,
                 farm_id=row.farm_id,
             )
-            await create_expense_entry(db, payload, current_user)
+            created = await create_expense_entry(db, payload, current_user)
             expenses_created += 1
+            if row.notes:
+                notes_imported += 1
+            record(
+                db,
+                "Import",
+                "expense_import_item",
+                json.dumps(
+                    {
+                        "batch_id": batch_id,
+                        "ref_number": created.get("ref_number"),
+                        "category": row.category_name,
+                        "amount": float(row.amount),
+                        "farm": row.farm_name or "General Expense",
+                    }
+                ),
+                user=current_user,
+                ref_type=batch_id,
+                ref_id=created.get("id"),
+            )
+        record(
+            db,
+            "Import",
+            "expense_import_batch",
+            json.dumps(
+                {
+                    "batch_id": batch_id,
+                    "filename": filename,
+                    "rows_read": len(rows) + len(errors),
+                    "rows_imported": expenses_created,
+                    "rows_skipped": len(errors),
+                    "expense_records_created": expenses_created,
+                    "categories_auto_created": len(auto_created_categories),
+                    "farms_resolved": resolved_farm_rows,
+                    "general_expense_rows": general_expense_rows,
+                    "notes_imported": notes_imported,
+                }
+            ),
+            user=current_user,
+            ref_type="expense_import_batch",
+            ref_id=batch_id,
+        )
+        await db.commit()
 
     categories_auto_created = len(auto_created_categories) if not dry_run else len(missing_categories)
     valid_rows = len(rows)
+    notes_present = sum(1 for row in rows if row.notes)
     summary = {
         "rows_read": valid_rows + len(errors),
         "rows_imported": valid_rows if dry_run else expenses_created,
@@ -272,6 +464,7 @@ async def import_expenses(
         "categories_auto_created": categories_auto_created,
         "farms_resolved": resolved_farm_rows,
         "general_expense_rows": general_expense_rows,
+        "notes_imported": notes_present if dry_run else notes_imported,
         "earliest_date": min(date_values).isoformat() if date_values else None,
         "latest_date": max(date_values).isoformat() if date_values else None,
         "total_amount": float(total_amount),
@@ -289,6 +482,8 @@ async def import_expenses(
         "summary": summary,
         "errors": errors,
         "warnings": warnings,
+        "batch_id": None if dry_run or expenses_created == 0 else batch_id,
+        "revert_available": (not dry_run and expenses_created > 0),
         "auto_created_categories": [
             {"name": category["name"], "account_code": category.get("account_code")}
             for category in auto_created_categories

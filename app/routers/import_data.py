@@ -20,6 +20,7 @@ from app.models.supplier import PurchaseItem
 from app.services.sales_import_service import import_sales
 from app.services.b2b_sales_import_service import import_b2b_sales
 from app.services.expense_import_service import import_expenses
+from app.services.expense_import_service import list_expense_import_batches, revert_expense_import_batch
 from app.services.farm_intake_import_service import (
     import_farm_intake,
     list_farm_intake_import_batches,
@@ -848,7 +849,7 @@ async def download_expenses_template(_=Depends(get_current_user)):
     ws = wb.active
     ws.title = "Expenses"
 
-    headers = ["Category", "Amount", "Farm", "Date"]
+    headers = ["Category", "Amount", "Farm", "Date", "Notes"]
     hdr_font = Font(bold=True, color="FB923C")
     hdr_fill = PatternFill("solid", fgColor="0F1424")
     for col, header in enumerate(headers, 1):
@@ -856,11 +857,12 @@ async def download_expenses_template(_=Depends(get_current_user)):
         cell.font = hdr_font
         cell.fill = hdr_fill
         cell.alignment = Alignment(horizontal="center")
-    for col, width in enumerate([24, 14, 24, 14], 1):
+    for col, width in enumerate([24, 14, 24, 14, 36], 1):
         ws.column_dimensions[get_column_letter(col)].width = width
 
-    ws.append(["Fuel", 850.50, "North Farm", "2026-04-10"])
-    ws.append(["Office Supplies", 120.00, "", "2026-04-11"])
+    ws.append(["Fuel", 850.50, "North Farm", "2026-04-10", "Diesel for irrigation pump"])
+    ws.append(["Office Supplies", 120.00, "", "2026-04-11", "Admin stationery - should import as General Expense"])
+    ws.append(["Veterinary", 300.00, "South Farm", "2026-04-12", "Monthly flock check"])
 
     readme = wb.create_sheet("README")
     readme.column_dimensions["A"].width = 20
@@ -873,6 +875,7 @@ async def download_expenses_template(_=Depends(get_current_user)):
         ("Amount", "Required. Must be numeric and greater than 0. Excel numeric cells and common formatted values are accepted."),
         ("Farm", "Optional. Existing farms are matched case-insensitively. Leave blank to record the row as General Expense."),
         ("Date", "Required. Accepted formats: YYYY-MM-DD, DD/MM/YYYY, MM/DD/YYYY. Excel date cells are also accepted."),
+        ("Notes", "Optional. Imported into the normal expense description field used by manual expenses."),
         ("", ""),
         ("General Expense", "A blank Farm keeps the expense unassigned to a farm by saving farm_id as empty/null."),
         ("Dry run", "Preview with Dry run checked first. Uncheck Dry run only when you are ready to save the expenses."),
@@ -890,6 +893,23 @@ async def download_expenses_template(_=Depends(get_current_user)):
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={"Content-Disposition": "attachment; filename=expenses_import_template.xlsx"},
     )
+
+
+@router.get("/api/expenses/batches")
+async def list_expenses_batches(
+    db: AsyncSession = Depends(get_async_session),
+    _=Depends(get_current_user),
+):
+    return await list_expense_import_batches(db)
+
+
+@router.delete("/api/expenses/batch/{batch_id}")
+async def delete_expenses_batch(
+    batch_id: str,
+    db: AsyncSession = Depends(get_async_session),
+    current_user=Depends(get_current_user),
+):
+    return await revert_expense_import_batch(db, batch_id, current_user)
 
 
 @router.get("/api/farm-intake/batches")
@@ -1145,8 +1165,9 @@ td{padding:8px 12px;border-top:1px solid var(--border);color:var(--sub);white-sp
                     <div class="col-row"><span class="col-excel">Amount</span><span class="col-arrow">-></span><span class="col-field">Expense amount</span><span style="color:var(--danger);font-size:10px;margin-left:4px">required</span></div>
                     <div class="col-row"><span class="col-excel">Farm</span><span class="col-arrow">-></span><span class="col-field">Existing farm name</span><span class="col-opt">blank becomes General Expense</span></div>
                     <div class="col-row"><span class="col-excel">Date</span><span class="col-arrow">-></span><span class="col-field">Expense date</span><span style="color:var(--danger);font-size:10px;margin-left:4px">required</span></div>
+                    <div class="col-row"><span class="col-excel">Notes</span><span class="col-arrow">-></span><span class="col-field">Expense description / notes</span><span class="col-opt">optional</span></div>
                     <div style="margin-top:8px;font-size:11px;color:var(--sub);padding:8px 10px;background:rgba(251,146,60,.08);border-radius:6px;border:1px solid rgba(251,146,60,.18);">
-                        Existing categories are reused case-insensitively. Missing categories are auto-created. Blank Farm rows are imported as General Expense.
+                        Existing categories are reused case-insensitively. Missing categories are auto-created. Blank Farm rows are imported as General Expense, and Notes are saved to the normal expense description field.
                     </div>
                     <div style="margin-top:6px">
                         <a href="/import/api/expenses/template" download style="font-size:11px;color:var(--blue);text-decoration:none">Download Expenses template</a>
@@ -1172,6 +1193,11 @@ td{padding:8px 12px;border-top:1px solid var(--border);color:var(--sub);white-sp
                 <button class="import-btn" style="background:linear-gradient(135deg,var(--orange),#ffd166);color:#2e1300" id="btn-expenses" onclick="doImportExpenses()" disabled>Import Expenses</button>
             </div>
         </div>
+    </div>
+
+    <div class="section-label">Recent Expenses Import Batches</div>
+    <div id="expenses-batches-panel" style="background:var(--card);border:1px solid var(--border);border-radius:12px;padding:18px 20px;">
+        <div style="color:var(--muted);font-size:13px">Loading...</div>
     </div>
 
     <div class="section-label">Historical Sales</div>
@@ -1563,6 +1589,7 @@ async function doImportExpenses() {
     }
 
     renderExpensesResult(data);
+    loadExpenseBatches();
 }
 
 function renderExpensesResult(data) {
@@ -1590,8 +1617,13 @@ function renderExpensesResult(data) {
         </span><br>
         <span style="color:var(--sub);font-size:12px">
             Date range: ${txt(s.earliest_date)} -> ${txt(s.latest_date)} &nbsp;|&nbsp;
+            Notes imported: <b>${n(s.notes_imported)}</b> &nbsp;|&nbsp;
             Total amount: <b>${n(s.total_amount).toFixed(2)}</b>
         </span>`;
+
+    if (data.batch_id) {
+        html += `<br><span style="color:var(--muted);font-size:11px">Batch ID: ${data.batch_id} · Revert available: ${data.revert_available ? 'Yes' : 'No'}</span>`;
+    }
 
     if (data.auto_created_categories && data.auto_created_categories.length) {
         html += `<br><details style="margin-top:6px" ${isDry ? 'open' : ''}><summary style="font-size:12px;cursor:pointer;color:var(--sub)">
@@ -1642,6 +1674,56 @@ async function runRealExpensesImport() {
     document.getElementById('chk-expenses-dryrun').checked = false;
     await doImportExpenses();
 }
+
+async function loadExpenseBatches() {
+    const panel = document.getElementById('expenses-batches-panel');
+    try {
+        const r = await fetch('/import/api/expenses/batches');
+        const d = await r.json();
+        const batches = d.batches || [];
+        if (!batches.length) {
+            panel.innerHTML = '<div style="color:var(--muted);font-size:12px">No Expenses import batches found.</div>';
+            return;
+        }
+        panel.innerHTML = `<table style="width:100%;font-size:12px">
+            <thead><tr>
+                <th>Batch ID</th><th>File</th><th>Date</th><th>Imported</th><th>Skipped</th><th>Notes</th><th>Status</th><th></th>
+            </tr></thead>
+            <tbody>${batches.map(b => `<tr>
+                <td style="font-family:var(--mono);font-size:10px">${(b.batch_id || '').slice(0,12)}...</td>
+                <td>${b.filename || 'expenses.xlsx'}</td>
+                <td>${b.ran_on || '-'}</td>
+                <td>${b.expense_records_created || b.rows_imported || 0}</td>
+                <td>${b.rows_skipped || 0}</td>
+                <td>${b.notes_imported || 0}</td>
+                <td>${b.reverted ? `Reverted${b.reverted_on ? ' on ' + b.reverted_on : ''}` : 'Active'}</td>
+                <td>${b.reverted ? '<span style="color:var(--muted);font-size:11px">Reverted</span>' : `<button onclick="revertExpenseBatch('${b.batch_id}')"
+                    style="padding:4px 10px;border-radius:6px;border:1px solid var(--danger);
+                    background:rgba(255,77,109,.08);color:var(--danger);
+                    font-size:11px;cursor:pointer;font-family:var(--sans)">
+                    Revert
+                </button>`}</td>
+            </tr>`).join('')}
+            </tbody></table>`;
+    } catch (e) {
+        panel.innerHTML = '<div style="color:var(--muted);font-size:12px">Could not load Expenses import batches.</div>';
+    }
+}
+
+async function revertExpenseBatch(batchId) {
+    if (!confirm('Revert expense import batch ' + batchId.slice(0,8) + '...? This will delete imported expenses and post their normal expense reversals.')) return;
+    const r = await fetch('/import/api/expenses/batch/' + batchId, { method: 'DELETE' });
+    const d = await r.json();
+    if (d.ok) {
+        const already = d.already_reverted ? 'Batch was already reverted.' : `Batch reverted - ${d.deleted_expenses || 0} expenses deleted${d.skipped_missing ? `, ${d.skipped_missing} already missing` : ''}.`;
+        showResult('expenses', already, 'ok');
+    } else {
+        showResult('expenses', 'Error: Revert failed', 'err');
+    }
+    loadExpenseBatches();
+}
+
+loadExpenseBatches();
 
 async function doImportSales() {
     const f = files['sales'];
