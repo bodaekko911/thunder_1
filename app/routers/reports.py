@@ -2709,11 +2709,11 @@ async function loadSales(){
         : `<tr><td colspan="5" style="text-align:center;color:var(--muted);padding:30px">No sales in this period</td></tr>`;
 
     // Top products
-    let maxR = data.top_products.length ? data.top_products[0].revenue : 1;
+    let maxTopRevenue = data.top_products.length ? data.top_products[0].revenue : 1;
     document.getElementById("sales-top").innerHTML = data.top_products.length
         ? data.top_products.map(p=>`<div class="bar-row">
             <div class="bar-label">${p.name}</div>
-            <div class="bar-track"><div class="bar-fill" style="width:${(p.revenue/maxR*100).toFixed(1)}%;background:linear-gradient(90deg,var(--green),var(--lime))"></div></div>
+            <div class="bar-track"><div class="bar-fill" style="width:${(p.revenue/maxTopRevenue*100).toFixed(1)}%;background:linear-gradient(90deg,var(--green),var(--lime))"></div></div>
             <div class="bar-val" style="color:var(--green)">${p.revenue.toFixed(0)}</div>
           </div>`).join("")
         : `<div style="color:var(--muted);font-size:13px">No data</div>`;
@@ -2999,11 +2999,11 @@ async function loadSpoilage(){
             <div class="bar-val" style="color:var(--danger)">${p.qty.toFixed(1)}</div>
           </div>`).join("")
         : `<div style="color:var(--muted);font-size:13px">No data</div>`;
-    let maxR = data.by_reason.length ? data.by_reason[0].qty : 1;
+    let maxReasonQty = data.by_reason.length ? data.by_reason[0].qty : 1;
     document.getElementById("spl-by-reason").innerHTML = data.by_reason.length
         ? data.by_reason.map(r=>`<div class="bar-row">
             <div class="bar-label">${r.reason}</div>
-            <div class="bar-track"><div class="bar-fill" style="width:${(r.qty/maxR*100).toFixed(1)}%;background:linear-gradient(90deg,var(--warn),var(--orange))"></div></div>
+            <div class="bar-track"><div class="bar-fill" style="width:${(r.qty/maxReasonQty*100).toFixed(1)}%;background:linear-gradient(90deg,var(--warn),var(--orange))"></div></div>
             <div class="bar-val" style="color:var(--warn)">${r.qty.toFixed(1)}</div>
           </div>`).join("")
         : `<div style="color:var(--muted);font-size:13px">No data</div>`;
