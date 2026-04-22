@@ -537,10 +537,11 @@ function render(d){{
                         <th>Payment</th>
                         <th>Status</th>
                         <th style="text-align:right">Total</th>
+                        <th style="text-align:center">Print</th>
                     </tr>
                 </thead>
                 <tbody id="orders-tbody">
-                    ${{d.orders.length === 0 ? '<tr><td colspan="6" style="text-align:center;padding:40px;color:var(--muted)">No orders yet</td></tr>' : ""}}
+                    ${{d.orders.length === 0 ? '<tr><td colspan="7" style="text-align:center;padding:40px;color:var(--muted)">No orders yet</td></tr>' : ""}}
                 </tbody>
             </table>
         </div>
@@ -573,14 +574,23 @@ function render(d){{
             <td class="td-date">${{esc(o.created_at)}}</td>
             <td><span class="pay-badge">${{esc(o.payment_method)}}</span></td>
             <td><span class="badge ${{statusBadge}}">${{esc(o.status)}}</span></td>
-            <td style="text-align:right" class="${{totalCls}}">${{totalSign}}${{fmt(Math.abs(o.total))}}</td>`;
+            <td style="text-align:right" class="${{totalCls}}">${{totalSign}}${{fmt(Math.abs(o.total))}}</td>
+            <td style="text-align:center">
+                <a href="${{isRefund ? `/refunds/print/${{o.id}}` : `/pos/print/${{o.id}}`}}"
+                   target="_blank"
+                   style="text-decoration:none;font-size:16px"
+                   title="Print"
+                   onclick="event.stopPropagation()">
+                   🖨️
+                </a>
+            </td>`;
 
         // items sub-row
         const subTr = document.createElement("tr");
         subTr.className = "items-row";
         subTr.style.display = "none";
         if (hasItems) {{
-            subTr.innerHTML = `<td colspan="6">
+            subTr.innerHTML = `<td colspan="7">
                 <div class="items-inner">
                     <table class="items-table">
                         <thead><tr>
@@ -1224,8 +1234,11 @@ async function openHistory(id, name, invCount, totalSpent){
         const href = isRefund
             ? `/refunds/print/${i.id}`
             : `/invoice/${i.id}`;
+        const printHref = isRefund
+            ? `/refunds/print/${i.id}`
+            : `/pos/print/${i.id}`;
         return `
-        <a class="inv-card" href="${href}" target="_blank" style="${cardStyle}">
+        <div class="inv-card" style="${cardStyle}; cursor:pointer" onclick="window.open('${href}', '_blank')">
             <div>
                 <div class="inv-num" style="color:${isRefund ? "var(--danger)" : ""}">${i.ref_number}</div>
                 <div class="inv-date">${i.created_at}</div>
@@ -1235,8 +1248,9 @@ async function openHistory(id, name, invCount, totalSpent){
             <div style="text-align:right">
                 <div class="inv-total" style="color:${numColor}">${numText}</div>
                 <div style="font-size:11px;color:${statusColor};margin-top:4px">${i.status}</div>
+                <a href="${printHref}" target="_blank" onclick="event.stopPropagation()" class="action-btn" style="text-decoration:none; display:inline-block; margin-top:8px">🖨️ Print</a>
             </div>
-        </a>`;
+        </div>`;
     }).join("");
 }
 
