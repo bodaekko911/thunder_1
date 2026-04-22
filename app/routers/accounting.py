@@ -225,30 +225,67 @@ async def create_journal(data: JournalCreate, db: AsyncSession = Depends(get_asy
 # ── REPORTS API ────────────────────────────────────────
 @router.get("/api/trial-balance")
 async def trial_balance(db: AsyncSession = Depends(get_async_session)):
-    result = await db.execute(select(Account).order_by(Account.code))
-    accounts = result.scalars().all()
+    ledger_totals = (
+        select(
+            JournalEntry.account_id.label("account_id"),
+            func.coalesce(func.sum(JournalEntry.debit), 0).label("ledger_debit"),
+            func.coalesce(func.sum(JournalEntry.credit), 0).label("ledger_credit"),
+        )
+        .group_by(JournalEntry.account_id)
+        .subquery()
+    )
+    result = await db.execute(
+        select(
+            Account,
+            func.coalesce(ledger_totals.c.ledger_debit, 0).label("ledger_debit"),
+            func.coalesce(ledger_totals.c.ledger_credit, 0).label("ledger_credit"),
+        )
+        .outerjoin(ledger_totals, ledger_totals.c.account_id == Account.id)
+        .order_by(Account.code)
+    )
+    account_rows = result.all()
     rows = []
-    total_debit  = 0
-    total_credit = 0
+    total_debit = 0.0
+    total_credit = 0.0
+    drift_accounts = []
 
-    for a in accounts:
-        bal = float(a.balance)
-        if bal > 0:
-            total_debit  += bal
-        else:
-            total_credit += abs(bal)
+    for a, ledger_debit_raw, ledger_credit_raw in account_rows:
+        ledger_debit = float(ledger_debit_raw or 0)
+        ledger_credit = float(ledger_credit_raw or 0)
+        net_balance = round(ledger_debit - ledger_credit, 2)
+        stored_balance = round(float(a.balance or 0), 2)
+        debit_balance = net_balance if net_balance > 0 else 0.0
+        credit_balance = abs(net_balance) if net_balance < 0 else 0.0
+        drift = round(stored_balance - net_balance, 2)
+        total_debit += debit_balance
+        total_credit += credit_balance
         rows.append({
-            "code":   a.code,
-            "name":   a.name,
-            "type":   a.type,
-            "debit":  bal  if bal > 0 else 0,
-            "credit": abs(bal) if bal < 0 else 0,
+            "code": a.code,
+            "name": a.name,
+            "type": a.type,
+            "debit": round(debit_balance, 2),
+            "credit": round(credit_balance, 2),
+            "ledger_debit": round(ledger_debit, 2),
+            "ledger_credit": round(ledger_credit, 2),
+            "net_balance": net_balance,
+            "stored_balance": stored_balance,
+            "balance_drift": drift,
         })
+        if abs(drift) >= 0.01:
+            drift_accounts.append({
+                "code": a.code,
+                "name": a.name,
+                "ledger_balance": net_balance,
+                "stored_balance": stored_balance,
+                "drift": drift,
+            })
 
     return {
-        "rows":         rows,
-        "total_debit":  total_debit,
-        "total_credit": total_credit,
+        "rows": rows,
+        "total_debit": round(total_debit, 2),
+        "total_credit": round(total_credit, 2),
+        "drift_count": len(drift_accounts),
+        "drift_accounts": drift_accounts,
     }
 
 @router.get("/api/profit-loss")
@@ -1314,7 +1351,12 @@ async function loadTB(){
             </td>
             <td style="padding:12px 16px;font-family:var(--mono);font-size:14px;font-weight:800;color:var(--green)">${d.total_debit.toFixed(2)}</td>
             <td style="padding:12px 16px;font-family:var(--mono);font-size:14px;font-weight:800;color:var(--blue)">${d.total_credit.toFixed(2)}</td>
-        </tr>`;
+        </tr>
+        ${d.drift_count ? `<tr style="background:rgba(255,181,71,.08)">
+            <td colspan="5" style="padding:10px 16px;color:var(--warn);font-size:12px">
+                ${d.drift_count} account${d.drift_count===1?"":"s"} have stored balance drift versus journal-derived balance.
+            </td>
+        </tr>` : ""}`;
 }
 
 ["acc-modal","je-modal"].forEach(id=>{
