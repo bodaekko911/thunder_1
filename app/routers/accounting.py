@@ -5,6 +5,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import selectinload
 from typing import Optional, List
 from pydantic import BaseModel, Field
+from datetime import date
 
 from app.database import get_async_session
 from app.core.permissions import get_current_user, require_permission
@@ -126,12 +127,18 @@ async def seed_accounts(db: AsyncSession = Depends(get_async_session)):
 async def get_journals(
     skip: int = Query(0, ge=0),
     limit: int = Query(50, ge=1, le=200),
+    from_date: Optional[date] = Query(None),
+    to_date: Optional[date] = Query(None),
     db: AsyncSession = Depends(get_async_session),
 ):
-    cnt_result = await db.execute(select(func.count()).select_from(Journal))
+    skip = int(skip) if isinstance(skip, (int, float, str)) else 0
+    limit = int(limit) if isinstance(limit, (int, float, str)) else 50
+    base_stmt = _apply_date_range(select(Journal), Journal.created_at, from_date, to_date)
+    count_stmt = _apply_date_range(select(func.count()).select_from(Journal), Journal.created_at, from_date, to_date)
+    cnt_result = await db.execute(count_stmt)
     total = cnt_result.scalar()
     result = await db.execute(
-        select(Journal)
+        base_stmt
         .options(selectinload(Journal.entries).selectinload(JournalEntry.account))
         .order_by(Journal.created_at.desc())
         .offset(skip)
@@ -151,6 +158,8 @@ async def get_journals(
             }
             for j in journals
         ],
+        "from_date": from_date.isoformat() if from_date else None,
+        "to_date": to_date.isoformat() if to_date else None,
     }
 
 @router.get("/api/journals/{journal_id}")
@@ -222,14 +231,41 @@ async def create_journal(data: JournalCreate, db: AsyncSession = Depends(get_asy
     return {"id": journal.id, "ok": True}
 
 
+def _validate_date_range(from_date: Optional[date], to_date: Optional[date]) -> None:
+    if from_date and to_date and from_date > to_date:
+        raise HTTPException(status_code=400, detail="From date cannot be after To date")
+
+
+def _apply_date_range(stmt, column, from_date: Optional[date], to_date: Optional[date]):
+    _validate_date_range(from_date, to_date)
+    if from_date:
+        stmt = stmt.where(func.date(column) >= from_date)
+    if to_date:
+        stmt = stmt.where(func.date(column) <= to_date)
+    return stmt
+
+
+def _apply_as_of_date(stmt, column, as_of: Optional[date]):
+    if as_of:
+        stmt = stmt.where(func.date(column) <= as_of)
+    return stmt
+
+
 # ── REPORTS API ────────────────────────────────────────
 @router.get("/api/trial-balance")
-async def trial_balance(db: AsyncSession = Depends(get_async_session)):
+async def trial_balance(
+    as_of: Optional[date] = Query(None),
+    db: AsyncSession = Depends(get_async_session),
+):
     ledger_totals = (
-        select(
-            JournalEntry.account_id.label("account_id"),
-            func.coalesce(func.sum(JournalEntry.debit), 0).label("ledger_debit"),
-            func.coalesce(func.sum(JournalEntry.credit), 0).label("ledger_credit"),
+        _apply_as_of_date(
+            select(
+                JournalEntry.account_id.label("account_id"),
+                func.coalesce(func.sum(JournalEntry.debit), 0).label("ledger_debit"),
+                func.coalesce(func.sum(JournalEntry.credit), 0).label("ledger_credit"),
+            ).select_from(JournalEntry).join(Journal, Journal.id == JournalEntry.journal_id),
+            Journal.created_at,
+            as_of,
         )
         .group_by(JournalEntry.account_id)
         .subquery()
@@ -286,27 +322,77 @@ async def trial_balance(db: AsyncSession = Depends(get_async_session)):
         "total_credit": round(total_credit, 2),
         "drift_count": len(drift_accounts),
         "drift_accounts": drift_accounts,
+        "as_of": as_of.isoformat() if as_of else None,
     }
 
 @router.get("/api/profit-loss")
-async def profit_loss(db: AsyncSession = Depends(get_async_session)):
+async def profit_loss(
+    from_date: Optional[date] = Query(None),
+    to_date: Optional[date] = Query(None),
+    db: AsyncSession = Depends(get_async_session),
+):
     from app.models.refund import RetailRefund
-    rev_result = await db.execute(select(Account).where(Account.type == "revenue").order_by(Account.code))
-    revenue_accounts = rev_result.scalars().all()
-    exp_result = await db.execute(select(Account).where(Account.type == "expense").order_by(Account.code))
-    expense_accounts = exp_result.scalars().all()
+    journal_sums = (
+        _apply_date_range(
+            select(
+                JournalEntry.account_id.label("account_id"),
+                func.coalesce(func.sum(JournalEntry.debit), 0).label("debit_sum"),
+                func.coalesce(func.sum(JournalEntry.credit), 0).label("credit_sum"),
+            ).select_from(JournalEntry).join(Journal, Journal.id == JournalEntry.journal_id),
+            Journal.created_at,
+            from_date,
+            to_date,
+        )
+        .group_by(JournalEntry.account_id)
+        .subquery()
+    )
+    rev_result = await db.execute(
+        select(
+            Account,
+            func.coalesce(journal_sums.c.debit_sum, 0).label("debit_sum"),
+            func.coalesce(journal_sums.c.credit_sum, 0).label("credit_sum"),
+        )
+        .outerjoin(journal_sums, journal_sums.c.account_id == Account.id)
+        .where(Account.type == "revenue")
+        .order_by(Account.code)
+    )
+    revenue_accounts = rev_result.all()
+    exp_result = await db.execute(
+        select(
+            Account,
+            func.coalesce(journal_sums.c.debit_sum, 0).label("debit_sum"),
+            func.coalesce(journal_sums.c.credit_sum, 0).label("credit_sum"),
+        )
+        .outerjoin(journal_sums, journal_sums.c.account_id == Account.id)
+        .where(Account.type == "expense")
+        .order_by(Account.code)
+    )
+    expense_accounts = exp_result.all()
 
-    revenues = [{"code": a.code, "name": a.name, "amount": abs(float(a.balance))} for a in revenue_accounts]
-    expenses = [{"code": a.code, "name": a.name, "amount": abs(float(a.balance))} for a in expense_accounts]
+    revenues = []
+    for a, debit_sum_raw, credit_sum_raw in revenue_accounts:
+        amount = round(float(credit_sum_raw or 0) - float(debit_sum_raw or 0), 2)
+        if abs(amount) < 0.01:
+            continue
+        revenues.append({"code": a.code, "name": a.name, "amount": amount})
+
+    expenses = []
+    for a, debit_sum_raw, credit_sum_raw in expense_accounts:
+        amount = round(float(debit_sum_raw or 0) - float(credit_sum_raw or 0), 2)
+        if abs(amount) < 0.01:
+            continue
+        expenses.append({"code": a.code, "name": a.name, "amount": amount})
 
     total_revenue = sum(r["amount"] for r in revenues)
     total_expense = sum(e["amount"] for e in expenses)
     net_profit    = total_revenue - total_expense
 
     # Retail refund total for display as a deduction note
-    sum_result = await db.execute(select(func.sum(RetailRefund.total)))
+    refunds_stmt = _apply_date_range(select(func.sum(RetailRefund.total)), RetailRefund.created_at, from_date, to_date)
+    sum_result = await db.execute(refunds_stmt)
     total_refunds = float(sum_result.scalar() or 0)
-    cnt_result = await db.execute(select(func.count(RetailRefund.id)))
+    refund_count_stmt = _apply_date_range(select(func.count(RetailRefund.id)), RetailRefund.created_at, from_date, to_date)
+    cnt_result = await db.execute(refund_count_stmt)
     refund_count = cnt_result.scalar() or 0
 
     return {
@@ -317,6 +403,8 @@ async def profit_loss(db: AsyncSession = Depends(get_async_session)):
         "net_profit":    net_profit,
         "total_refunds": total_refunds,
         "refund_count":  refund_count,
+        "from_date": from_date.isoformat() if from_date else None,
+        "to_date": to_date.isoformat() if to_date else None,
     }
 
 
@@ -326,15 +414,22 @@ async def profit_loss(db: AsyncSession = Depends(get_async_session)):
 async def get_b2b_invoices(
     invoice_type: Optional[str] = Query(None, max_length=50),
     status: Optional[str] = Query(None, max_length=50),
+    from_date: Optional[date] = Query(None),
+    to_date: Optional[date] = Query(None),
     db: AsyncSession = Depends(get_async_session),
 ):
-    stmt = (
+    invoice_type = invoice_type.strip() if isinstance(invoice_type, str) and invoice_type.strip() else None
+    status = status.strip() if isinstance(status, str) and status.strip() else None
+    stmt = _apply_date_range(
         select(B2BInvoice)
         .options(
             selectinload(B2BInvoice.client),
             selectinload(B2BInvoice.items).selectinload(B2BInvoiceItem.product),
         )
-        .order_by(B2BInvoice.created_at.desc())
+        .order_by(B2BInvoice.created_at.desc()),
+        B2BInvoice.created_at,
+        from_date,
+        to_date,
     )
     if invoice_type:
         stmt = stmt.where(B2BInvoice.invoice_type == invoice_type)
@@ -740,6 +835,17 @@ td.cr { font-family:var(--mono); color:var(--blue); }
 
     <!-- JOURNALS -->
     <div id="section-journals" style="display:none">
+        <div style="display:flex;align-items:end;gap:10px;flex-wrap:wrap;margin-bottom:14px;">
+            <div class="fld" style="margin:0;min-width:170px;">
+                <label>From Date</label>
+                <input type="date" id="journals-from-date" onchange="loadJournals()">
+            </div>
+            <div class="fld" style="margin:0;min-width:170px;">
+                <label>To Date</label>
+                <input type="date" id="journals-to-date" onchange="loadJournals()">
+            </div>
+            <button class="btn btn-outline" onclick="resetJournalFilters()">Clear</button>
+        </div>
         <div class="table-wrap">
             <table>
                 <thead><tr><th>ID</th><th>Type</th><th>Description</th><th>Entries</th><th>Total Debit</th><th>Date</th><th>Actions</th></tr></thead>
@@ -750,11 +856,29 @@ td.cr { font-family:var(--mono); color:var(--blue); }
 
     <!-- P&L -->
     <div id="section-pl" style="display:none">
+        <div style="display:flex;align-items:end;gap:10px;flex-wrap:wrap;margin-bottom:14px;">
+            <div class="fld" style="margin:0;min-width:170px;">
+                <label>From Date</label>
+                <input type="date" id="pl-from-date" onchange="loadPL()">
+            </div>
+            <div class="fld" style="margin:0;min-width:170px;">
+                <label>To Date</label>
+                <input type="date" id="pl-to-date" onchange="loadPL()">
+            </div>
+            <button class="btn btn-outline" onclick="resetPLFilters()">Clear</button>
+        </div>
         <div id="pl-content"><div style="color:var(--muted);padding:40px;text-align:center">Loading…</div></div>
     </div>
 
     <!-- TRIAL BALANCE -->
     <div id="section-tb" style="display:none">
+        <div style="display:flex;align-items:end;gap:10px;flex-wrap:wrap;margin-bottom:14px;">
+            <div class="fld" style="margin:0;min-width:170px;">
+                <label>As Of</label>
+                <input type="date" id="tb-as-of-date" onchange="loadTB()">
+            </div>
+            <button class="btn btn-outline" onclick="resetTBFilters()">Clear</button>
+        </div>
         <div class="table-wrap">
             <table>
                 <thead><tr><th>Code</th><th>Account</th><th>Type</th><th>Debit</th><th>Credit</th></tr></thead>
@@ -779,6 +903,15 @@ td.cr { font-family:var(--mono); color:var(--blue); }
                 <option value="unpaid">Unpaid</option>
                 <option value="partial">Partial</option>
             </select>
+            <div class="fld" style="margin:0;min-width:170px;">
+                <label>From Date</label>
+                <input type="date" id="b2b-from-date" onchange="loadB2BInvoices()">
+            </div>
+            <div class="fld" style="margin:0;min-width:170px;">
+                <label>To Date</label>
+                <input type="date" id="b2b-to-date" onchange="loadB2BInvoices()">
+            </div>
+            <button class="btn btn-outline" onclick="resetB2BFilters()">Clear</button>
         </div>
         <div class="table-wrap">
             <table>
@@ -1064,7 +1197,55 @@ let currentTab  = "accounts";
 let currentUserRole = "";
 let currentUserPermissions = new Set();
 
+function formatLocalDateInputValue(d){
+    const year = d.getFullYear();
+    const month = String(d.getMonth() + 1).padStart(2, "0");
+    const day = String(d.getDate()).padStart(2, "0");
+    return `${year}-${month}-${day}`;
+}
+
+function todayIso(){
+    return formatLocalDateInputValue(new Date());
+}
+
+function monthStartIso(){
+    const d = new Date();
+    d.setDate(1);
+    return formatLocalDateInputValue(d);
+}
+
+function setDefaultAccountingFilters(){
+    const today = todayIso();
+    const monthStart = monthStartIso();
+    const defaults = [
+        ["journals-from-date", monthStart],
+        ["journals-to-date", today],
+        ["pl-from-date", monthStart],
+        ["pl-to-date", today],
+        ["tb-as-of-date", today],
+        ["b2b-from-date", monthStart],
+        ["b2b-to-date", today],
+    ];
+    defaults.forEach(([id, value]) => {
+        const el = document.getElementById(id);
+        if(el && !el.value) el.value = value;
+    });
+}
+
+function appendDateRangeParams(params, fromId, toId){
+    const fromValue = document.getElementById(fromId)?.value || "";
+    const toValue = document.getElementById(toId)?.value || "";
+    if(fromValue) params.set("from_date", fromValue);
+    if(toValue) params.set("to_date", toValue);
+}
+
+function appendAsOfParam(params, id){
+    const value = document.getElementById(id)?.value || "";
+    if(value) params.set("as_of", value);
+}
+
 async function init(){
+    setDefaultAccountingFilters();
     await loadAccounts();
 }
 
@@ -1149,10 +1330,19 @@ async function deleteAccount(id,name){
 
 /* ── JOURNALS ── */
 async function loadJournals(){
-    let data = await (await fetch("/accounting/api/journals")).json();
+    const params = new URLSearchParams();
+    appendDateRangeParams(params, "journals-from-date", "journals-to-date");
+    let res = await fetch(`/accounting/api/journals?${params.toString()}`);
+    let data = await res.json();
+    if(!res.ok){
+        showToast("Error: " + (data.detail || "Unable to load journal entries"));
+        document.getElementById("journals-body").innerHTML =
+            `<tr><td colspan="7" style="text-align:center;color:var(--danger);padding:40px">${data.detail || "Unable to load journal entries"}</td></tr>`;
+        return;
+    }
     if(!data.journals.length){
         document.getElementById("journals-body").innerHTML =
-            `<tr><td colspan="7" style="text-align:center;color:var(--muted);padding:40px">No journal entries yet</td></tr>`;
+            `<tr><td colspan="7" style="text-align:center;color:var(--muted);padding:40px">No journal entries found for the selected date range.</td></tr>`;
         return;
     }
     document.getElementById("journals-body").innerHTML = data.journals.map(j=>{
@@ -1174,6 +1364,12 @@ async function loadJournals(){
             <td><button class="action-btn green" onclick="viewJournal(${j.id})">View</button></td>
         </tr>`;
     }).join("");
+}
+
+function resetJournalFilters(){
+    document.getElementById("journals-from-date").value = monthStartIso();
+    document.getElementById("journals-to-date").value = todayIso();
+    loadJournals();
 }
 
 function openJEModal(){
@@ -1290,7 +1486,15 @@ function closeSide(){
 
 /* ── P&L ── */
 async function loadPL(){
-    let d = await (await fetch("/accounting/api/profit-loss")).json();
+    const params = new URLSearchParams();
+    appendDateRangeParams(params, "pl-from-date", "pl-to-date");
+    let res = await fetch(`/accounting/api/profit-loss?${params.toString()}`);
+    let d = await res.json();
+    if(!res.ok){
+        showToast("Error: " + (d.detail || "Unable to load Profit & Loss"));
+        document.getElementById("pl-content").innerHTML = `<div style="color:var(--danger);padding:40px;text-align:center">${d.detail || "Unable to load Profit & Loss"}</div>`;
+        return;
+    }
     let profitColor = d.net_profit>=0?"var(--green)":"var(--danger)";
     const refundLine = d.total_refunds > 0
         ? `<div class="pl-row" style="background:rgba(255,77,109,.04);border-left:3px solid rgba(255,77,109,.4);">
@@ -1332,9 +1536,24 @@ async function loadPL(){
         </div>`;
 }
 
+function resetPLFilters(){
+    document.getElementById("pl-from-date").value = monthStartIso();
+    document.getElementById("pl-to-date").value = todayIso();
+    loadPL();
+}
+
 /* ── TRIAL BALANCE ── */
 async function loadTB(){
-    let d = await (await fetch("/accounting/api/trial-balance")).json();
+    const params = new URLSearchParams();
+    appendAsOfParam(params, "tb-as-of-date");
+    let res = await fetch(`/accounting/api/trial-balance?${params.toString()}`);
+    let d = await res.json();
+    if(!res.ok){
+        showToast("Error: " + (d.detail || "Unable to load Trial Balance"));
+        document.getElementById("tb-body").innerHTML = `<tr><td colspan="5" style="text-align:center;color:var(--danger);padding:40px">${d.detail || "Unable to load Trial Balance"}</td></tr>`;
+        document.getElementById("tb-foot").innerHTML = "";
+        return;
+    }
     document.getElementById("tb-body").innerHTML = d.rows.map(r=>`
         <tr>
             <td style="font-family:var(--mono);font-size:12px;color:var(--blue)">${r.code}</td>
@@ -1357,6 +1576,11 @@ async function loadTB(){
                 ${d.drift_count} account${d.drift_count===1?"":"s"} have stored balance drift versus journal-derived balance.
             </td>
         </tr>` : ""}`;
+}
+
+function resetTBFilters(){
+    document.getElementById("tb-as-of-date").value = todayIso();
+    loadTB();
 }
 
 ["acc-modal","je-modal"].forEach(id=>{
@@ -1382,12 +1606,32 @@ let refundInvoiceNum = null;
 async function loadB2BInvoices(){
     let type   = document.getElementById("b2b-type-filter").value;
     let status = document.getElementById("b2b-status-filter").value;
-    let url    = `/accounting/api/b2b-invoices?${type?"invoice_type="+type:""}${status?"&status="+status:""}`;
-    allB2BInvoices = await (await fetch(url)).json();
+    const params = new URLSearchParams();
+    if(type) params.set("invoice_type", type);
+    if(status) params.set("status", status);
+    appendDateRangeParams(params, "b2b-from-date", "b2b-to-date");
+    let res = await fetch(`/accounting/api/b2b-invoices?${params.toString()}`);
+    let data = await res.json();
+    if(!res.ok){
+        showToast("Error: " + (data.detail || "Unable to load B2B invoices"));
+        document.getElementById("b2b-invoices-body").innerHTML =
+            `<tr><td colspan="9" style="text-align:center;color:var(--danger);padding:40px">${data.detail || "Unable to load B2B invoices"}</td></tr>`;
+        allB2BInvoices = [];
+        return;
+    }
+    allB2BInvoices = data;
     renderB2BInvoices(allB2BInvoices);
 
     // Show consignment payment history section if filtering consignment
     document.getElementById("cons-payment-section").style.display = type==="consignment"?"":"none";
+}
+
+function resetB2BFilters(){
+    document.getElementById("b2b-type-filter").value = "";
+    document.getElementById("b2b-status-filter").value = "";
+    document.getElementById("b2b-from-date").value = monthStartIso();
+    document.getElementById("b2b-to-date").value = todayIso();
+    loadB2BInvoices();
 }
 
 function renderB2BInvoices(invoices){
