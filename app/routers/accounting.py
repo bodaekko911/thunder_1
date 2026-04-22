@@ -838,13 +838,14 @@ td.cr { font-family:var(--mono); color:var(--blue); }
         <div style="display:flex;align-items:end;gap:10px;flex-wrap:wrap;margin-bottom:14px;">
             <div class="fld" style="margin:0;min-width:170px;">
                 <label>From Date</label>
-                <input type="date" id="journals-from-date" onchange="loadJournals()">
+                <input type="date" id="journals-from-date">
             </div>
             <div class="fld" style="margin:0;min-width:170px;">
                 <label>To Date</label>
-                <input type="date" id="journals-to-date" onchange="loadJournals()">
+                <input type="date" id="journals-to-date">
             </div>
             <button class="btn btn-outline" onclick="resetJournalFilters()">Clear</button>
+            <div id="journals-active-range" style="font-size:12px;color:var(--muted);padding-bottom:10px"></div>
         </div>
         <div class="table-wrap">
             <table>
@@ -1246,6 +1247,9 @@ function appendAsOfParam(params, id){
 
 async function init(){
     setDefaultAccountingFilters();
+    setupJournalFilters();
+    const {fromDate, toDate} = getJournalFilterValues();
+    updateJournalsActiveRange(fromDate, toDate);
     await loadAccounts();
 }
 
@@ -1330,31 +1334,99 @@ async function deleteAccount(id,name){
 
 /* ── JOURNALS ── */
 let journalsRequestSeq = 0;
+let journalsAbortController = null;
 
 function setJournalsTableState(message, color="var(--muted)"){
     document.getElementById("journals-body").innerHTML =
         `<tr><td colspan="7" style="text-align:center;color:${color};padding:40px">${message}</td></tr>`;
 }
 
+function getJournalFilterValues(){
+    return {
+        fromDate: document.getElementById("journals-from-date")?.value || "",
+        toDate: document.getElementById("journals-to-date")?.value || "",
+    };
+}
+
+function updateJournalsActiveRange(fromDate, toDate){
+    const el = document.getElementById("journals-active-range");
+    if(!el) return;
+    if(fromDate && toDate){
+        el.textContent = `Applied range: ${fromDate} to ${toDate}`;
+        return;
+    }
+    if(fromDate){
+        el.textContent = `Applied range: from ${fromDate}`;
+        return;
+    }
+    if(toDate){
+        el.textContent = `Applied range: up to ${toDate}`;
+        return;
+    }
+    el.textContent = "Applied range: all dates";
+}
+
+function debugJournalFilters(stage, details){
+    console.debug("[Accounting][Journals]", stage, details);
+}
+
+function handleJournalFilterChange(){
+    const {fromDate, toDate} = getJournalFilterValues();
+    debugJournalFilters("ui-change", {fromDate, toDate});
+    loadJournals();
+}
+
+function setupJournalFilters(){
+    ["journals-from-date", "journals-to-date"].forEach(id => {
+        const el = document.getElementById(id);
+        if(!el || el.dataset.bound === "1") return;
+        el.addEventListener("change", handleJournalFilterChange);
+        el.addEventListener("input", handleJournalFilterChange);
+        el.dataset.bound = "1";
+    });
+}
+
 async function loadJournals(){
     const requestSeq = ++journalsRequestSeq;
+    if(journalsAbortController) journalsAbortController.abort();
+    journalsAbortController = new AbortController();
     const params = new URLSearchParams();
     appendDateRangeParams(params, "journals-from-date", "journals-to-date");
+    const {fromDate, toDate} = getJournalFilterValues();
+    updateJournalsActiveRange(fromDate, toDate);
+    debugJournalFilters("request", {
+        requestSeq,
+        fromDate,
+        toDate,
+        url: `/accounting/api/journals?${params.toString()}`,
+    });
     setJournalsTableState("Loading...");
     try{
-        let res = await fetch(`/accounting/api/journals?${params.toString()}`);
+        let res = await fetch(`/accounting/api/journals?${params.toString()}`, {
+            cache: "no-store",
+            signal: journalsAbortController.signal,
+        });
         let data = await res.json();
         if(requestSeq !== journalsRequestSeq) return;
+        debugJournalFilters("response", {
+            requestSeq,
+            fromDate: data.from_date || null,
+            toDate: data.to_date || null,
+            total: data.total,
+            rowCount: data.journals?.length || 0,
+        });
         if(!res.ok){
             showToast("Error: " + (data.detail || "Unable to load journal entries"));
             setJournalsTableState(data.detail || "Unable to load journal entries", "var(--danger)");
             return;
         }
+        updateJournalsActiveRange(data.from_date || "", data.to_date || "");
         if(!data.journals.length){
+            debugJournalFilters("render-empty", {requestSeq});
             setJournalsTableState("No journal entries found for the selected date range.");
             return;
         }
-        document.getElementById("journals-body").innerHTML = data.journals.map(j=>{
+        const renderedRows = data.journals.map(j=>{
             const isRefund = j.ref_type === "retail_refund" || j.ref_type === "retail_refund_void";
             const badgeClass = isRefund ? "type-refund"
                 : j.ref_type === "manual" ? "type-equity"
@@ -1373,7 +1445,17 @@ async function loadJournals(){
                 <td><button class="action-btn green" onclick="viewJournal(${j.id})">View</button></td>
             </tr>`;
         }).join("");
+        document.getElementById("journals-body").innerHTML = renderedRows;
+        debugJournalFilters("render-complete", {
+            requestSeq,
+            renderedCount: data.journals.length,
+            firstJournalId: data.journals[0]?.id || null,
+        });
     }catch(_err){
+        if(_err?.name === "AbortError"){
+            debugJournalFilters("request-aborted", {requestSeq});
+            return;
+        }
         if(requestSeq !== journalsRequestSeq) return;
         showToast("Error: Unable to load journal entries");
         setJournalsTableState("Unable to load journal entries", "var(--danger)");
