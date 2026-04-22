@@ -2607,11 +2607,11 @@ async function loadSales(){
           </tr>`).join("")
         : `<tr><td colspan="5" style="text-align:center;color:var(--muted);padding:30px">No sales in this period</td></tr>`;
 
-    let maxR = data.top_products.length ? data.top_products[0].revenue : 1;
+    let legacyMaxR = data.top_products.length ? data.top_products[0].revenue : 1;
     document.getElementById("sales-top").innerHTML = data.top_products.length
         ? data.top_products.map(p=>`<div class="bar-row">
             <div class="bar-label">${p.name}</div>
-            <div class="bar-track"><div class="bar-fill" style="width:${(p.revenue/maxR*100).toFixed(1)}%;background:linear-gradient(90deg,var(--green),var(--lime))"></div></div>
+            <div class="bar-track"><div class="bar-fill" style="width:${(p.revenue/legacyMaxR*100).toFixed(1)}%;background:linear-gradient(90deg,var(--green),var(--lime))"></div></div>
             <div class="bar-val" style="color:var(--green)">${p.revenue.toFixed(0)}</div>
           </div>`).join("")
         : `<div style="color:var(--muted);font-size:13px">No data</div>`;
