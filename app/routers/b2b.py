@@ -9,7 +9,7 @@ from decimal import Decimal
 from datetime import date, datetime
 
 from app.database import get_async_session
-from app.core.permissions import get_current_user, require_action, require_permission
+from app.core.permissions import get_current_user, require_action, require_admin, require_permission
 from app.core.log import record
 from app.models.b2b import B2BClient, B2BInvoice, B2BInvoiceItem, Consignment, ConsignmentItem, B2BRefund, B2BRefundItem, B2BClientPrice
 from app.models.product import Product
@@ -140,6 +140,47 @@ async def _reverse_invoice_journal(invoice, db: AsyncSession):
         unpaid = max(0.0, total - float(invoice.amount_paid))
         if unpaid > 0:
             client.outstanding = Decimal(str(max(0, float(client.outstanding) - unpaid)))
+
+
+async def _reverse_refund_effects(refund, db: AsyncSession, current_user: User):
+    for item in refund.items:
+        product = item.product
+        if not product:
+            continue
+        before = float(product.stock)
+        after = before - float(item.qty)
+        if after < -0.001:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Cannot delete refund {refund.refund_number}: stock for {product.name} would become negative",
+            )
+        after = max(0.0, after)
+        product.stock = after
+        db.add(StockMove(
+            product_id=product.id,
+            type="out",
+            qty=float(item.qty),
+            user_id=current_user.id,
+            qty_before=before,
+            qty_after=after,
+            ref_type="b2b_refund_delete",
+            ref_id=refund.id,
+            note=f"Delete refund â€” {refund.refund_number}",
+        ))
+
+    if refund.client:
+        refund.client.outstanding = Decimal(str(float(refund.client.outstanding) + float(refund.total)))
+
+    await _post_journal(
+        db,
+        f"Delete refund â€” {refund.refund_number}",
+        "b2b_refund_delete",
+        [
+            ("2200", 0, float(refund.total)),
+            ("1100", float(refund.total), 0),
+        ],
+        user_id=current_user.id,
+    )
 
 
 # ── SEED DEFERRED REVENUE ──────────────────────────────
@@ -1016,6 +1057,40 @@ async def get_refunds(client_id: int = None, db: AsyncSession = Depends(get_asyn
         }
         for r in refunds
     ]
+
+
+@router.delete("/api/refunds/{refund_id}", dependencies=[Depends(require_admin)])
+async def delete_refund(
+    refund_id: int,
+    db: AsyncSession = Depends(get_async_session),
+    current_user: User = Depends(get_current_user),
+):
+    _r = await db.execute(
+        select(B2BRefund)
+        .where(B2BRefund.id == refund_id)
+        .options(
+            selectinload(B2BRefund.client),
+            selectinload(B2BRefund.items).selectinload(B2BRefundItem.product),
+        )
+    )
+    refund = _r.scalar_one_or_none()
+    if not refund:
+        raise HTTPException(status_code=404, detail="Refund not found")
+
+    await _reverse_refund_effects(refund, db, current_user)
+
+    record(
+        db,
+        "B2B",
+        "delete_refund",
+        f"Deleted refund {refund.refund_number} for {refund.client.name if refund.client else 'Unknown client'}",
+        current_user,
+        "b2b_refund",
+        refund.id,
+    )
+    await db.delete(refund)
+    await db.commit()
+    return {"ok": True, "refund_number": refund.refund_number}
 
 
 @router.get("/invoice/{invoice_id}/print", response_class=HTMLResponse)
@@ -2576,6 +2651,7 @@ async function logout(){
       if(!hasPermission("tab_b2b_clients", u) && hasPermission("tab_b2b_invoices", u)){
           setTimeout(() => switchTab("invoices"), 0);
       }
+      renderRefundRecords(allRefunds || []);
   }
   initializeColorMode();
   initUser().then(u => { if(u) configureB2BPermissions(u); });
@@ -3173,9 +3249,26 @@ function renderRefundRecords(refunds){
             <td style="font-family:var(--mono);color:${r.discount>0?"var(--danger)":"var(--muted)"}">${r.discount>0?`${r.discount.toFixed(2)} (${r.discount_pct.toFixed(1)}%)`:"—"}</td>
             <td style="font-family:var(--mono);font-weight:700;color:var(--warn)">${r.total.toFixed(2)}</td>
             <td style="font-size:12px;color:var(--muted)">${r.created_at}</td>
-            <td><div style="display:flex;gap:6px;flex-wrap:wrap"><button class="action-btn" onclick="window.open('/b2b/refund/${r.id}/print','_blank')">Print</button></div></td>
+            <td><div style="display:flex;gap:6px;flex-wrap:wrap">
+                <button class="action-btn" onclick="window.open('/b2b/refund/${r.id}/print','_blank')">Print</button>
+                ${isAdmin ? `<button class="action-btn danger" onclick="deleteRefund(${r.id}, ${JSON.stringify(r.refund_number)})">Delete</button>` : ""}
+            </div></td>
         </tr>
     `).join("");
+}
+
+async function deleteRefund(id, refundNumber){
+    if(!confirm(`Are you sure you want to delete refund ${refundNumber}?`)) return;
+    let res = await fetch(`/b2b/api/refunds/${id}`, {method:"DELETE"});
+    let data = await res.json().catch(()=>({detail:"Unable to delete refund"}));
+    if(!res.ok || data.detail){
+        showToast("Error: " + (data.detail || "Unable to delete refund"));
+        return;
+    }
+    showToast(`${refundNumber} deleted`);
+    await loadClients();
+    await loadStats();
+    await prepareRefundTab();
 }
 
 async function openEditInvoice(id){
