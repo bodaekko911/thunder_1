@@ -651,6 +651,12 @@ nav {
 .summary-total { font-family: var(--mono); font-size: 28px; font-weight: 700; color: var(--rose); line-height: 1; }
 .summary-total-sub { font-size: 11px; color: var(--muted); }
 .summary-spacer { flex: 1; }
+.clear-refund-btn {
+    display: flex; align-items: center; gap: 8px;
+    background: var(--card2); border: 1px solid var(--border2); border-radius: 12px; padding: 13px 18px;
+    font-family: var(--sans); font-size: 13px; font-weight: 700; color: var(--sub); cursor: pointer; transition: all .2s;
+}
+.clear-refund-btn:hover { border-color: rgba(255,107,138,.35); color: var(--text); background: rgba(255,107,138,.06); }
 .submit-btn {
     display: flex; align-items: center; gap: 8px;
     background: linear-gradient(135deg, var(--rose2), #e63060);
@@ -860,6 +866,12 @@ nav {
                         <div class="summary-total-sub">EGP</div>
                     </div>
                     <div class="summary-spacer"></div>
+                    <button type="button" class="clear-refund-btn" onclick="clearRefundDraft()">
+                        <svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2" viewBox="0 0 24 24">
+                            <path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="M19 6l-1 14H6L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/>
+                        </svg>
+                        Clear Refund
+                    </button>
                     <button id="submit-btn" class="submit-btn" onclick="submitRefund()" disabled>
                         <svg width="15" height="15" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24">
                             <polyline points="20 6 9 17 4 12"/>
@@ -1081,6 +1093,24 @@ function recalc() {
     document.getElementById("summary-total").innerText = total.toFixed(2);
     const btn = document.getElementById("submit-btn");
     btn.disabled = count === 0 || !document.getElementById("reason").value.trim();
+}
+
+function clearRefundDraft() {
+    if (!selectedInvoice) return;
+    const hasDraftItems = Array.from(document.querySelectorAll("#items .qty-input")).some(inp => (parseFloat(inp.value) || 0) > 0);
+    const hasReason = !!document.getElementById("reason").value.trim();
+    const hasNonDefaultMethod = document.getElementById("refund-method").value !== "cash";
+    if (!hasDraftItems && !hasReason && !hasNonDefaultMethod) return;
+    if (!confirm("Clear current refund draft?")) return;
+
+    document.querySelectorAll("#items .qty-input").forEach(inp => {
+        inp.value = "0";
+        inp.classList.remove("has-value");
+    });
+    document.getElementById("reason").value = "";
+    document.getElementById("refund-method").value = "cash";
+    document.getElementById("builder-status").innerText = "Select items to return";
+    recalc();
 }
 
 document.addEventListener("input", e => {
