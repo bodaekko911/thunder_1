@@ -1341,6 +1341,10 @@ function setJournalsTableState(message, color="var(--muted)"){
         `<tr><td colspan="7" style="text-align:center;color:${color};padding:40px">${message}</td></tr>`;
 }
 
+function setJournalsUnauthorizedState(message="Your session expired or you do not have access to Journal Entries. Please sign in again."){
+    setJournalsTableState(message, "var(--danger)");
+}
+
 function getJournalFilterValues(){
     return {
         fromDate: document.getElementById("journals-from-date")?.value || "",
@@ -1404,6 +1408,7 @@ async function loadJournals(){
     try{
         let res = await fetch(`/accounting/api/journals?${params.toString()}`, {
             cache: "no-store",
+            credentials: "same-origin",
             signal: journalsAbortController.signal,
         });
         let data = await res.json();
@@ -1416,6 +1421,16 @@ async function loadJournals(){
             rowCount: data.journals?.length || 0,
         });
         if(!res.ok){
+            if(res.status === 401){
+                showToast("Session expired. Please sign in again.");
+                setJournalsUnauthorizedState();
+                return;
+            }
+            if(res.status === 403){
+                showToast("You do not have permission to view journal entries.");
+                setJournalsUnauthorizedState("You do not have permission to view Journal Entries.");
+                return;
+            }
             showToast("Error: " + (data.detail || "Unable to load journal entries"));
             setJournalsTableState(data.detail || "Unable to load journal entries", "var(--danger)");
             return;
@@ -1457,6 +1472,10 @@ async function loadJournals(){
             return;
         }
         if(requestSeq !== journalsRequestSeq) return;
+        debugJournalFilters("request-failed", {
+            requestSeq,
+            message: _err?.message || "Unknown error",
+        });
         showToast("Error: Unable to load journal entries");
         setJournalsTableState("Unable to load journal entries", "var(--danger)");
     }
