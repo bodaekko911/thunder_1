@@ -662,6 +662,53 @@ async def export_sales(date_from: str = None, date_to: str = None, db: AsyncSess
     )
 
 
+@router.get("/api/b2b-statement")
+async def b2b_statement(
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+    skip: int = 0,
+    limit: int = Query(default=100, le=500),
+    db: AsyncSession = Depends(get_async_session),
+):
+    d_from, d_to = parse_dates(date_from, date_to)
+    if (d_to - d_from).days > 366:
+        raise HTTPException(status_code=400, detail="Date range cannot exceed 1 year")
+    skip, limit = _resolve_pagination(skip, limit)
+    res = await db.execute(select(B2BClient).where(B2BClient.is_active == True).order_by(B2BClient.name))
+    clients = res.scalars().all()
+    result = []
+    for client in clients:
+        agg_res = await db.execute(
+            select(
+                func.count(B2BInvoice.id),
+                func.sum(B2BInvoice.total),
+                func.sum(B2BInvoice.amount_paid),
+            ).where(
+                B2BInvoice.client_id == client.id,
+                B2BInvoice.created_at >= d_from,
+                B2BInvoice.created_at <= d_to,
+            )
+        )
+        invoice_count, total_invoiced, total_paid = agg_res.one()
+        if not invoice_count:
+            continue
+        total_invoiced = _num(total_invoiced)
+        total_paid = _num(total_paid)
+        result.append(
+            {
+                "id": client.id,
+                "name": client.name,
+                "phone": client.phone or "-",
+                "payment_terms": client.payment_terms or "-",
+                "total_invoiced": round(total_invoiced, 2),
+                "total_paid": round(total_paid, 2),
+                "outstanding": round(total_invoiced - total_paid, 2),
+                "invoice_count": int(invoice_count or 0),
+            }
+        )
+    return result[skip : skip + limit]
+
+
 @router.get("/export/b2b-statement", dependencies=[Depends(require_permission("action_export_excel"))])
 async def export_b2b(date_from: str = None, date_to: str = None, db: AsyncSession = Depends(get_async_session)):
     d_from, d_to = parse_dates(date_from, date_to)
@@ -2799,7 +2846,7 @@ async function loadB2B(){
         ? data.map(c=>`<tr>
             <td class="name">${c.name}</td>
             <td style="font-size:12px">${c.phone}</td>
-            <td style="font-size:12px">${c.payment_terms.replace("_"," ")}</td>
+            <td style="font-size:12px">${String(c.payment_terms || "-").replaceAll("_"," ")}</td>
             <td class="mono">${c.total_invoiced.toFixed(2)}</td>
             <td class="mono" style="color:var(--green)">${c.total_paid.toFixed(2)}</td>
             <td class="mono" style="color:${c.outstanding>0?"var(--warn)":"var(--muted)"};font-weight:${c.outstanding>0?700:400}">${c.outstanding>0?c.outstanding.toFixed(2):"—"}</td>
