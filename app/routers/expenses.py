@@ -476,9 +476,10 @@ async def cost_allocation(
     except ValueError:
         raise HTTPException(status_code=400, detail="Invalid date format — use YYYY-MM-DD")
 
+    farm_selector = (farm_id or "").strip().lower()
     selected_farm_ids: list[int]
     farm_scope_label: str
-    if farm_id == "both":
+    if farm_selector == "both":
         farms_result = await db.execute(
             select(Farm).where(Farm.is_active == 1).order_by(Farm.name)
         )
@@ -489,7 +490,7 @@ async def cost_allocation(
         farm_scope_label = "Both Farms"
     else:
         try:
-            single_farm_id = int(farm_id)
+            single_farm_id = int(farm_selector)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail="Invalid farm selection") from exc
         _rf = await db.execute(select(Farm).where(Farm.id == single_farm_id))
