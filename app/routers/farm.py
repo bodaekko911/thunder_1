@@ -1328,6 +1328,30 @@ function showToast(msg){
     toastTimer=setTimeout(()=>t.classList.remove("show"),4000);
 }
 
+function getErrorMessage(source, fallback="Something went wrong"){
+    if(source == null) return fallback;
+    if(typeof source === "string") return source;
+    if(Array.isArray(source)){
+        let parts = source
+            .map(item => getErrorMessage(item, ""))
+            .filter(Boolean);
+        return parts.length ? parts.join("; ") : fallback;
+    }
+    if(source instanceof Error){
+        return source.message || fallback;
+    }
+    if(typeof source === "object"){
+        if(source.detail != null) return getErrorMessage(source.detail, fallback);
+        if(source.message != null) return getErrorMessage(source.message, fallback);
+        if(source.error != null) return getErrorMessage(source.error, fallback);
+        if(source.msg != null) return getErrorMessage(source.msg, fallback);
+        if(source.loc && source.msg){
+            return `${source.loc.join(" -> ")}: ${source.msg}`;
+        }
+    }
+    return fallback;
+}
+
 document.getElementById("delivery-modal").addEventListener("click",function(e){
     if(e.target===this) closeDeliveryModal();
 });
@@ -1484,70 +1508,87 @@ async function loadSeasonAnalysis(){
     let dateTo   = document.getElementById("season-to").value;
     if(!farmId)  { showToast("Select a farm first"); return; }
     if(!dateFrom || !dateTo){ showToast("Set a date range"); return; }
+    if(dateFrom > dateTo){ showToast("Start date must be before end date"); return; }
 
-    let res  = await fetch(`/expenses/api/cost-allocation?farm_id=${encodeURIComponent(farmId)}&date_from=${dateFrom}&date_to=${dateTo}`);
-    let data = await res.json();
-    if(data.detail){ showToast("Error: "+data.detail); return; }
+    try{
+        let res  = await fetch(`/expenses/api/cost-allocation?farm_id=${encodeURIComponent(farmId)}&date_from=${dateFrom}&date_to=${dateTo}`);
+        let data = null;
+        try{
+            data = await res.json();
+        }catch(_err){
+            data = null;
+        }
+        if(!res.ok){
+            showToast("Error: " + getErrorMessage(data, `Request failed (${res.status})`));
+            return;
+        }
+        if(data && data.detail){
+            showToast("Error: " + getErrorMessage(data));
+            return;
+        }
 
-    document.getElementById("season-empty").style.display  = "none";
-    document.getElementById("season-result").style.display = "";
+        document.getElementById("season-empty").style.display  = "none";
+        document.getElementById("season-result").style.display = "";
 
-    // Summary cards
-    document.getElementById("season-summary-cards").innerHTML = `
-        <div class="stat-card" style="border-top:2px solid var(--blue)"><div class="stat-label">Scope</div><div class="stat-value" style="font-size:20px;color:var(--blue)">${data.farm_scope_label || data.farm_name}</div></div>
-        <div class="stat-card green"><div class="stat-label">Total Farm Costs</div><div class="stat-value green" style="font-size:20px">${data.total_cost.toLocaleString(undefined,{minimumFractionDigits:2})} EGP</div></div>
-        <div class="stat-card lime"><div class="stat-label">Total Harvested</div><div class="stat-value lime" style="font-size:20px">${data.total_qty.toFixed(1)} units</div></div>
-        <div class="stat-card teal"><div class="stat-label">Expenses Tagged</div><div class="stat-value teal" style="font-size:20px">${data.expense_count}</div></div>
-        <div class="stat-card" style="border-top:2px solid var(--orange)"><div class="stat-label">Deliveries</div><div class="stat-value" style="font-size:20px;color:var(--orange)">${data.delivery_count}</div></div>
-    `;
+        // Summary cards
+        document.getElementById("season-summary-cards").innerHTML = `
+            <div class="stat-card" style="border-top:2px solid var(--blue)"><div class="stat-label">Scope</div><div class="stat-value" style="font-size:20px;color:var(--blue)">${data.farm_scope_label || data.farm_name}</div></div>
+            <div class="stat-card green"><div class="stat-label">Total Farm Costs</div><div class="stat-value green" style="font-size:20px">${data.total_cost.toLocaleString(undefined,{minimumFractionDigits:2})} EGP</div></div>
+            <div class="stat-card lime"><div class="stat-label">Total Harvested</div><div class="stat-value lime" style="font-size:20px">${data.total_qty.toFixed(1)} units</div></div>
+            <div class="stat-card teal"><div class="stat-label">Expenses Tagged</div><div class="stat-value teal" style="font-size:20px">${data.expense_count}</div></div>
+            <div class="stat-card" style="border-top:2px solid var(--orange)"><div class="stat-label">Deliveries</div><div class="stat-value" style="font-size:20px;color:var(--orange)">${data.delivery_count}</div></div>
+        `;
 
-    // Cost breakdown chart
-    let maxCost = data.cost_by_category.length ? data.cost_by_category[0].amount : 1;
-    document.getElementById("season-cost-breakdown").innerHTML = `
-        <div class="history-title">Cost Breakdown by Category</div>
-        ${data.cost_by_category.length === 0
-            ? `<div style="color:var(--muted);font-size:13px">No expenses tagged to ${data.farm_scope_label || data.farm_name} for this period.<br>Go to <a href="/expenses/" style="color:var(--lime)">Expenses</a> and tag expenses to the relevant farm.</div>`
-            : data.cost_by_category.map(c=>`
-                <div class="history-bar-row">
-                    <div class="history-bar-label">${c.name}</div>
-                    <div class="history-bar-track"><div class="history-bar-fill" style="width:${(c.amount/maxCost*100).toFixed(1)}%;background:linear-gradient(90deg,var(--orange),var(--warn))"></div></div>
-                    <div class="history-bar-val">${c.amount.toLocaleString(undefined,{minimumFractionDigits:0})}</div>
-                </div>`).join("")}
-    `;
+        // Cost breakdown chart
+        let maxCost = data.cost_by_category.length ? data.cost_by_category[0].amount : 1;
+        document.getElementById("season-cost-breakdown").innerHTML = `
+            <div class="history-title">Cost Breakdown by Category</div>
+            ${data.cost_by_category.length === 0
+                ? `<div style="color:var(--muted);font-size:13px">No expenses tagged to ${data.farm_scope_label || data.farm_name} for this period.<br>Go to <a href="/expenses/" style="color:var(--lime)">Expenses</a> and tag expenses to the relevant farm.</div>`
+                : data.cost_by_category.map(c=>`
+                    <div class="history-bar-row">
+                        <div class="history-bar-label">${c.name}</div>
+                        <div class="history-bar-track"><div class="history-bar-fill" style="width:${(c.amount/maxCost*100).toFixed(1)}%;background:linear-gradient(90deg,var(--orange),var(--warn))"></div></div>
+                        <div class="history-bar-val">${c.amount.toLocaleString(undefined,{minimumFractionDigits:0})}</div>
+                    </div>`).join("")}
+        `;
 
-    // Product harvest chart
-    let maxQty = data.products.length ? data.products[0].total_qty : 1;
-    document.getElementById("season-product-chart").innerHTML = `
-        <div class="history-title">Harvest by Product</div>
-        ${data.products.length === 0
-            ? `<div style="color:var(--muted);font-size:13px">No deliveries from ${data.farm_scope_label || data.farm_name} in this period.</div>`
-            : data.products.map(p=>`
-                <div class="history-bar-row">
-                    <div class="history-bar-label">${p.product_name}</div>
-                    <div class="history-bar-track"><div class="history-bar-fill" style="width:${(p.total_qty/maxQty*100).toFixed(1)}%;background:linear-gradient(90deg,var(--lime),var(--green))"></div></div>
-                    <div class="history-bar-val">${p.total_qty.toFixed(1)}</div>
-                </div>`).join("")}
-    `;
+        // Product harvest chart
+        let maxQty = data.products.length ? data.products[0].total_qty : 1;
+        document.getElementById("season-product-chart").innerHTML = `
+            <div class="history-title">Harvest by Product</div>
+            ${data.products.length === 0
+                ? `<div style="color:var(--muted);font-size:13px">No deliveries from ${data.farm_scope_label || data.farm_name} in this period.</div>`
+                : data.products.map(p=>`
+                    <div class="history-bar-row">
+                        <div class="history-bar-label">${p.product_name}</div>
+                        <div class="history-bar-track"><div class="history-bar-fill" style="width:${(p.total_qty/maxQty*100).toFixed(1)}%;background:linear-gradient(90deg,var(--lime),var(--green))"></div></div>
+                        <div class="history-bar-val">${p.total_qty.toFixed(1)}</div>
+                    </div>`).join("")}
+        `;
 
-    // Products table
-    if(!data.products.length){
-        document.getElementById("season-body").innerHTML =
-            `<tr><td colspan="8" style="text-align:center;color:var(--muted);padding:40px">No deliveries recorded for ${data.farm_scope_label || data.farm_name} in this period.</td></tr>`;
-    } else {
-        document.getElementById("season-body").innerHTML = data.products.map(p=>{
-            let marginColor = p.profit_margin_pct >= 30 ? "var(--green)" : p.profit_margin_pct >= 0 ? "var(--warn)" : "var(--danger)";
-            let profitColor = p.profit_per_unit >= 0 ? "var(--green)" : "var(--danger)";
-            return `<tr>
-                <td class="name">${p.product_name}</td>
-                <td style="font-family:var(--mono)">${p.total_qty.toFixed(2)} ${p.unit}</td>
-                <td style="font-family:var(--mono);color:var(--muted)">${p.share_pct}%</td>
-                <td style="font-family:var(--mono);color:var(--orange)">${p.allocated_cost.toLocaleString(undefined,{minimumFractionDigits:2})}</td>
-                <td style="font-family:var(--mono);color:var(--warn)">${p.cost_per_unit.toFixed(2)}</td>
-                <td style="font-family:var(--mono);color:var(--blue)">${p.sale_price.toFixed(2)}</td>
-                <td style="font-family:var(--mono);font-weight:700;color:${profitColor}">${p.profit_per_unit.toFixed(2)}</td>
-                <td style="font-family:var(--mono);font-weight:700;color:${marginColor}">${p.profit_margin_pct}%</td>
-            </tr>`;
-        }).join("");
+        // Products table
+        if(!data.products.length){
+            document.getElementById("season-body").innerHTML =
+                `<tr><td colspan="8" style="text-align:center;color:var(--muted);padding:40px">No deliveries recorded for ${data.farm_scope_label || data.farm_name} in this period.</td></tr>`;
+        } else {
+            document.getElementById("season-body").innerHTML = data.products.map(p=>{
+                let marginColor = p.profit_margin_pct >= 30 ? "var(--green)" : p.profit_margin_pct >= 0 ? "var(--warn)" : "var(--danger)";
+                let profitColor = p.profit_per_unit >= 0 ? "var(--green)" : "var(--danger)";
+                return `<tr>
+                    <td class="name">${p.product_name}</td>
+                    <td style="font-family:var(--mono)">${p.total_qty.toFixed(2)} ${p.unit}</td>
+                    <td style="font-family:var(--mono);color:var(--muted)">${p.share_pct}%</td>
+                    <td style="font-family:var(--mono);color:var(--orange)">${p.allocated_cost.toLocaleString(undefined,{minimumFractionDigits:2})}</td>
+                    <td style="font-family:var(--mono);color:var(--warn)">${p.cost_per_unit.toFixed(2)}</td>
+                    <td style="font-family:var(--mono);color:var(--blue)">${p.sale_price.toFixed(2)}</td>
+                    <td style="font-family:var(--mono);font-weight:700;color:${profitColor}">${p.profit_per_unit.toFixed(2)}</td>
+                    <td style="font-family:var(--mono);font-weight:700;color:${marginColor}">${p.profit_margin_pct}%</td>
+                </tr>`;
+            }).join("");
+        }
+    }catch(err){
+        showToast("Error: " + getErrorMessage(err, "Unable to analyze farm intake"));
     }
 }
 
