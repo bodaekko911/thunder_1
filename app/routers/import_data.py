@@ -21,6 +21,11 @@ from app.services.sales_import_service import import_sales
 from app.services.b2b_sales_import_service import import_b2b_sales
 from app.services.expense_import_service import import_expenses
 from app.services.expense_import_service import list_expense_import_batches, revert_expense_import_batch
+from app.services.receive_import_service import (
+    import_receive_products,
+    list_receive_import_batches,
+    revert_receive_import_batch,
+)
 from app.services.farm_intake_import_service import (
     import_farm_intake,
     list_farm_intake_import_batches,
@@ -912,6 +917,95 @@ async def delete_expenses_batch(
     return await revert_expense_import_batch(db, batch_id, current_user)
 
 
+@router.post("/api/receive-products")
+async def import_receive_products_endpoint(
+    file: UploadFile = File(...),
+    dry_run: bool = Form(True),
+    db: AsyncSession = Depends(get_async_session),
+    current_user=Depends(get_current_user),
+):
+    contents = await file.read()
+    return await import_receive_products(
+        db=db,
+        workbook_bytes=contents,
+        filename=file.filename or "receive_products.xlsx",
+        current_user=current_user,
+        dry_run=dry_run,
+    )
+
+
+@router.get("/api/receive-products/template")
+async def download_receive_products_template(_=Depends(get_current_user)):
+    from openpyxl.styles import Alignment, Font, PatternFill
+    from openpyxl.utils import get_column_letter
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Receive Products"
+
+    headers = ["SKU", "Product", "QTY", "Unit Price", "Product Type", "Date"]
+    hdr_font = Font(bold=True, color="2DD4BF")
+    hdr_fill = PatternFill("solid", fgColor="0F1424")
+    for col, header in enumerate(headers, 1):
+        cell = ws.cell(1, col, header)
+        cell.font = hdr_font
+        cell.fill = hdr_fill
+        cell.alignment = Alignment(horizontal="center")
+    for col, width in enumerate([16, 28, 10, 14, 22, 14], 1):
+        ws.column_dimensions[get_column_letter(col)].width = width
+
+    ws.append(["SKU-001", "Olive Oil 500ml", 24, 12.50, "Products", "2026-04-20"])
+    ws.append(["PKG-010", "Glass Jar Lid", 200, 1.15, "Packaging Materials", "2026-04-20"])
+
+    readme = wb.create_sheet("README")
+    readme.column_dimensions["A"].width = 22
+    readme.column_dimensions["B"].width = 82
+    readme.append(["Column", "Rules"])
+    readme["A1"].font = Font(bold=True)
+    readme["B1"].font = Font(bold=True)
+    rules = [
+        ("SKU", "Required. Used as the main product match key. Must match an existing product SKU; missing SKUs are rejected."),
+        ("Product", "Optional. Used for preview/error display only when needed."),
+        ("QTY", "Required. Numeric and greater than 0. Excel numeric cells are accepted."),
+        ("Unit Price", "Required. Numeric and zero or greater. Uses the same unit_cost meaning as manual Receive Products."),
+        ("Product Type", "Required. Must be Products or Packaging Materials. Case and spacing variants are normalized."),
+        ("Date", "Required. Accepted formats: YYYY-MM-DD, DD/MM/YYYY, MM/DD/YYYY. Excel date cells are also accepted."),
+        ("", ""),
+        ("Business logic", "Imports reuse the normal Receive Products service, including stock movement and any linked expense/journal creation."),
+        ("Dry run", "Preview with Dry run checked first. Uncheck Dry run only when you are ready to save."),
+    ]
+    for key, value in rules:
+        readme.append([key, value])
+        if key:
+            readme.cell(readme.max_row, 1).font = Font(bold=True)
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    return StreamingResponse(
+        buf,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": "attachment; filename=receive_products_import_template.xlsx"},
+    )
+
+
+@router.get("/api/receive-products/batches")
+async def list_receive_products_batches(
+    db: AsyncSession = Depends(get_async_session),
+    _=Depends(get_current_user),
+):
+    return await list_receive_import_batches(db)
+
+
+@router.delete("/api/receive-products/batch/{batch_id}")
+async def delete_receive_products_batch(
+    batch_id: str,
+    db: AsyncSession = Depends(get_async_session),
+    current_user=Depends(get_current_user),
+):
+    return await revert_receive_import_batch(db, batch_id, current_user)
+
+
 @router.get("/api/farm-intake/batches")
 async def list_farm_batches(
     db: AsyncSession = Depends(get_async_session),
@@ -1146,6 +1240,59 @@ td{padding:8px 12px;border-top:1px solid var(--border);color:var(--sub);white-sp
             </div>
         </div>
 
+    </div>
+
+    <div class="section-label">Receive Products</div>
+    <div class="import-grid" style="grid-template-columns:minmax(340px,720px)">
+        <div class="import-card">
+            <div class="import-card-header">
+                <div class="import-card-icon" style="background:rgba(45,212,191,.12)">&#128230;</div>
+                <div>
+                    <div class="import-card-title">Receive Products Import</div>
+                    <div class="import-card-sub">Import stock receipts using the normal Receive Products business flow</div>
+                </div>
+            </div>
+            <div class="import-card-body">
+                <div class="col-map">
+                    <div class="col-map-title">Expected Excel Columns</div>
+                    <div class="col-row"><span class="col-excel">SKU</span><span class="col-arrow">-></span><span class="col-field">Existing product SKU</span><span style="color:var(--danger);font-size:10px;margin-left:4px">required</span></div>
+                    <div class="col-row"><span class="col-excel">Product</span><span class="col-arrow">-></span><span class="col-field">Product name / display hint</span><span class="col-opt">optional</span></div>
+                    <div class="col-row"><span class="col-excel">QTY</span><span class="col-arrow">-></span><span class="col-field">Received quantity</span><span style="color:var(--danger);font-size:10px;margin-left:4px">required</span></div>
+                    <div class="col-row"><span class="col-excel">Unit Price</span><span class="col-arrow">-></span><span class="col-field">Received unit cost</span><span style="color:var(--danger);font-size:10px;margin-left:4px">required</span></div>
+                    <div class="col-row"><span class="col-excel">Product Type</span><span class="col-arrow">-></span><span class="col-field">Products or Packaging Materials</span><span style="color:var(--danger);font-size:10px;margin-left:4px">required</span></div>
+                    <div class="col-row"><span class="col-excel">Date</span><span class="col-arrow">-></span><span class="col-field">Receive date</span><span style="color:var(--danger);font-size:10px;margin-left:4px">required</span></div>
+                    <div style="margin-top:8px;font-size:11px;color:var(--sub);padding:8px 10px;background:rgba(45,212,191,.08);border-radius:6px;border:1px solid rgba(45,212,191,.18);">
+                        Missing SKUs fail validation. Product Type is normalized to the same Products / Packaging Materials logic used by manual Receive Products.
+                    </div>
+                    <div style="margin-top:6px">
+                        <a href="/import/api/receive-products/template" download style="font-size:11px;color:var(--blue);text-decoration:none">Download Receive Products template</a>
+                    </div>
+                </div>
+
+                <div style="display:flex;flex-direction:column;gap:8px;">
+                    <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:13px;color:var(--sub)">
+                        <input type="checkbox" id="chk-receive-products-dryrun" checked style="accent-color:var(--teal)">
+                        <span><b style="color:var(--text)">Dry run</b> - preview without saving (recommended first step)</span>
+                    </label>
+                </div>
+
+                <div class="drop-zone" id="drop-receive-products" ondragover="onDrag(event,'receive-products')" ondragleave="offDrag('receive-products')" ondrop="onDrop(event,'receive-products')">
+                    <input type="file" accept=".xlsx,.xls" onchange="onFile(this,'receive-products')">
+                    <div class="drop-icon">&#128230;</div>
+                    <div class="drop-text">Click or drag receive_products.xlsx here</div>
+                    <div class="drop-hint" id="hint-receive-products">Uses the same stock and expense logic as Receive Products</div>
+                </div>
+                <div class="progress-wrap" id="prog-receive-products"><div class="progress-fill" id="progfill-receive-products" style="width:0%"></div></div>
+                <div id="preview-receive-products"></div>
+                <div class="result-box" id="res-receive-products"></div>
+                <button class="import-btn" style="background:linear-gradient(135deg,var(--teal),var(--green));color:#042118" id="btn-receive-products" onclick="doImportReceiveProducts()" disabled>Import Receive Products</button>
+            </div>
+        </div>
+    </div>
+
+    <div class="section-label">Recent Receive Products Import Batches</div>
+    <div id="receive-products-batches-panel" style="background:var(--card);border:1px solid var(--border);border-radius:12px;padding:18px 20px;">
+        <div style="color:var(--muted);font-size:13px">Loading...</div>
     </div>
 
     <div class="section-label">Expenses</div>
@@ -1462,7 +1609,7 @@ async function logout(){
 }
   initializeColorMode();
   initUser();
-  const files = {products:null, stock:null, customers:null, expenses:null, sales:null, 'farm-intake':null, 'b2b-sales':null};
+  const files = {products:null, stock:null, customers:null, 'receive-products':null, expenses:null, sales:null, 'farm-intake':null, 'b2b-sales':null};
 
 function onDrag(e,t){ e.preventDefault(); document.getElementById('drop-'+t).classList.add('drag-over'); }
 function offDrag(t){ document.getElementById('drop-'+t).classList.remove('drag-over'); }
@@ -1542,6 +1689,177 @@ async function doImport(type){
 }
 
 // ── Historical Sales ────────────────────────────────────────────────────────
+
+async function doImportReceiveProducts() {
+    const f = files['receive-products'];
+    if (!f) { showResult('receive-products', 'Please select a file first', 'err'); return; }
+
+    const btn = document.getElementById('btn-receive-products');
+    btn.disabled = true;
+    btn.innerHTML = 'Processing...';
+    showProg('receive-products', 40);
+    showResult('receive-products', '', '');
+
+    const dryRun = document.getElementById('chk-receive-products-dryrun').checked;
+    const fd = new FormData();
+    fd.append('file', f);
+    fd.append('dry_run', dryRun ? 'true' : 'false');
+
+    let res, data;
+    try {
+        res = await fetch('/import/api/receive-products', { method: 'POST', body: fd });
+        data = await res.json();
+    } catch (e) {
+        showProg('receive-products', 100);
+        btn.disabled = false;
+        btn.innerHTML = 'Import Receive Products';
+        showResult('receive-products', 'Error: Network error: ' + e.message, 'err');
+        return;
+    }
+
+    showProg('receive-products', 100);
+    btn.disabled = false;
+    btn.innerHTML = 'Import Receive Products';
+
+    if (!res.ok) {
+        const detail = data?.detail;
+        const msg = Array.isArray(detail)
+            ? detail.map(e => e.msg || JSON.stringify(e)).join('; ')
+            : (detail || data?.error || `HTTP ${res.status}`);
+        showResult('receive-products', 'Error: ' + msg, 'err');
+        return;
+    }
+
+    if (data.error) {
+        showResult('receive-products', 'Error: ' + data.error, 'err');
+        return;
+    }
+
+    renderReceiveProductsResult(data);
+    loadReceiveProductsBatches();
+}
+
+function renderReceiveProductsResult(data) {
+    if (!data || !data.summary) {
+        showResult('receive-products', 'Error: Unexpected response from server - no summary returned.', 'err');
+        return;
+    }
+    const s = data.summary || {};
+    const isDry = !!data.dry_run;
+    const n = value => {
+        const parsed = Number(value);
+        return Number.isFinite(parsed) ? parsed : 0;
+    };
+    const txt = value => (value === undefined || value === null || value === '') ? '-' : String(value);
+
+    let html = `<div style="font-size:13px">
+        ${isDry ? '<span style="color:var(--warn)">Dry run - nothing was saved</span><br>' : ''}
+        <b>${n(s.rows_read)}</b> rows read &nbsp;|&nbsp;
+        <b>${n(s.receive_records_created)}</b> receive records ${isDry ? 'valid for import' : 'created'} &nbsp;|&nbsp;
+        <b>${n(s.rows_skipped)}</b> skipped<br>
+        <span style="color:var(--sub);font-size:12px">
+            Products resolved: <b>${n(s.products_resolved)}</b> &nbsp;|&nbsp;
+            Products auto-created: <b>${n(s.products_auto_created)}</b> &nbsp;|&nbsp;
+            Stock moves ${isDry ? 'would create' : 'created'}: <b>${n(s.stock_moves_created)}</b>
+        </span><br>
+        <span style="color:var(--sub);font-size:12px">
+            Products rows: <b>${n(s.products_rows_count)}</b> &nbsp;|&nbsp;
+            Packaging rows: <b>${n(s.packaging_rows_count)}</b> &nbsp;|&nbsp;
+            Date range: ${txt(s.earliest_date)} -> ${txt(s.latest_date)} &nbsp;|&nbsp;
+            Total cost: <b>${n(s.total_cost).toFixed(2)}</b>
+        </span>`;
+
+    if (data.batch_id) {
+        html += `<br><span style="color:var(--muted);font-size:11px">Batch ID: ${data.batch_id} · Revert available: ${data.revert_available ? 'Yes' : 'No'}</span>`;
+    }
+
+    if (data.errors && data.errors.length) {
+        html += `<br><br><b style="color:var(--danger)">${data.errors.length} error(s):</b>
+        <div style="max-height:180px;overflow-y:auto;margin-top:6px">
+        <table style="font-size:11px;width:100%">
+            <thead><tr><th>Row</th><th>SKU</th><th>Product</th><th>QTY</th><th>Unit Price</th><th>Product Type</th><th>Date</th><th>Reason</th></tr></thead>
+            <tbody>${data.errors.map(e => `<tr>
+                <td>${e.row}</td>
+                <td>${e.sku || ''}</td>
+                <td>${e.product || ''}</td>
+                <td>${e.qty || ''}</td>
+                <td>${e.unit_price || ''}</td>
+                <td>${e.product_type || ''}</td>
+                <td>${e.date || ''}</td>
+                <td style="color:var(--danger)">${e.reason}</td>
+            </tr>`).join('')}</tbody>
+        </table></div>`;
+    }
+
+    if (isDry && (!data.errors || data.errors.length === 0)) {
+        html += `<br><br>
+        <button onclick="runRealReceiveProductsImport()" style="width:100%;padding:10px;border-radius:8px;
+            background:linear-gradient(135deg,var(--teal),var(--green));color:#042118;
+            font-weight:800;font-size:13px;border:none;cursor:pointer;">
+            Run real Receive Products import
+        </button>`;
+    }
+
+    html += '</div>';
+    const kind = data.errors && data.errors.length ? 'warn' : 'ok';
+    showResult('receive-products', html, kind);
+}
+
+async function runRealReceiveProductsImport() {
+    document.getElementById('chk-receive-products-dryrun').checked = false;
+    await doImportReceiveProducts();
+}
+
+async function loadReceiveProductsBatches() {
+    const panel = document.getElementById('receive-products-batches-panel');
+    try {
+        const r = await fetch('/import/api/receive-products/batches');
+        const d = await r.json();
+        const batches = d.batches || [];
+        if (!batches.length) {
+            panel.innerHTML = '<div style="color:var(--muted);font-size:12px">No Receive Products import batches found.</div>';
+            return;
+        }
+        panel.innerHTML = `<table style="width:100%;font-size:12px">
+            <thead><tr>
+                <th>Batch ID</th><th>File</th><th>Date</th><th>Receipts</th><th>Stock Moves</th><th>Products</th><th>Packaging</th><th>Status</th><th></th>
+            </tr></thead>
+            <tbody>${batches.map(b => `<tr>
+                <td style="font-family:var(--mono);font-size:10px">${(b.batch_id || '').slice(0,12)}...</td>
+                <td>${b.filename || 'receive_products.xlsx'}</td>
+                <td>${b.ran_on || '-'}</td>
+                <td>${b.receive_records_created || b.rows_imported || 0}</td>
+                <td>${b.stock_moves_created || 0}</td>
+                <td>${b.products_rows_count || 0}</td>
+                <td>${b.packaging_rows_count || 0}</td>
+                <td>${b.reverted ? `Reverted${b.reverted_on ? ' on ' + b.reverted_on : ''}` : 'Active'}</td>
+                <td>${b.reverted ? '<span style="color:var(--muted);font-size:11px">Reverted</span>' : `<button onclick="revertReceiveProductsBatch('${b.batch_id}')"
+                    style="padding:4px 10px;border-radius:6px;border:1px solid var(--danger);
+                    background:rgba(255,77,109,.08);color:var(--danger);
+                    font-size:11px;cursor:pointer;font-family:var(--sans)">
+                    Revert
+                </button>`}</td>
+            </tr>`).join('')}
+            </tbody></table>`;
+    } catch (e) {
+        panel.innerHTML = '<div style="color:var(--muted);font-size:12px">Could not load Receive Products import batches.</div>';
+    }
+}
+
+async function revertReceiveProductsBatch(batchId) {
+    if (!confirm('Revert Receive Products import batch ' + batchId.slice(0,8) + '...? This will delete imported receipts and reverse their linked stock/expense effects using the normal receipt delete flow.')) return;
+    const r = await fetch('/import/api/receive-products/batch/' + batchId, { method: 'DELETE' });
+    const d = await r.json();
+    if (d.ok) {
+        const already = d.already_reverted ? 'Batch was already reverted.' : `Batch reverted - ${d.deleted_receipts || 0} receipts deleted${d.skipped_missing ? `, ${d.skipped_missing} already missing` : ''}.`;
+        showResult('receive-products', already, 'ok');
+    } else {
+        showResult('receive-products', 'Error: Revert failed', 'err');
+    }
+    loadReceiveProductsBatches();
+}
+
+loadReceiveProductsBatches();
 
 async function doImportExpenses() {
     const f = files['expenses'];
