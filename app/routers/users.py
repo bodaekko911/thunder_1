@@ -529,6 +529,23 @@ body.light tr:hover td{background:rgba(0,0,0,.03);}
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0;}
 body{font-family:var(--sans);background:var(--bg);color:var(--text);min-height:100vh;font-size:14px;}
 .app-nav{position:sticky;top:0;z-index:300;}
+.app-nav .topbar-right{display:flex;align-items:center;gap:12px;}
+.app-nav .mode-btn{display:flex;align-items:center;justify-content:center;width:36px;height:36px;border-radius:10px;border:1px solid var(--border);background:var(--card);color:var(--sub);font-size:16px;cursor:pointer;transition:all .2s;font-family:var(--sans);}
+.app-nav .mode-btn:hover{border-color:var(--border2);transform:scale(1.06);}
+.app-nav .account-menu{position:relative;}
+.app-nav .user-pill{display:flex;align-items:center;gap:10px;background:var(--card);border:1px solid var(--border);border-radius:40px;padding:7px 16px 7px 10px;color:var(--sub);cursor:pointer;transition:all .2s;}
+.app-nav .user-pill:hover,.app-nav .user-pill.open{border-color:var(--border2);color:var(--text);}
+.app-nav .user-avatar{width:28px;height:28px;background:linear-gradient(135deg,#7ecb6f,#d4a256);border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;color:#0a0c08;}
+.app-nav .user-name{font-size:13px;font-weight:500;color:var(--sub);}
+.app-nav .menu-caret{font-size:11px;color:var(--muted);}
+.app-nav .account-dropdown{position:absolute;right:0;top:calc(100% + 10px);min-width:220px;background:var(--card);border:1px solid var(--border2);border-radius:14px;padding:8px;box-shadow:0 24px 50px rgba(0,0,0,.35);display:none;}
+.app-nav .account-dropdown.open{display:block;}
+.app-nav .account-head{padding:10px 12px 8px;border-bottom:1px solid var(--border);margin-bottom:6px;}
+.app-nav .account-label{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:1px;}
+.app-nav .account-email{font-size:12px;color:var(--sub);margin-top:4px;word-break:break-word;}
+.app-nav .account-item{width:100%;display:flex;align-items:center;gap:10px;padding:10px 12px;border:none;background:transparent;border-radius:10px;color:var(--sub);font-family:var(--sans);font-size:13px;text-decoration:none;cursor:pointer;text-align:left;}
+.app-nav .account-item:hover{background:var(--card2);color:var(--text);}
+.app-nav .account-item.danger:hover{border-color:#c97a7a;color:#c97a7a;}
 .app-nav .app-nav-menu{z-index:650;}
 .app-nav + .content{padding-top:24px;}
 .content{max-width:1200px;margin:0 auto;padding:28px 24px;display:flex;flex-direction:column;gap:20px;}
