@@ -961,6 +961,7 @@ function fillWeatherFarmFilter(){
 function fillSeasonFarmSelect(){
     document.getElementById("season-farm").innerHTML =
         `<option value="">Select farm...</option>` +
+        `<option value="both">Both Farms</option>` +
         allFarms.map(f=>`<option value="${f.id}">${f.name}</option>`).join("");
 }
 
@@ -1484,7 +1485,7 @@ async function loadSeasonAnalysis(){
     if(!farmId)  { showToast("Select a farm first"); return; }
     if(!dateFrom || !dateTo){ showToast("Set a date range"); return; }
 
-    let res  = await fetch(`/expenses/api/cost-allocation?farm_id=${farmId}&date_from=${dateFrom}&date_to=${dateTo}`);
+    let res  = await fetch(`/expenses/api/cost-allocation?farm_id=${encodeURIComponent(farmId)}&date_from=${dateFrom}&date_to=${dateTo}`);
     let data = await res.json();
     if(data.detail){ showToast("Error: "+data.detail); return; }
 
@@ -1493,6 +1494,7 @@ async function loadSeasonAnalysis(){
 
     // Summary cards
     document.getElementById("season-summary-cards").innerHTML = `
+        <div class="stat-card" style="border-top:2px solid var(--blue)"><div class="stat-label">Scope</div><div class="stat-value" style="font-size:20px;color:var(--blue)">${data.farm_scope_label || data.farm_name}</div></div>
         <div class="stat-card green"><div class="stat-label">Total Farm Costs</div><div class="stat-value green" style="font-size:20px">${data.total_cost.toLocaleString(undefined,{minimumFractionDigits:2})} EGP</div></div>
         <div class="stat-card lime"><div class="stat-label">Total Harvested</div><div class="stat-value lime" style="font-size:20px">${data.total_qty.toFixed(1)} units</div></div>
         <div class="stat-card teal"><div class="stat-label">Expenses Tagged</div><div class="stat-value teal" style="font-size:20px">${data.expense_count}</div></div>
@@ -1504,7 +1506,7 @@ async function loadSeasonAnalysis(){
     document.getElementById("season-cost-breakdown").innerHTML = `
         <div class="history-title">Cost Breakdown by Category</div>
         ${data.cost_by_category.length === 0
-            ? `<div style="color:var(--muted);font-size:13px">No expenses tagged to this farm for this period.<br>Go to <a href="/expenses/" style="color:var(--lime)">Expenses</a> and tag expenses to this farm.</div>`
+            ? `<div style="color:var(--muted);font-size:13px">No expenses tagged to ${data.farm_scope_label || data.farm_name} for this period.<br>Go to <a href="/expenses/" style="color:var(--lime)">Expenses</a> and tag expenses to the relevant farm.</div>`
             : data.cost_by_category.map(c=>`
                 <div class="history-bar-row">
                     <div class="history-bar-label">${c.name}</div>
@@ -1518,7 +1520,7 @@ async function loadSeasonAnalysis(){
     document.getElementById("season-product-chart").innerHTML = `
         <div class="history-title">Harvest by Product</div>
         ${data.products.length === 0
-            ? `<div style="color:var(--muted);font-size:13px">No deliveries from this farm in this period.</div>`
+            ? `<div style="color:var(--muted);font-size:13px">No deliveries from ${data.farm_scope_label || data.farm_name} in this period.</div>`
             : data.products.map(p=>`
                 <div class="history-bar-row">
                     <div class="history-bar-label">${p.product_name}</div>
@@ -1530,7 +1532,7 @@ async function loadSeasonAnalysis(){
     // Products table
     if(!data.products.length){
         document.getElementById("season-body").innerHTML =
-            `<tr><td colspan="8" style="text-align:center;color:var(--muted);padding:40px">No deliveries recorded for this farm in this period.</td></tr>`;
+            `<tr><td colspan="8" style="text-align:center;color:var(--muted);padding:40px">No deliveries recorded for ${data.farm_scope_label || data.farm_name} in this period.</td></tr>`;
     } else {
         document.getElementById("season-body").innerHTML = data.products.map(p=>{
             let marginColor = p.profit_margin_pct >= 30 ? "var(--green)" : p.profit_margin_pct >= 0 ? "var(--warn)" : "var(--danger)";

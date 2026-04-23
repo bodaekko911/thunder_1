@@ -457,7 +457,7 @@ async def delete_expense(
 
 @router.get("/api/cost-allocation")
 async def cost_allocation(
-    farm_id:   int,
+    farm_id:   str,
     date_from: str,          # YYYY-MM-DD
     date_to:   str,
     db: AsyncSession = Depends(get_async_session),
@@ -476,15 +476,33 @@ async def cost_allocation(
     except ValueError:
         raise HTTPException(status_code=400, detail="Invalid date format — use YYYY-MM-DD")
 
-    _rf = await db.execute(select(Farm).where(Farm.id == farm_id))
-    farm = _rf.scalar_one_or_none()
-    if not farm:
-        raise HTTPException(status_code=404, detail="Farm not found")
+    selected_farm_ids: list[int]
+    farm_scope_label: str
+    if farm_id == "both":
+        farms_result = await db.execute(
+            select(Farm).where(Farm.is_active == 1).order_by(Farm.name)
+        )
+        farms = farms_result.scalars().all()
+        if not farms:
+            raise HTTPException(status_code=404, detail="No active farms found")
+        selected_farm_ids = [farm.id for farm in farms]
+        farm_scope_label = "Both Farms"
+    else:
+        try:
+            single_farm_id = int(farm_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail="Invalid farm selection") from exc
+        _rf = await db.execute(select(Farm).where(Farm.id == single_farm_id))
+        farm = _rf.scalar_one_or_none()
+        if not farm:
+            raise HTTPException(status_code=404, detail="Farm not found")
+        selected_farm_ids = [farm.id]
+        farm_scope_label = farm.name
 
     # 1 ── Farm expenses in the period
     _re = await db.execute(
         select(Expense).where(
-            Expense.farm_id == farm_id,
+            Expense.farm_id.in_(selected_farm_ids),
             Expense.expense_date >= d_from,
             Expense.expense_date <= d_to,
         )
@@ -499,7 +517,7 @@ async def cost_allocation(
     # 2 ── Deliveries from this farm in the period
     _rd = await db.execute(
         select(FarmDelivery).where(
-            FarmDelivery.farm_id == farm_id,
+            FarmDelivery.farm_id.in_(selected_farm_ids),
             FarmDelivery.delivery_date >= d_from,
             FarmDelivery.delivery_date <= d_to,
         )
@@ -545,7 +563,9 @@ async def cost_allocation(
 
     return {
         "farm_id":          farm_id,
-        "farm_name":        farm.name,
+        "farm_ids":         selected_farm_ids,
+        "farm_name":        farm_scope_label,
+        "farm_scope_label": farm_scope_label,
         "date_from":        date_from,
         "date_to":          date_to,
         "total_cost":       round(total_cost, 2),
