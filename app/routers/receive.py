@@ -275,6 +275,28 @@ input[type=text],input[type=number],input[type=date],textarea{
   transition:border-color .2s;outline:none;width:100%}
 input:focus,textarea:focus{border-color:var(--blue)}
 textarea{resize:vertical;min-height:60px}
+.field-help{font-size:12px;color:var(--muted);line-height:1.45}
+.field-error{display:none;font-size:12px;color:var(--danger);font-weight:700}
+.field-error.show{display:block}
+.product-type-block{display:flex;flex-direction:column;gap:12px;padding:16px;border:1px solid var(--border2);border-radius:14px;background:linear-gradient(180deg,rgba(77,159,255,.05),rgba(255,255,255,0))}
+.product-type-block.invalid{border-color:rgba(255,77,109,.45);box-shadow:0 0 0 1px rgba(255,77,109,.14) inset}
+.product-type-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px}
+.required-pill{display:inline-flex;align-items:center;padding:4px 9px;border-radius:999px;background:rgba(255,181,71,.12);color:var(--amber);font-size:10px;font-weight:800;letter-spacing:.8px;text-transform:uppercase}
+.type-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+.type-option{border:1px solid var(--border2);border-radius:14px;background:var(--card2);padding:16px;cursor:pointer;transition:all .2s;text-align:left}
+.type-option:hover{border-color:rgba(77,159,255,.35);transform:translateY(-1px)}
+.type-option:focus-visible{outline:2px solid var(--blue);outline-offset:2px}
+.type-option.active{border-color:rgba(0,255,157,.35);background:linear-gradient(180deg,rgba(0,255,157,.10),rgba(77,159,255,.08));box-shadow:0 0 0 1px rgba(0,255,157,.15) inset}
+.type-option-badge{display:inline-flex;align-items:center;justify-content:center;width:32px;height:32px;border-radius:10px;margin-bottom:10px;font-size:16px;background:rgba(255,255,255,.06)}
+.type-option.active .type-option-badge{background:rgba(0,255,157,.14);color:var(--green)}
+.type-option-title{font-size:15px;font-weight:800;color:var(--text)}
+.type-option-sub{margin-top:5px;font-size:12px;color:var(--sub);line-height:1.45}
+.type-meta{margin-top:10px;font-size:11px;color:var(--muted)}
+.mapping-chip{display:inline-flex;align-items:center;gap:6px;padding:7px 10px;border-radius:999px;background:rgba(77,159,255,.08);border:1px solid rgba(77,159,255,.18);font-size:12px;color:var(--sub);font-weight:600}
+.mapping-chip strong{color:var(--blue)}
+body.light .type-option{background:#fff}
+body.light .product-type-block{background:linear-gradient(180deg,rgba(77,159,255,.06),rgba(0,0,0,0))}
+@media(max-width:700px){.type-grid{grid-template-columns:1fr}}
 
 /* ── product rows table ── */
 .rows-wrap{overflow:visible}
@@ -423,17 +445,34 @@ body.light table.hist tr:hover td{background:rgba(0,0,0,.03)}
           <label>Receive Date *</label>
           <input type="date" id="receive-date" required>
         </div>
-        <div class="field">
-          <label>Product Type *</label>
-          <select id="product-type" required onchange="onProductTypeChange()">
-            <option value="">Select product type</option>
-            <option value="products">Products</option>
-            <option value="packaging_materials">Packaging Materials</option>
-          </select>
-        </div>
-        <div class="field">
-          <label>Expense Category</label>
-          <input type="text" id="expense-category-display" placeholder="Set automatically from Product Type" readonly>
+        <div class="field full">
+          <div class="product-type-block" id="product-type-block">
+            <div class="product-type-head">
+              <div>
+                <label style="display:block;margin-bottom:6px">Product Type</label>
+                <div class="field-help">Required. Choose how this receipt should be classified before you submit it.</div>
+              </div>
+              <span class="required-pill">Required</span>
+            </div>
+            <input type="hidden" id="product-type" value="">
+            <div class="type-grid">
+              <button type="button" class="type-option" id="product-type-option-products" onclick="setProductType('product-type','products','expense-category-display','product-type-help','product-type-error','product-type-block')" aria-pressed="false">
+                <span class="type-option-badge">&#128230;</span>
+                <div class="type-option-title">Products</div>
+                <div class="type-option-sub">Use this for normal stock items received into inventory.</div>
+                <div class="type-meta">Auto expense category: <strong>Products</strong></div>
+              </button>
+              <button type="button" class="type-option" id="product-type-option-packaging_materials" onclick="setProductType('product-type','packaging_materials','expense-category-display','product-type-help','product-type-error','product-type-block')" aria-pressed="false">
+                <span class="type-option-badge">&#128230;</span>
+                <div class="type-option-title">Packaging Materials</div>
+                <div class="type-option-sub">Use this for lids, jars, labels, boxes, and packaging supplies.</div>
+                <div class="type-meta">Auto expense category: <strong>Packaging Materials</strong></div>
+              </button>
+            </div>
+            <div class="mapping-chip">Selected expense category: <strong id="expense-category-display">Choose Product Type</strong></div>
+            <div class="field-help" id="product-type-help">Select one option to show how unit cost will be categorized.</div>
+            <div class="field-error" id="product-type-error">Choose Product Type before receiving stock.</div>
+          </div>
         </div>
         <div class="field">
           <label>Supplier / Reference <span style="color:var(--muted);font-weight:400">(optional)</span></label>
@@ -521,17 +560,34 @@ body.light table.hist tr:hover td{background:rgba(0,0,0,.03)}
         <label>Unit Cost</label>
         <input type="number" id="edit-cost" min="0" step="0.01">
       </div>
-      <div class="field">
-        <label>Product Type *</label>
-        <select id="edit-product-type" required onchange="syncProductTypeFields('edit-product-type', 'edit-expense-category-display')">
-          <option value="">Select product type</option>
-          <option value="products">Products</option>
-          <option value="packaging_materials">Packaging Materials</option>
-        </select>
-      </div>
-      <div class="field">
-        <label>Expense Category</label>
-        <input type="text" id="edit-expense-category-display" placeholder="Set automatically from Product Type" readonly>
+      <div class="field full">
+        <div class="product-type-block" id="edit-product-type-block">
+          <div class="product-type-head">
+            <div>
+              <label style="display:block;margin-bottom:6px">Product Type</label>
+              <div class="field-help">Required. Changing this also changes the automatic expense category mapping.</div>
+            </div>
+            <span class="required-pill">Required</span>
+          </div>
+          <input type="hidden" id="edit-product-type" value="">
+          <div class="type-grid">
+            <button type="button" class="type-option" id="edit-product-type-option-products" onclick="setProductType('edit-product-type','products','edit-expense-category-display','edit-product-type-help','edit-product-type-error','edit-product-type-block')" aria-pressed="false">
+              <span class="type-option-badge">&#128230;</span>
+              <div class="type-option-title">Products</div>
+              <div class="type-option-sub">Normal inventory items received into stock.</div>
+              <div class="type-meta">Auto expense category: <strong>Products</strong></div>
+            </button>
+            <button type="button" class="type-option" id="edit-product-type-option-packaging_materials" onclick="setProductType('edit-product-type','packaging_materials','edit-expense-category-display','edit-product-type-help','edit-product-type-error','edit-product-type-block')" aria-pressed="false">
+              <span class="type-option-badge">&#128230;</span>
+              <div class="type-option-title">Packaging Materials</div>
+              <div class="type-option-sub">Jars, lids, labels, boxes, and related packaging supplies.</div>
+              <div class="type-meta">Auto expense category: <strong>Packaging Materials</strong></div>
+            </button>
+          </div>
+          <div class="mapping-chip">Selected expense category: <strong id="edit-expense-category-display">Choose Product Type</strong></div>
+          <div class="field-help" id="edit-product-type-help">Select one option to keep the receipt classification clear.</div>
+          <div class="field-error" id="edit-product-type-error">Choose Product Type before saving.</div>
+        </div>
       </div>
       <div class="field full">
         <label>Supplier / Reference</label>
@@ -568,6 +624,11 @@ const PRODUCT_TYPE_LABELS = {
   products: 'Products',
   packaging_materials: 'Packaging Materials',
 };
+const PRODUCT_TYPE_HELP_TEXT = {
+  products: 'Unit costs will post to the Products expense category when applicable.',
+  packaging_materials: 'Unit costs will post to the Packaging Materials expense category when applicable.',
+  default: 'Select one option to show how unit cost will be categorized.',
+};
 
 function hasPermission(permission) {
   return _currentUserRole === 'admin' || _currentUserPermissions.has(permission);
@@ -594,7 +655,7 @@ async function init() {
   }
   await Promise.all([initUser(), loadProducts()]);
   document.getElementById('receive-date').value = todayIso();
-  syncProductTypeFields('product-type', 'expense-category-display');
+  syncProductTypeFields('product-type', 'expense-category-display', 'product-type-help', 'product-type-error', 'product-type-block');
   addRow();          // start with one empty row
   await loadHistory();
 }
@@ -817,15 +878,44 @@ function updateGrandTotal() {
   else         { el.textContent = '—';             el.style.color = 'var(--muted)'; }
 }
 
-function syncProductTypeFields(selectId, displayId) {
+function syncProductTypeFields(selectId, displayId, helpId, errorId, blockId) {
   const select = document.getElementById(selectId);
   const display = document.getElementById(displayId);
+  const help = helpId ? document.getElementById(helpId) : null;
+  const error = errorId ? document.getElementById(errorId) : null;
+  const block = blockId ? document.getElementById(blockId) : null;
   if (!select || !display) return;
-  display.value = PRODUCT_TYPE_LABELS[select.value] || '';
+  const value = select.value || '';
+  display.textContent = PRODUCT_TYPE_LABELS[value] || 'Choose Product Type';
+  if (help) help.textContent = PRODUCT_TYPE_HELP_TEXT[value] || PRODUCT_TYPE_HELP_TEXT.default;
+  if (error) error.classList.remove('show');
+  if (block) block.classList.remove('invalid');
+  ['products', 'packaging_materials'].forEach(optionValue => {
+    const option = document.getElementById(`${selectId}-option-${optionValue}`);
+    if (!option) return;
+    const active = value === optionValue;
+    option.classList.toggle('active', active);
+    option.setAttribute('aria-pressed', active ? 'true' : 'false');
+  });
+}
+
+function setProductType(selectId, value, displayId, helpId, errorId, blockId) {
+  const select = document.getElementById(selectId);
+  if (!select) return;
+  select.value = value;
+  syncProductTypeFields(selectId, displayId, helpId, errorId, blockId);
+  if (selectId === 'product-type') validateSubmit();
+}
+
+function showProductTypeError(errorId, blockId) {
+  const error = document.getElementById(errorId);
+  const block = document.getElementById(blockId);
+  if (error) error.classList.add('show');
+  if (block) block.classList.add('invalid');
 }
 
 function onProductTypeChange() {
-  syncProductTypeFields('product-type', 'expense-category-display');
+  syncProductTypeFields('product-type', 'expense-category-display', 'product-type-help', 'product-type-error', 'product-type-block');
   validateSubmit();
 }
 
@@ -875,6 +965,7 @@ async function submitBatch(e) {
   });
 
   if (!productType) {
+    showProductTypeError('product-type-error', 'product-type-block');
     showToast('Choose Product Type before receiving stock.', 'err');
     btn.disabled = false; btn.textContent = 'âœ“ Receive Stock';
     return;
@@ -920,7 +1011,7 @@ async function submitBatch(e) {
 
 function resetForm() {
   document.getElementById('product-type').value = '';
-  syncProductTypeFields('product-type', 'expense-category-display');
+  syncProductTypeFields('product-type', 'expense-category-display', 'product-type-help', 'product-type-error', 'product-type-block');
   document.getElementById('supplier-ref').value = '';
   document.getElementById('notes').value = '';
   document.getElementById('receive-date').value = todayIso();
@@ -981,7 +1072,7 @@ function openEditModal(receiptId) {
   document.getElementById('edit-qty').value = parseFloat(receipt.qty || 0).toFixed(3);
   document.getElementById('edit-cost').value = receipt.unit_cost != null ? parseFloat(receipt.unit_cost).toFixed(2) : '';
   document.getElementById('edit-product-type').value = inferProductTypeFromReceipt(receipt);
-  syncProductTypeFields('edit-product-type', 'edit-expense-category-display');
+  syncProductTypeFields('edit-product-type', 'edit-expense-category-display', 'edit-product-type-help', 'edit-product-type-error', 'edit-product-type-block');
   document.getElementById('edit-supplier').value = receipt.supplier_ref || '';
   document.getElementById('edit-notes').value = receipt.notes || '';
   document.getElementById('edit-modal').classList.add('open');
@@ -999,6 +1090,7 @@ async function saveEditReceipt() {
   btn.textContent = 'Saving...';
   const productType = document.getElementById('edit-product-type').value;
   if (!productType) {
+    showProductTypeError('edit-product-type-error', 'edit-product-type-block');
     showToast('Choose Product Type before saving.', 'err');
     btn.disabled = false;
     btn.textContent = 'Save Changes';
