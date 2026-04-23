@@ -2513,7 +2513,13 @@ async function logout(){
 }
   function hasPermission(permission){
       const role = __currentUser ? (__currentUser.role || "") : "";
-      const perms = new Set(__currentUser ? (__currentUser.permissions || []) : []);
+      let permsArray = [];
+      if (__currentUser && __currentUser.permissions) {
+          permsArray = typeof __currentUser.permissions === "string" 
+              ? __currentUser.permissions.split(",").map(v => String(v).trim()).filter(Boolean) 
+              : __currentUser.permissions;
+      }
+      const perms = new Set(permsArray);
       return role === "admin" || perms.has(permission);
   }
   function configureReportsPermissions(){
