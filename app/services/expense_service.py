@@ -453,7 +453,7 @@ async def delete_expense_entry(
 async def get_cost_allocation(
     db: AsyncSession,
     *,
-    farm_id: int,
+    farm_id: int | str,
     date_from: str,
     date_to: str,
 ) -> dict:
@@ -463,16 +463,36 @@ async def get_cost_allocation(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail="Invalid date format - use YYYY-MM-DD") from exc
 
-    farm_result = await db.execute(select(Farm).where(Farm.id == farm_id))
-    farm = farm_result.scalar_one_or_none()
-    if not farm:
-        raise HTTPException(status_code=404, detail="Farm not found")
+    farm_selector = str(farm_id).strip().lower()
+    selected_farm_ids: list[int]
+    farm_scope_label: str
+    if farm_selector == "both":
+        farms_result = await db.execute(
+            select(Farm).where(Farm.is_active == 1).order_by(Farm.name)
+        )
+        farms = farms_result.scalars().all()
+        if not farms:
+            raise HTTPException(status_code=404, detail="No active farms found")
+        selected_farm_ids = [farm.id for farm in farms]
+        farm_scope_label = "Both Farms"
+    else:
+        try:
+            single_farm_id = int(farm_selector)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail="Invalid farm selection") from exc
+
+        farm_result = await db.execute(select(Farm).where(Farm.id == single_farm_id))
+        farm = farm_result.scalar_one_or_none()
+        if not farm:
+            raise HTTPException(status_code=404, detail="Farm not found")
+        selected_farm_ids = [farm.id]
+        farm_scope_label = farm.name
 
     expenses_result = await db.execute(
         select(Expense)
         .options(selectinload(Expense.category))
         .where(
-            Expense.farm_id == farm_id,
+            Expense.farm_id.in_(selected_farm_ids),
             Expense.expense_date >= start_date,
             Expense.expense_date <= end_date,
         )
@@ -489,7 +509,7 @@ async def get_cost_allocation(
         select(FarmDelivery)
         .options(selectinload(FarmDelivery.items).selectinload(FarmDeliveryItem.product))
         .where(
-            FarmDelivery.farm_id == farm_id,
+            FarmDelivery.farm_id.in_(selected_farm_ids),
             FarmDelivery.delivery_date >= start_date,
             FarmDelivery.delivery_date <= end_date,
         )
@@ -538,7 +558,9 @@ async def get_cost_allocation(
     products.sort(key=lambda item: item["allocated_cost"], reverse=True)
     return {
         "farm_id": farm_id,
-        "farm_name": farm.name,
+        "farm_ids": selected_farm_ids,
+        "farm_name": farm_scope_label,
+        "farm_scope_label": farm_scope_label,
         "date_from": date_from,
         "date_to": date_to,
         "total_cost": round(total_cost, 2),

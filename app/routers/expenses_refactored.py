@@ -95,7 +95,7 @@ async def remove_expense(
 
 @router.get("/api/cost-allocation")
 async def get_expense_cost_allocation(
-    farm_id: int,
+    farm_id: str,
     date_from: str,
     date_to: str,
     db: AsyncSession = Depends(get_async_session),
