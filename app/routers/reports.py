@@ -564,7 +564,7 @@ async def _build_sales_report(
 
 # ── SALES ──────────────────────────────────────────────
 @router.get("/api/sales")
-async def sales_report(date_from: Optional[str] = None, date_to: Optional[str] = None, skip: int = 0, limit: int = Query(default=100, le=500), db: AsyncSession = Depends(get_async_session)):
+async def sales_report(date_from: Optional[str] = None, date_to: Optional[str] = None, skip: int = 0, limit: int = Query(default=100, le=500), db: AsyncSession = Depends(get_async_session), _=Depends(require_permission("tab_reports_sales"))):
     d_from, d_to = parse_dates(date_from, date_to)
     if (d_to - d_from).days > 366:
         raise HTTPException(status_code=400, detail="Date range cannot exceed 1 year")
@@ -783,6 +783,7 @@ async def b2b_statement(
     skip: int = 0,
     limit: int = Query(default=100, le=500),
     db: AsyncSession = Depends(get_async_session),
+    _=Depends(require_permission("tab_reports_b2b")),
 ):
     d_from, d_to = parse_dates(date_from, date_to)
     if (d_to - d_from).days > 366:
@@ -974,7 +975,7 @@ async def _build_inventory_report(
 
 
 @router.get("/api/inventory")
-async def inventory_report(mode: str = "snapshot", date_from: Optional[str] = None, date_to: Optional[str] = None, skip: int = 0, limit: int = Query(default=100, le=500), db: AsyncSession = Depends(get_async_session)):
+async def inventory_report(mode: str = "snapshot", date_from: Optional[str] = None, date_to: Optional[str] = None, skip: int = 0, limit: int = Query(default=100, le=500), db: AsyncSession = Depends(get_async_session), _=Depends(require_permission("tab_reports_inventory"))):
     skip, limit = _resolve_pagination(skip, limit)
     if mode == "movement":
         d_from, d_to = parse_dates(date_from, date_to)
@@ -1112,7 +1113,7 @@ async def _build_farm_intake_report(
 
 
 @router.get("/api/farm-intake")
-async def farm_intake_report(date_from: Optional[str] = None, date_to: Optional[str] = None, skip: int = 0, limit: int = Query(default=100, le=500), db: AsyncSession = Depends(get_async_session)):
+async def farm_intake_report(date_from: Optional[str] = None, date_to: Optional[str] = None, skip: int = 0, limit: int = Query(default=100, le=500), db: AsyncSession = Depends(get_async_session), _=Depends(require_permission("tab_reports_farm"))):
     d_from, d_to = parse_dates(date_from, date_to)
     if (d_to - d_from).days > 366:
         raise HTTPException(status_code=400, detail="Date range cannot exceed 1 year")
@@ -1198,7 +1199,7 @@ async def export_farm(date_from: str = None, date_to: str = None, db: AsyncSessi
 
 # ── SPOILAGE ───────────────────────────────────────────
 @router.get("/api/spoilage")
-async def spoilage_report(date_from: Optional[str] = None, date_to: Optional[str] = None, skip: int = 0, limit: int = Query(default=100, le=500), db: AsyncSession = Depends(get_async_session)):
+async def spoilage_report(date_from: Optional[str] = None, date_to: Optional[str] = None, skip: int = 0, limit: int = Query(default=100, le=500), db: AsyncSession = Depends(get_async_session), _=Depends(require_permission("tab_reports_spoilage"))):
     d_from, d_to = parse_dates(date_from, date_to)
     if (d_to - d_from).days > 366:
         raise HTTPException(status_code=400, detail="Date range cannot exceed 1 year")
@@ -1243,7 +1244,7 @@ async def export_spoilage(date_from: str = None, date_to: str = None, db: AsyncS
 
 # ── PRODUCTION ─────────────────────────────────────────
 @router.get("/api/production")
-async def production_report(date_from: Optional[str] = None, date_to: Optional[str] = None, skip: int = 0, limit: int = Query(default=100, le=500), db: AsyncSession = Depends(get_async_session)):
+async def production_report(date_from: Optional[str] = None, date_to: Optional[str] = None, skip: int = 0, limit: int = Query(default=100, le=500), db: AsyncSession = Depends(get_async_session), _=Depends(require_permission("tab_reports_production"))):
     d_from, d_to = parse_dates(date_from, date_to)
     if (d_to - d_from).days > 366:
         raise HTTPException(status_code=400, detail="Date range cannot exceed 1 year")
@@ -1299,7 +1300,7 @@ async def export_production(date_from: str = None, date_to: str = None, db: Asyn
 
 # ── P&L ────────────────────────────────────────────────
 @router.get("/api/pl")
-async def pl_report(date_from: Optional[str] = None, date_to: Optional[str] = None, db: AsyncSession = Depends(get_async_session)):
+async def pl_report(date_from: Optional[str] = None, date_to: Optional[str] = None, db: AsyncSession = Depends(get_async_session), _=Depends(require_permission("tab_reports_pl"))):
     d_from, d_to = parse_dates(date_from, date_to)
     if (d_to - d_from).days > 366:
         raise HTTPException(status_code=400, detail="Date range cannot exceed 1 year")
@@ -1709,7 +1710,8 @@ async def transactions_report(
     date_from: Optional[str] = None,
     date_to:   Optional[str] = None,
     source:    Optional[str] = None,
-    db: AsyncSession = Depends(get_async_session)
+    db: AsyncSession = Depends(get_async_session),
+    _=Depends(require_permission("tab_reports_transactions")),
 ):
     d_from, d_to = parse_dates(date_from, date_to)
     return await _build_transactions_report(db, d_from=d_from, d_to=d_to, source=source)
@@ -2582,11 +2584,11 @@ const REPORT_TAB_ORDER = ["sales","transactions","b2b","inventory","farm","spoil
 const REPORT_TAB_PERMISSIONS = {
     sales: "tab_reports_sales",
     transactions: "tab_reports_transactions",
-    b2b: null,
+    b2b: "tab_reports_b2b",
     inventory: "tab_reports_inventory",
-    farm: null,
-    spoilage: null,
-    production: null,
+    farm: "tab_reports_farm",
+    spoilage: "tab_reports_spoilage",
+    production: "tab_reports_production",
     pl: "tab_reports_pl",
 };
 
