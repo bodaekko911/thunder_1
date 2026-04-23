@@ -80,8 +80,7 @@ def _render_group(user: User, permissions: set[str], group: dict, active_permiss
             f'{" aria-current=\"page\"" if active else ""}>{escape(item["label"])}</a>'
         )
     return (
-        f'<details class="app-nav-group{" active" if is_group_active else ""}"'
-        f'{" open" if is_group_active else ""}>'
+        f'<details class="app-nav-group{" active" if is_group_active else ""}">'
         f'<summary>{escape(group["label"])}</summary>'
         f'<div class="app-nav-menu" role="menu">{"".join(links)}</div>'
         f'</details>'
