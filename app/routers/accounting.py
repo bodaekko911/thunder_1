@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import HTMLResponse
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import selectinload
 from typing import Optional, List
 from pydantic import BaseModel, Field
@@ -448,12 +448,14 @@ async def profit_loss(
 async def get_b2b_invoices(
     invoice_type: Optional[str] = Query(None, max_length=50),
     status: Optional[str] = Query(None, max_length=50),
+    search: Optional[str] = Query(None, max_length=150),
     from_date: Optional[date] = Query(None),
     to_date: Optional[date] = Query(None),
     db: AsyncSession = Depends(get_async_session),
 ):
     invoice_type = invoice_type.strip() if isinstance(invoice_type, str) and invoice_type.strip() else None
     status = status.strip() if isinstance(status, str) and status.strip() else None
+    search = " ".join(search.split()) if isinstance(search, str) and search.strip() else None
     stmt = _apply_date_range(
         select(B2BInvoice)
         .options(
@@ -469,6 +471,17 @@ async def get_b2b_invoices(
         stmt = stmt.where(B2BInvoice.invoice_type == invoice_type)
     if status:
         stmt = stmt.where(B2BInvoice.status == status)
+    if search:
+        search_term = f"%{search}%"
+        stmt = (
+            stmt.join(B2BClient, B2BClient.id == B2BInvoice.client_id, isouter=True)
+            .where(
+                or_(
+                    B2BInvoice.invoice_number.ilike(search_term),
+                    B2BClient.name.ilike(search_term),
+                )
+            )
+        )
     result = await db.execute(stmt)
     invoices = result.scalars().all()
     return [
@@ -933,6 +946,10 @@ td.cr { font-family:var(--mono); color:var(--blue); }
     <!-- B2B INVOICES -->
     <div id="section-b2b" style="display:none">
         <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:14px;">
+            <div class="fld" style="margin:0;min-width:250px;flex:1 1 260px;">
+                <label>Search</label>
+                <input id="b2b-search" type="search" placeholder="Search client or invoice number..." oninput="queueB2BSearch()" autocomplete="off">
+            </div>
             <select id="b2b-type-filter" onchange="loadB2BInvoices()" style="background:var(--card2);border:1px solid var(--border2);border-radius:var(--r);padding:9px 13px;color:var(--text);font-family:var(--sans);font-size:13px;outline:none;">
                 <option value="">All Types</option>
                 <option value="cash">💵 Cash</option>
@@ -1839,13 +1856,27 @@ let consInvoiceId    = null;
 let currentInvDetail = null;
 let refundInvoiceId  = null;
 let refundInvoiceNum = null;
+let b2bSearchTimer   = null;
+
+function getB2BSearchValue(){
+    return (document.getElementById("b2b-search")?.value || "").trim().replace(/\\s+/g, " ");
+}
+
+function queueB2BSearch(){
+    clearTimeout(b2bSearchTimer);
+    document.getElementById("b2b-invoices-body").innerHTML =
+        `<tr><td colspan="9" style="text-align:center;color:var(--muted);padding:40px">Searching invoices…</td></tr>`;
+    b2bSearchTimer = setTimeout(() => loadB2BInvoices(), 180);
+}
 
 async function loadB2BInvoices(){
     let type   = document.getElementById("b2b-type-filter").value;
     let status = document.getElementById("b2b-status-filter").value;
+    let search = getB2BSearchValue();
     const params = new URLSearchParams();
     if(type) params.set("invoice_type", type);
     if(status) params.set("status", status);
+    if(search) params.set("search", search);
     appendDateRangeParams(params, "b2b-from-date", "b2b-to-date");
     let res = await fetch(`/accounting/api/b2b-invoices?${params.toString()}`);
     let data = await res.json();
@@ -1864,6 +1895,8 @@ async function loadB2BInvoices(){
 }
 
 function resetB2BFilters(){
+    clearTimeout(b2bSearchTimer);
+    document.getElementById("b2b-search").value = "";
     document.getElementById("b2b-type-filter").value = "";
     document.getElementById("b2b-status-filter").value = "";
     document.getElementById("b2b-from-date").value = monthStartIso();
@@ -1873,8 +1906,9 @@ function resetB2BFilters(){
 
 function renderB2BInvoices(invoices){
     if(!invoices.length){
+        const search = getB2BSearchValue();
         document.getElementById("b2b-invoices-body").innerHTML =
-            `<tr><td colspan="9" style="text-align:center;color:var(--muted);padding:40px">No invoices found</td></tr>`;
+            `<tr><td colspan="9" style="text-align:center;color:var(--muted);padding:40px">${search ? "No B2B invoices matched your search" : "No invoices found"}</td></tr>`;
         return;
     }
     const typeLabel = {cash:"💵 Cash", full_payment:"📋 Full Payment", consignment:"🔄 Consignment"};

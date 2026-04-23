@@ -526,6 +526,18 @@ td.name{color:var(--text);font-weight:600;}
 .fld label{font-size:11px;font-weight:700;letter-spacing:1px;text-transform:uppercase;color:var(--muted);}
 .fld input,.fld select{background:var(--card2);border:1px solid var(--border2);border-radius:10px;padding:10px 12px;color:var(--text);font-family:var(--sans);font-size:14px;outline:none;transition:border-color .2s;width:100%;}
 .fld input:focus,.fld select:focus{border-color:rgba(251,146,60,.5);}
+.search-field{position:relative;width:100%;}
+.search-results{position:absolute;top:calc(100% + 6px);left:0;right:0;z-index:40;background:var(--card);border:1px solid var(--border2);border-radius:12px;box-shadow:0 18px 40px rgba(0,0,0,.35);padding:6px;max-height:260px;overflow-y:auto;display:none;}
+.search-results.open{display:block;}
+.search-state{padding:12px 14px;font-size:12px;color:var(--muted);}
+.search-option{display:flex;align-items:center;gap:10px;padding:10px 12px;border-radius:10px;cursor:pointer;transition:background .15s,border-color .15s;border:1px solid transparent;width:100%;background:transparent;text-align:left;}
+.search-option:hover,.search-option.active{background:rgba(77,159,255,.10);border-color:rgba(77,159,255,.16);}
+.search-option:focus-visible{outline:none;border-color:rgba(77,159,255,.34);background:rgba(77,159,255,.14);}
+.search-main{min-width:0;display:flex;flex-direction:column;gap:2px;flex:1;}
+.search-title{font-size:13px;font-weight:700;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.search-meta{font-size:11px;color:var(--muted);display:flex;gap:8px;flex-wrap:wrap;}
+.search-stock{font-family:var(--mono);font-size:11px;color:var(--sub);white-space:nowrap;}
+.search-match{font-size:10px;color:var(--blue);font-weight:700;letter-spacing:.6px;text-transform:uppercase;}
 .modal-actions{display:flex;gap:10px;margin-top:8px;justify-content:flex-end;}
 .btn-cancel{background:transparent;border:1px solid var(--border2);color:var(--sub);padding:10px 18px;border-radius:var(--r);font-family:var(--sans);font-size:13px;font-weight:700;cursor:pointer;}
 .btn-cancel:hover{border-color:var(--danger);color:var(--danger);}
@@ -533,6 +545,8 @@ td.name{color:var(--text);font-weight:600;}
 .item-row{display:grid;grid-template-columns:1fr 110px 60px 32px;gap:8px;align-items:center;margin-bottom:8px;}
 .item-row select,.item-row input{background:var(--card2);border:1px solid var(--border2);border-radius:8px;padding:8px 10px;color:var(--text);font-family:var(--sans);font-size:13px;outline:none;width:100%;}
 .item-row select:focus,.item-row input:focus{border-color:rgba(251,146,60,.4);}
+.product-search-input.has-selection{border-color:rgba(0,255,157,.35);}
+.product-search-input.has-error{border-color:rgba(255,77,109,.55);}
 .unit-hint{font-size:10px;color:var(--muted);font-family:var(--mono);text-align:center;}
 .rm-btn{background:none;border:none;color:var(--muted);font-size:18px;cursor:pointer;padding:0;transition:color .15s;}
 .rm-btn:hover{color:var(--danger);}
@@ -741,9 +755,16 @@ td.name{color:var(--text);font-weight:600;}
         <div class="modal-title">Log Spoilage</div>
         <div class="modal-sub">Record damaged or spoiled products — stock deducted, accounting updated automatically</div>
         <div class="fld"><label>Product *</label>
-            <input id="spl-product" list="product-datalist" placeholder="Search by name or SKU..."
-                style="background:var(--card2);border:1px solid var(--border2);border-radius:10px;padding:10px 12px;color:var(--text);font-family:var(--sans);font-size:14px;outline:none;width:100%"
-                oninput="onSplProduct()" autocomplete="off">
+            <div class="search-field">
+                <input id="spl-product" placeholder="Search by name or SKU..."
+                    class="product-search-input"
+                    data-hidden-target="#spl-product-id"
+                    data-unit-target="#spl-unit"
+                    data-stock-target="#spl-stock"
+                    style="background:var(--card2);border:1px solid var(--border2);border-radius:10px;padding:10px 12px;color:var(--text);font-family:var(--sans);font-size:14px;outline:none;width:100%"
+                    autocomplete="off">
+                <div class="search-results" id="spl-product-results"></div>
+            </div>
             <input type="hidden" id="spl-product-id">
         </div>
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
@@ -898,6 +919,7 @@ async function init(){
     allRecipes  = await (await fetch("/production/api/recipes")).json();
     allFarms    = await (await fetch("/production/api/farms-list")).json();
     buildProductDatalist();
+    initProductionSearches();
     splitRecipes();
     fillSel("batch-recipe-sel", procRecipes);
     fillSel("pkg-recipe-sel",   pkgRecipes);
@@ -948,83 +970,300 @@ function productOptions(selectedId){
 }
 
 /* Build datalist of all products for search */
-function buildProductDatalist(){
-    let dl = document.getElementById("product-datalist");
-    if(!dl){
-        dl = document.createElement("datalist");
-        dl.id = "product-datalist";
-        document.body.appendChild(dl);
-    }
-    dl.innerHTML = allProducts.map(p =>
-        `<option data-id="${p.id}" value="${p.sku} — ${p.name}" data-unit="${p.unit}" data-stock="${p.stock}">`
-    ).join("");
+function buildProductDatalist(){ return; }
+
+function normalizeSearchValue(value){
+    return String(value || "").toLowerCase().replace(/\\s+/g, " ").trim();
+}
+
+function escapeHtml(value){
+    return String(value ?? "")
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#39;");
+}
+
+function formatProductLabel(product){
+    const sku = (product.sku || "").trim();
+    return sku ? `${sku} - ${product.name}` : (product.name || "");
+}
+
+function productSearchScore(product, query){
+    const normalized = normalizeSearchValue(query);
+    if(!normalized) return 0;
+    const sku = normalizeSearchValue(product.sku || "");
+    const name = normalizeSearchValue(product.name || "");
+    const combined = normalizeSearchValue(`${product.sku || ""} ${product.name || ""}`);
+    if(combined === normalized || sku === normalized || name === normalized) return 120;
+    if(sku.startsWith(normalized)) return 95;
+    if(name.startsWith(normalized)) return 85;
+    if(name.includes(normalized)) return 70;
+    if(combined.includes(normalized)) return 55;
+    return 0;
+}
+
+function searchProducts(query, limit=10){
+    const normalized = normalizeSearchValue(query);
+    if(!normalized) return [];
+    return allProducts
+        .map(product => ({product, score: productSearchScore(product, normalized)}))
+        .filter(item => item.score > 0)
+        .sort((a, b) => {
+            if(b.score !== a.score) return b.score - a.score;
+            return formatProductLabel(a.product).localeCompare(formatProductLabel(b.product));
+        })
+        .slice(0, limit)
+        .map(item => item.product);
+}
+
+function resolveProductValue(value){
+    const normalized = normalizeSearchValue(value);
+    if(!normalized) return null;
+    const exact = allProducts.find(product => {
+        const sku = normalizeSearchValue(product.sku || "");
+        const name = normalizeSearchValue(product.name || "");
+        const combined = normalizeSearchValue(formatProductLabel(product));
+        return combined === normalized || sku === normalized || name === normalized;
+    });
+    if(exact) return exact;
+    const matches = searchProducts(normalized, 2);
+    return matches.length === 1 ? matches[0] : null;
 }
 
 function resolveProduct(inputEl){
-    let val = inputEl.value.trim().toLowerCase();
-    // match by SKU prefix or name
-    let match = allProducts.find(p =>
-        (p.sku + " — " + p.name).toLowerCase() === val ||
-        p.sku.toLowerCase() === val ||
-        p.name.toLowerCase() === val
-    );
-    if(!match){
-        // partial match
-        match = allProducts.find(p =>
-            p.sku.toLowerCase().startsWith(val) ||
-            p.name.toLowerCase().includes(val)
-        );
-    }
-    return match || null;
+    return resolveProductValue(inputEl?.value || "");
 }
+
+function getSearchField(inputEl){
+    return inputEl.closest(".search-field");
+}
+
+function getSearchResultsEl(inputEl){
+    return getSearchField(inputEl)?.querySelector(".search-results") || null;
+}
+
+function getSearchTarget(inputEl, selector){
+    if(!selector) return null;
+    if(selector.startsWith("#")) return document.querySelector(selector);
+    return inputEl.closest(".item-row")?.querySelector(selector) || null;
+}
+
+function closeSearchResults(inputEl){
+    const resultsEl = getSearchResultsEl(inputEl);
+    if(!resultsEl) return;
+    resultsEl.classList.remove("open");
+    resultsEl.innerHTML = "";
+    const field = getSearchField(inputEl);
+    if(field) field.dataset.activeIndex = "-1";
+}
+
+function renderSearchState(inputEl, message){
+    const resultsEl = getSearchResultsEl(inputEl);
+    if(!resultsEl) return;
+    resultsEl.innerHTML = `<div class="search-state">${escapeHtml(message)}</div>`;
+    resultsEl.classList.add("open");
+    const field = getSearchField(inputEl);
+    if(field) field.dataset.activeIndex = "-1";
+}
+
+function syncActiveOption(inputEl){
+    const field = getSearchField(inputEl);
+    const resultsEl = getSearchResultsEl(inputEl);
+    if(!field || !resultsEl) return;
+    const activeIndex = parseInt(field.dataset.activeIndex || "-1", 10);
+    resultsEl.querySelectorAll(".search-option").forEach((option, index) => {
+        option.classList.toggle("active", index === activeIndex);
+        if(index === activeIndex) option.scrollIntoView({block:"nearest"});
+    });
+}
+
+function renderProductResults(inputEl, matches, query){
+    const resultsEl = getSearchResultsEl(inputEl);
+    if(!resultsEl) return;
+    if(!allProducts.length){
+        renderSearchState(inputEl, "Loading products...");
+        return;
+    }
+    if(!normalizeSearchValue(query)){
+        renderSearchState(inputEl, "Type a product name or SKU");
+        return;
+    }
+    if(!matches.length){
+        renderSearchState(inputEl, "No matching products found");
+        return;
+    }
+    resultsEl.innerHTML = matches.map((product, index) => `
+        <button type="button" class="search-option" data-index="${index}" data-product-id="${product.id}">
+            <div class="search-main">
+                <span class="search-title">${escapeHtml(product.name || "Unnamed product")}</span>
+                <span class="search-match">${escapeHtml((product.sku || "").trim() || "No SKU")}</span>
+            </div>
+            <div class="search-meta">
+                <span>${escapeHtml(product.unit || "-")}</span>
+                <span class="search-stock">Stock ${Number(product.stock || 0).toFixed(2)}</span>
+            </div>
+        </button>
+    `).join("");
+    resultsEl.classList.add("open");
+    const field = getSearchField(inputEl);
+    if(field) field.dataset.activeIndex = "0";
+    syncActiveOption(inputEl);
+    resultsEl.querySelectorAll(".search-option").forEach(option => {
+        option.addEventListener("mousedown", event => {
+            event.preventDefault();
+            const productId = parseInt(option.dataset.productId || "0", 10);
+            const product = allProducts.find(item => item.id === productId);
+            if(product) applyResolvedProduct(inputEl, product, true);
+        });
+    });
+}
+
+function applyResolvedProduct(inputEl, product, commitValue){
+    const hidden = getSearchTarget(inputEl, inputEl.dataset.hiddenTarget);
+    const unit = getSearchTarget(inputEl, inputEl.dataset.unitTarget);
+    const stock = getSearchTarget(inputEl, inputEl.dataset.stockTarget);
+    if(commitValue) inputEl.value = formatProductLabel(product);
+    if(hidden) hidden.value = product.id;
+    if(unit){
+        if("value" in unit) unit.value = product.unit || "";
+        else unit.innerText = product.unit || "-";
+    }
+    if(stock){
+        const stockText = inputEl.id === "spl-product"
+            ? `${Number(product.stock || 0).toFixed(2)} ${product.unit || ""}`.trim()
+            : `stock: ${Number(product.stock || 0).toFixed(0)}`;
+        if("value" in stock) stock.value = stockText;
+        else stock.innerText = stockText;
+    }
+    inputEl.classList.add("has-selection");
+    inputEl.classList.remove("has-error");
+    closeSearchResults(inputEl);
+    const callbackName = inputEl.dataset.onProductChange;
+    if(callbackName && typeof window[callbackName] === "function") window[callbackName]();
+}
+
+function clearResolvedProduct(inputEl){
+    const hidden = getSearchTarget(inputEl, inputEl.dataset.hiddenTarget);
+    const unit = getSearchTarget(inputEl, inputEl.dataset.unitTarget);
+    const stock = getSearchTarget(inputEl, inputEl.dataset.stockTarget);
+    if(hidden) hidden.value = "";
+    if(unit){
+        if("value" in unit) unit.value = "";
+        else unit.innerText = "-";
+    }
+    if(stock){
+        const fallback = inputEl.id === "spl-product" ? "—" : "";
+        if("value" in stock) stock.value = fallback;
+        else stock.innerText = fallback;
+    }
+    inputEl.classList.remove("has-selection");
+    const callbackName = inputEl.dataset.onProductChange;
+    if(callbackName && typeof window[callbackName] === "function") window[callbackName]();
+}
+
+function updateProductSearch(inputEl){
+    const resolved = resolveProductValue(inputEl.value);
+    if(resolved) applyResolvedProduct(inputEl, resolved, false);
+    else clearResolvedProduct(inputEl);
+    renderProductResults(inputEl, searchProducts(inputEl.value), inputEl.value);
+}
+
+function chooseActiveSearchOption(inputEl){
+    const field = getSearchField(inputEl);
+    const resultsEl = getSearchResultsEl(inputEl);
+    if(!field || !resultsEl || !resultsEl.classList.contains("open")) return false;
+    const activeIndex = parseInt(field.dataset.activeIndex || "-1", 10);
+    const options = [...resultsEl.querySelectorAll(".search-option")];
+    const activeOption = options[activeIndex] || options[0];
+    if(!activeOption) return false;
+    const productId = parseInt(activeOption.dataset.productId || "0", 10);
+    const product = allProducts.find(item => item.id === productId);
+    if(!product) return false;
+    applyResolvedProduct(inputEl, product, true);
+    return true;
+}
+
+function attachProductSearch(inputEl){
+    if(!inputEl || inputEl.dataset.searchReady === "1") return;
+    inputEl.dataset.searchReady = "1";
+    const field = getSearchField(inputEl);
+    if(field) field.dataset.activeIndex = "-1";
+    inputEl.addEventListener("focus", () => updateProductSearch(inputEl));
+    inputEl.addEventListener("input", () => {
+        inputEl.classList.remove("has-error");
+        updateProductSearch(inputEl);
+    });
+    inputEl.addEventListener("keydown", event => {
+        const resultsEl = getSearchResultsEl(inputEl);
+        const fieldEl = getSearchField(inputEl);
+        const options = resultsEl ? [...resultsEl.querySelectorAll(".search-option")] : [];
+        if(event.key === "ArrowDown" && options.length){
+            event.preventDefault();
+            const nextIndex = Math.min(options.length - 1, parseInt(fieldEl.dataset.activeIndex || "-1", 10) + 1);
+            fieldEl.dataset.activeIndex = String(nextIndex);
+            syncActiveOption(inputEl);
+        } else if(event.key === "ArrowUp" && options.length){
+            event.preventDefault();
+            const nextIndex = Math.max(0, parseInt(fieldEl.dataset.activeIndex || "0", 10) - 1);
+            fieldEl.dataset.activeIndex = String(nextIndex);
+            syncActiveOption(inputEl);
+        } else if(event.key === "Enter"){
+            if(chooseActiveSearchOption(inputEl)) event.preventDefault();
+        } else if(event.key === "Escape"){
+            closeSearchResults(inputEl);
+        }
+    });
+    inputEl.addEventListener("blur", () => {
+        window.setTimeout(() => {
+            const resolved = resolveProductValue(inputEl.value);
+            if(resolved){
+                applyResolvedProduct(inputEl, resolved, true);
+                return;
+            }
+            closeSearchResults(inputEl);
+            if(normalizeSearchValue(inputEl.value)) inputEl.classList.add("has-error");
+        }, 120);
+    });
+}
+
+function initProductionSearches(scope=document){
+    scope.querySelectorAll(".product-search-input").forEach(attachProductSearch);
+}
+
+document.addEventListener("click", event => {
+    document.querySelectorAll(".product-search-input").forEach(inputEl => {
+        if(inputEl.closest(".search-field")?.contains(event.target)) return;
+        closeSearchResults(inputEl);
+    });
+});
 
 function addItemRow(containerId, callback){
     let div = document.createElement("div");
     div.className = "item-row";
     div.innerHTML = `
-        <div style="position:relative;flex:1;">
-            <input type="text" list="product-datalist"
+        <div class="search-field" style="flex:1;">
+            <input type="text"
                 placeholder="Search by name or SKU..."
                 class="product-search-input"
+                data-hidden-target=".product-id-hidden"
+                data-unit-target=".unit-hint"
+                data-stock-target=".stock-hint"
+                ${callback ? `data-on-product-change="${callback.name}"` : ""}
                 style="width:100%;background:var(--card2);border:1px solid var(--border2);border-radius:8px;padding:8px 10px;color:var(--text);font-family:var(--sans);font-size:13px;outline:none;"
                 autocomplete="off">
             <input type="hidden" class="product-id-hidden" value="">
             <span style="font-size:10px;color:var(--muted);position:absolute;right:8px;top:50%;transform:translateY(-50%)" class="stock-hint"></span>
+            <div class="search-results"></div>
         </div>
         <input type="number" placeholder="0" min="0.001" step="any"
             style="background:var(--card2);border:1px solid var(--border2);border-radius:8px;padding:8px 10px;color:var(--text);font-family:var(--mono);font-size:13px;outline:none;width:90px;">
         <span class="unit-hint" style="font-size:12px;color:var(--muted);min-width:32px;text-align:center;">-</span>
         <button class="rm-btn" onclick="this.closest('.item-row').remove();${callback?callback.name+'()':''}">×</button>
     `;
-    let searchInp = div.querySelector(".product-search-input");
-    let hiddenId  = div.querySelector(".product-id-hidden");
-    let unitHint  = div.querySelector(".unit-hint");
-    let stockHint = div.querySelector(".stock-hint");
-
-    searchInp.addEventListener("input", function(){
-        let p = resolveProduct(this);
-        if(p){
-            hiddenId.value    = p.id;
-            unitHint.innerText  = p.unit || "-";
-            stockHint.innerText = `stock: ${p.stock.toFixed(0)}`;
-            this.style.borderColor = "rgba(0,255,157,.4)";
-        } else {
-            hiddenId.value    = "";
-            unitHint.innerText  = "-";
-            stockHint.innerText = "";
-            this.style.borderColor = "";
-        }
-        if(callback) callback();
-    });
-    searchInp.addEventListener("blur", function(){
-        let p = resolveProduct(this);
-        if(!p && this.value.trim()){
-            this.style.borderColor = "rgba(255,77,109,.5)";
-        }
-    });
-
     document.getElementById(containerId).appendChild(div);
-    buildProductDatalist();
+    attachProductSearch(div.querySelector(".product-search-input"));
 }
 
 /* Helper to read item rows — replaces select-based reading */
@@ -1059,12 +1298,8 @@ function setRow(containerId, items){
         let p    = allProducts.find(x => x.id === item.product_id);
         if(p){
             let inp = row.querySelector(".product-search-input");
-            let hid = row.querySelector(".product-id-hidden");
-            inp.value = `${p.sku} — ${p.name}`;
-            hid.value = p.id;
-            row.querySelector(".unit-hint").innerText  = p.unit || "-";
-            row.querySelector(".stock-hint").innerText = `stock: ${p.stock.toFixed(0)}`;
-            inp.style.borderColor = "rgba(0,255,157,.4)";
+            inp.value = formatProductLabel(p);
+            applyResolvedProduct(inp, p, false);
         }
         row.querySelector("input[type=number]").value = item.qty;
         calcLoss();
@@ -1425,6 +1660,7 @@ function openSpoilageModal(){
     fsel.innerHTML = '<option value="">Not from a specific farm</option>' +
         allFarms.map(f => `<option value="${f.id}">${f.name}</option>`).join("");
 
+    let splProduct = document.getElementById("spl-product");
     document.getElementById("spl-product").value    = "";
     document.getElementById("spl-product-id").value = "";
     document.getElementById("spl-qty").value    = "";
@@ -1433,6 +1669,8 @@ function openSpoilageModal(){
     document.getElementById("spl-date").value   = new Date().toISOString().split("T")[0];
     document.getElementById("spl-reason").value = "";
     document.getElementById("spl-notes").value  = "";
+    clearResolvedProduct(splProduct);
+    closeSearchResults(splProduct);
     document.getElementById("spoilage-modal").classList.add("open");
 }
 
@@ -1441,18 +1679,7 @@ function closeSpoilageModal(){
 }
 
 function onSplProduct(){
-    let p = resolveProduct(document.getElementById("spl-product"));
-    if(p){
-        document.getElementById("spl-product-id").value   = p.id;
-        document.getElementById("spl-unit").value         = p.unit || "";
-        document.getElementById("spl-stock").innerText    = `${p.stock.toFixed(2)} ${p.unit}`;
-        document.getElementById("spl-product").style.borderColor = "rgba(0,255,157,.4)";
-    } else {
-        document.getElementById("spl-product-id").value   = "";
-        document.getElementById("spl-unit").value         = "";
-        document.getElementById("spl-stock").innerText    = "—";
-        document.getElementById("spl-product").style.borderColor = "";
-    }
+    updateProductSearch(document.getElementById("spl-product"));
 }
 
 async function saveSpoilage(){
