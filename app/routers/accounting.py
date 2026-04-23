@@ -607,6 +607,137 @@ async def collect_b2b_payment(
     return {"ok": True, "status": invoice.status, "invoice_number": invoice.invoice_number}
 
 
+async def _record_consignment_client_payment(
+    db: AsyncSession,
+    *,
+    client: B2BClient,
+    amount: float,
+    month_label: str,
+    current_user: User,
+):
+    open_result = await db.execute(
+        select(B2BInvoice)
+        .where(
+            B2BInvoice.client_id == client.id,
+            B2BInvoice.invoice_type == "consignment",
+        )
+        .order_by(B2BInvoice.created_at.asc(), B2BInvoice.id.asc())
+    )
+    invoices = open_result.scalars().all()
+    open_invoices = [inv for inv in invoices if round(float(inv.total) - float(inv.amount_paid), 2) > 0.01]
+    if not open_invoices:
+        raise HTTPException(status_code=400, detail="This client has no open consignment invoices")
+
+    outstanding = round(float(client.outstanding or 0), 2)
+    open_balance_total = round(sum(float(inv.total) - float(inv.amount_paid) for inv in open_invoices), 2)
+    if amount <= 0:
+        raise HTTPException(status_code=400, detail="Amount must be greater than 0")
+    if outstanding <= 0.01:
+        raise HTTPException(status_code=400, detail="This client has no outstanding balance to reduce")
+    if amount > outstanding + 0.01:
+        raise HTTPException(status_code=400, detail=f"Amount exceeds client outstanding: {outstanding:.2f}")
+    if amount > open_balance_total + 0.01:
+        raise HTTPException(status_code=400, detail=f"Amount exceeds open consignment balance: {open_balance_total:.2f}")
+
+    remaining = round(amount, 2)
+    allocations = []
+    for invoice in open_invoices:
+        balance = round(float(invoice.total) - float(invoice.amount_paid), 2)
+        if balance <= 0.01:
+            continue
+        applied = round(min(balance, remaining), 2)
+        if applied <= 0:
+            continue
+        invoice.amount_paid = Decimal(str(round(float(invoice.amount_paid) + applied, 2)))
+        invoice.status = "paid" if float(invoice.amount_paid) >= float(invoice.total) - 0.01 else "partial"
+        allocations.append({
+            "invoice_id": invoice.id,
+            "invoice_number": invoice.invoice_number,
+            "applied_amount": applied,
+        })
+        remaining = round(remaining - applied, 2)
+        if remaining <= 0.009:
+            remaining = 0.0
+            break
+
+    if remaining > 0.01:
+        raise HTTPException(status_code=400, detail="Could not allocate the full payment across open consignment invoices")
+
+    client.outstanding = Decimal(str(max(0, round(float(client.outstanding) - amount, 2))))
+
+    note = f"Consignment client payment - {client.name}"
+    if month_label:
+        note += f" ({month_label})"
+    if allocations:
+        note += f" - {', '.join(a['invoice_number'] for a in allocations[:3])}"
+        if len(allocations) > 3:
+            note += f" +{len(allocations) - 3} more"
+
+    journal = Journal(
+        ref_type="consignment_client_payment",
+        ref_id=client.id,
+        description=note,
+        user_id=current_user.id,
+    )
+    db.add(journal)
+    await db.flush()
+    for code, debit, credit in [
+        ("1000", amount, 0),
+        ("1100", 0, amount),
+        ("2200", amount, 0),
+        ("4000", 0, amount),
+    ]:
+        acc_result = await db.execute(select(Account).where(Account.code == code))
+        acc = acc_result.scalar_one_or_none()
+        if acc:
+            db.add(JournalEntry(journal_id=journal.id, account_id=acc.id, debit=debit, credit=credit))
+            acc.balance += Decimal(str(debit)) - Decimal(str(credit))
+
+    record(
+        db,
+        "Accounting",
+        "collect_consignment_client_payment",
+        f"Consignment client payment - {client.name} - amount: {amount:.2f}" + (f" - {month_label}" if month_label else ""),
+        user=current_user,
+        ref_type="b2b_client",
+        ref_id=client.id,
+    )
+    return {
+        "ok": True,
+        "client_id": client.id,
+        "client": client.name,
+        "client_outstanding": round(float(client.outstanding), 2),
+        "amount": round(amount, 2),
+        "allocations": allocations,
+        "journal_id": journal.id,
+    }
+
+
+@router.post("/api/b2b-clients/{client_id}/consignment-payment")
+async def accounting_client_consignment_payment(
+    client_id: int,
+    data: B2BPaymentRequest,
+    db: AsyncSession = Depends(get_async_session),
+    current_user: User = Depends(get_current_user),
+):
+    client_result = await db.execute(select(B2BClient).where(B2BClient.id == client_id))
+    client = client_result.scalar_one_or_none()
+    if not client:
+        raise HTTPException(status_code=404, detail="Client not found")
+
+    amount = round(float(data.amount), 2)
+    month_label = (data.month_label or "").strip()
+    payload = await _record_consignment_client_payment(
+        db,
+        client=client,
+        amount=amount,
+        month_label=month_label,
+        current_user=current_user,
+    )
+    await db.commit()
+    return payload
+
+
 @router.post("/api/b2b-invoices/{invoice_id}/consignment-payment")
 async def accounting_consignment_payment(
     invoice_id: int,
@@ -625,34 +756,18 @@ async def accounting_consignment_payment(
         raise HTTPException(status_code=404, detail="Invoice not found")
     if invoice.invoice_type != "consignment":
         raise HTTPException(status_code=400, detail="This endpoint is for consignment invoices only")
-    amount      = round(float(data.amount), 2)
-    month_label = (data.month_label or "").strip()
-    balance = round(float(invoice.total) - float(invoice.amount_paid), 2)
-    if amount > balance + 0.01:
-        raise HTTPException(status_code=400, detail=f"Amount exceeds balance: {balance:.2f}")
-    invoice.amount_paid = Decimal(str(float(invoice.amount_paid) + amount))
-    if float(invoice.amount_paid) >= float(invoice.total):
-        invoice.status = "paid"
     client = invoice.client
-    if client:
-        client.outstanding = Decimal(str(max(0, float(client.outstanding) - amount)))
-    note = f"Consignment payment - {invoice.invoice_number}"
-    if month_label: note += f" ({month_label})"
-    journal = Journal(ref_type="consignment_payment", description=note)
-    db.add(journal); await db.flush()
-    for code, debit, credit in [
-        ("1000", amount, 0),
-        ("1100", 0, amount),
-        ("2200", amount, 0),
-        ("4000", 0, amount),
-    ]:
-        acc_result = await db.execute(select(Account).where(Account.code == code))
-        acc = acc_result.scalar_one_or_none()
-        if acc:
-            db.add(JournalEntry(journal_id=journal.id, account_id=acc.id, debit=debit, credit=credit))
-            acc.balance += Decimal(str(debit)) - Decimal(str(credit))
+    if not client:
+        raise HTTPException(status_code=400, detail="Consignment invoice has no client")
+    payload = await _record_consignment_client_payment(
+        db,
+        client=client,
+        amount=round(float(data.amount), 2),
+        month_label=(data.month_label or "").strip(),
+        current_user=current_user,
+    )
     await db.commit()
-    return {"ok": True, "status": invoice.status, "invoice_number": invoice.invoice_number}
+    return payload
 
 
 @router.post("/api/b2b-clients/{client_id}/refund")
@@ -1097,7 +1212,7 @@ td.cr { font-family:var(--mono); color:var(--blue); }
         <div class="modal-title">💰 Record Consignment Payment</div>
         <div class="modal-sub" id="cons-modal-sub" style="color:var(--muted);font-size:13px;margin-bottom:16px"></div>
         <div style="background:rgba(45,212,191,.06);border:1px solid rgba(45,212,191,.15);border-radius:10px;padding:10px 14px;margin-bottom:16px;font-size:12px;color:var(--teal)">
-            Amount moves from <b>Deferred Revenue → Sales Revenue</b>
+            Record this on the client account. The payment is allocated behind the scenes to that client's open consignment invoices.
         </div>
         <div style="display:flex;flex-direction:column;gap:6px;margin-bottom:14px">
             <label style="font-size:11px;font-weight:700;letter-spacing:1px;text-transform:uppercase;color:var(--muted)">Amount Paid *</label>
@@ -1898,7 +2013,8 @@ function showToast(msg){
 /* ── B2B INVOICES ── */
 let allB2BInvoices  = [];
 let collectInvoiceId = null;
-let consInvoiceId    = null;
+let consClientId     = null;
+let consClientName   = null;
 let currentInvDetail = null;
 let refundInvoiceId  = null;
 let refundInvoiceNum = null;
@@ -1981,7 +2097,7 @@ function renderB2BInvoices(invoices){
                 ? `<button style="background:transparent;border:1px solid var(--border2);color:var(--sub);font-size:12px;font-weight:600;padding:5px 10px;border-radius:7px;cursor:pointer;font-family:var(--sans);"
                     onmouseenter="this.style.borderColor='var(--teal)';this.style.color='var(--teal)'"
                     onmouseleave="this.style.borderColor='var(--border2)';this.style.color='var(--sub)'"
-                    onclick="openConsModal(${i.id},'${i.invoice_number}',${i.balance_due})">💰 Record Payment</button>`
+                    onclick="openConsModal(${i.client_id},'${i.client.replace(/'/g,"\\'")}',${i.client_outstanding})">💰 Record Client Payment</button>`
                 : ""}
             ${i.client_outstanding > 0.01
                 ? `<button style="background:transparent;border:1px solid var(--border2);color:var(--sub);font-size:12px;font-weight:600;padding:5px 10px;border-radius:7px;cursor:pointer;font-family:var(--sans);"
@@ -2124,9 +2240,10 @@ async function saveCollect(){
 }
 
 /* ── CONSIGNMENT PAYMENT ── */
-function openConsModal(id, num, balance){
-    consInvoiceId = id;
-    document.getElementById("cons-modal-sub").innerText = `${num} — Balance due: ${balance.toFixed(2)} EGP`;
+function openConsModal(clientId, clientName, outstanding){
+    consClientId = clientId;
+    consClientName = clientName;
+    document.getElementById("cons-modal-sub").innerText = `${clientName} — Client outstanding balance: ${outstanding.toFixed(2)} EGP`;
     document.getElementById("cons-amount").value = "";
     document.getElementById("cons-amount").placeholder = "0.00";
     // Fill month selector
@@ -2180,14 +2297,14 @@ async function saveConsPayment(){
     let amount = parseFloat(document.getElementById("cons-amount").value)||0;
     if(amount<=0){ showToast("Enter a valid amount"); return; }
     let month  = document.getElementById("cons-month").value;
-    let res    = await fetch(`/accounting/api/b2b-invoices/${consInvoiceId}/consignment-payment`,{
+    let res    = await fetch(`/accounting/api/b2b-clients/${consClientId}/consignment-payment`,{
         method:"POST", headers:{"Content-Type":"application/json"},
         body:JSON.stringify({amount, month_label:month||null}),
     });
     let data = await res.json();
     if(data.detail){ showToast("Error: "+data.detail); return; }
     document.getElementById("cons-modal").classList.remove("open");
-    showToast(`✓ ${amount.toFixed(2)} EGP recorded${month?" ("+month+")":""} — Revenue recognized!`);
+    showToast(`✓ ${amount.toFixed(2)} EGP recorded for ${data.client || consClientName}${month?" ("+month+")":""}`);
     loadB2BInvoices();
 }
 

@@ -262,6 +262,55 @@ def _channel_totals():
     }
 
 
+async def _load_b2b_client_payment_records(
+    db: AsyncSession,
+    *,
+    d_from: datetime,
+    d_to: datetime,
+):
+    payment_result = await db.execute(
+        select(Journal)
+        .where(
+            Journal.ref_type == "consignment_client_payment",
+            Journal.created_at >= d_from,
+            Journal.created_at <= d_to,
+        )
+        .options(selectinload(Journal.entries).selectinload(JournalEntry.account), selectinload(Journal.user))
+        .order_by(Journal.created_at.desc(), Journal.id.desc())
+    )
+    journals = payment_result.scalars().all()
+    client_ids = {journal.ref_id for journal in journals if journal.ref_id}
+    client_map = {}
+    if client_ids:
+        client_result = await db.execute(select(B2BClient).where(B2BClient.id.in_(client_ids)))
+        client_map = {client.id: client for client in client_result.scalars().all()}
+
+    payment_records = []
+    for journal in journals:
+        amount = 0.0
+        for entry in journal.entries:
+            if entry.account and entry.account.code == "1000" and _num(entry.debit) > 0:
+                amount = _num(entry.debit)
+                break
+        if amount <= 0:
+            amount = max((_num(entry.debit) for entry in journal.entries), default=0.0)
+        client = client_map.get(journal.ref_id)
+        payment_records.append({
+            "journal_id": journal.id,
+            "reference": f"BCP-{journal.id}",
+            "client_id": journal.ref_id,
+            "client": client.name if client else "—",
+            "datetime": journal.created_at.strftime("%Y-%m-%d %H:%M") if journal.created_at else "—",
+            "date": journal.created_at.strftime("%Y-%m-%d") if journal.created_at else "",
+            "user_name": journal.user.name if journal.user else "—",
+            "amount": round(amount, 2),
+            "notes": journal.description or "",
+            "payment_method": "cash",
+            "status": "posted",
+        })
+    return payment_records
+
+
 async def _build_sales_report(
     db: AsyncSession,
     *,
@@ -271,6 +320,7 @@ async def _build_sales_report(
     limit: int = 100,
     include_all: bool = False,
 ):
+    b2b_payment_records = await _load_b2b_client_payment_records(db, d_from=d_from, d_to=d_to)
     result = await db.execute(
         select(Invoice)
         .where(Invoice.created_at >= d_from, Invoice.created_at <= d_to)
@@ -340,14 +390,15 @@ async def _build_sales_report(
     for inv in sorted(b2b_invoices, key=lambda x: x.created_at or datetime.min.replace(tzinfo=timezone.utc), reverse=True):
         total = _num(inv.total)
         amount_paid = _num(inv.amount_paid)
+        collected = 0.0 if (inv.invoice_type or "").lower() == "consignment" else amount_paid
         outstanding = max(total - amount_paid, 0.0)
         day_key = inv.created_at.strftime("%Y-%m-%d") if inv.created_at else ""
         channels["b2b"]["gross_sales"] += total
-        channels["b2b"]["cash_collected"] += amount_paid
+        channels["b2b"]["cash_collected"] += collected
         channels["b2b"]["outstanding"] += outstanding
         channels["b2b"]["count"] += 1
         daily[day_key]["gross_sales"] += total
-        daily[day_key]["cash_collected"] += amount_paid
+        daily[day_key]["cash_collected"] += collected
         items_data = []
         for it in inv.items:
             product_name = it.product.name if it.product else "â€”"
@@ -368,6 +419,11 @@ async def _build_sales_report(
             "amount_paid": amount_paid,
             "balance_due": outstanding,
         })
+
+    for payment in b2b_payment_records:
+        channels["b2b"]["cash_collected"] += payment["amount"]
+        if payment["date"]:
+            daily[payment["date"]]["cash_collected"] += payment["amount"]
 
     refund_records = []
     retail_cash_refunds = 0.0
@@ -451,9 +507,11 @@ async def _build_sales_report(
         "top_products": [{"name": name, "qty": round(values["qty"], 2), "revenue": round(values["revenue"], 2)} for name, values in top_products],
         "pos_records": _paginate_rows(pos_records, skip, limit, include_all=include_all),
         "b2b_records": _paginate_rows(b2b_records, skip, limit, include_all=include_all),
+        "b2b_payment_records": _paginate_rows(b2b_payment_records, skip, limit, include_all=include_all),
         "refund_records": _paginate_rows(refund_records, skip, limit, include_all=include_all),
         "pos_count": len(pos_invoices),
         "b2b_count": len(b2b_invoices),
+        "b2b_payment_count": len(b2b_payment_records),
         "refund_count": len(refund_records),
         "date_from": d_from.strftime("%Y-%m-%d"),
         "date_to": d_to.strftime("%Y-%m-%d"),
@@ -594,6 +652,7 @@ async def export_sales(date_from: str = None, date_to: str = None, db: AsyncSess
                 ["B2B Gross Sales", data["channels"]["b2b"]["gross_sales"]],
                 ["B2B Cash Collected", data["channels"]["b2b"]["cash_collected"]],
                 ["B2B Outstanding", data["channels"]["b2b"]["outstanding"]],
+                ["B2B Client Payments", data["b2b_payment_count"]],
                 ["Retail Refunds", data["refund_breakdown"]["retail"]],
                 ["B2B Refunds", data["refund_breakdown"]["b2b"]],
             ],
@@ -601,6 +660,7 @@ async def export_sales(date_from: str = None, date_to: str = None, db: AsyncSess
                 ("Date Range", f"{data['date_from']} to {data['date_to']}"),
                 ("POS Invoices", data["pos_count"]),
                 ("B2B Invoices", data["b2b_count"]),
+                ("B2B Payment Records", data["b2b_payment_count"]),
                 ("Refund Records", data["refund_count"]),
             ],
             "column_formats": {"Value": "money"},
@@ -633,6 +693,16 @@ async def export_sales(date_from: str = None, date_to: str = None, db: AsyncSess
             "metadata": [("Date Range", f"{data['date_from']} to {data['date_to']}"), ("Records", len(data["b2b_records"]))],
             "column_formats": {"Date / Time": "datetime", "Total Invoiced": "money", "Amount Paid": "money", "Outstanding": "money"},
             "tab_color": "C55A11",
+        },
+        {
+            "sheet_name": "B2B Collections",
+            "report_title": "B2B Client Payment Detail",
+            "headers": ["Reference", "Client", "Date / Time", "User", "Amount", "Notes"],
+            "rows": [[row["reference"], row["client"], row["datetime"], row["user_name"], row["amount"], row["notes"]] for row in data["b2b_payment_records"]],
+            "metadata": [("Date Range", f"{data['date_from']} to {data['date_to']}"), ("Records", len(data["b2b_payment_records"]))],
+            "column_formats": {"Date / Time": "datetime", "Amount": "money"},
+            "wrap_columns": {"Notes"},
+            "tab_color": "2F6F4F",
         },
         {
             "sheet_name": "Refunds",
@@ -1410,6 +1480,7 @@ async def _build_transactions_report(
 ):
     from app.models.refund import RetailRefundItem
 
+    b2b_payment_records = await _load_b2b_client_payment_records(db, d_from=d_from, d_to=d_to)
     rows = []
 
     if not source or source == "pos":
@@ -1468,6 +1539,26 @@ async def _build_transactions_report(
                     "user_name": inv.user.name if inv.user else "—",
                     "notes": inv.notes or "",
                 })
+        for payment in b2b_payment_records:
+            rows.append({
+                "date": payment["datetime"],
+                "reference": payment["reference"],
+                "transaction_type": "B2B Client Payment",
+                "source": "B2B Collection",
+                "counterparty_type": "Client",
+                "counterparty_name": payment["client"],
+                "sku": "—",
+                "product": "Consignment client payment",
+                "qty": 0.0,
+                "unit_price": payment["amount"],
+                "money_effect": payment["amount"],
+                "stock_effect": 0.0,
+                "direction": "in",
+                "payment_method": payment["payment_method"],
+                "status": payment["status"],
+                "user_name": payment["user_name"],
+                "notes": payment["notes"],
+            })
 
     if not source or source == "refund":
         refund_res = await db.execute(
@@ -2805,6 +2896,25 @@ async function loadSales(){
     }
     b2bHtml += `</tbody></table></div>`;
 
+    let b2bCollectionsHtml = `
+        <div class="table-title" style="margin-top:22px">B2B Client Collections — ${data.b2b_payment_records.length} payment${data.b2b_payment_records.length!==1?"s":""}</div>
+        <div class="table-wrap">
+        <table><thead><tr><th>Reference</th><th>Client</th><th>Date / Time</th><th>By</th><th style="text-align:right">Amount</th><th>Notes</th></tr></thead><tbody>`;
+    if(data.b2b_payment_records.length){
+        b2bCollectionsHtml += data.b2b_payment_records.map(payment=>`
+            <tr>
+                <td class="mono" style="font-size:11px;color:var(--teal)">${payment.reference}</td>
+                <td class="name" style="font-size:13px">${payment.client}</td>
+                <td class="mono" style="font-size:12px;color:var(--muted)">${payment.datetime}</td>
+                <td style="font-size:12px;color:var(--muted);white-space:nowrap">${payment.user_name}</td>
+                <td class="mono" style="text-align:right;color:var(--green);font-weight:700">${payment.amount.toFixed(2)}</td>
+                <td style="font-size:12px;color:var(--muted)">${payment.notes || "—"}</td>
+            </tr>`).join("");
+    } else {
+        b2bCollectionsHtml += `<tr><td colspan="6" style="text-align:center;color:var(--muted);padding:24px">No B2B client payments in this period</td></tr>`;
+    }
+    b2bCollectionsHtml += `</tbody></table></div>`;
+
     let refHtml = "";
     if(data.refund_records && data.refund_records.length){
         refHtml = `
@@ -2830,7 +2940,7 @@ async function loadSales(){
             </tr>`).join("")}
         </tbody></table></div>`;
     }
-    document.getElementById("sales-records").innerHTML = posHtml + b2bHtml + refHtml;
+    document.getElementById("sales-records").innerHTML = posHtml + b2bHtml + b2bCollectionsHtml + refHtml;
     return;
 }
 
