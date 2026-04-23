@@ -14,6 +14,7 @@ from app.models.product import Product
 from app.models.supplier import Supplier
 from app.models.user import User
 from app.core.log import record
+from app.core.navigation import render_app_header
 from app.schemas.product import ProductCreate, ProductUpdate
 from app.services.location_inventory_service import (
     ensure_default_stock_location,
@@ -243,7 +244,7 @@ async def delete_product(product_id: int, db: AsyncSession = Depends(get_async_s
 
 # ── UI ─────────────────────────────────────────────────
 @router.get("/", response_class=HTMLResponse)
-def products_ui():
+def products_ui(current_user: User = Depends(require_permission("page_products"))):
     return """<!DOCTYPE html>
 <html>
 <head>
@@ -373,37 +374,7 @@ tr:hover td{background:rgba(255,255,255,.02);}
     <script src="/static/auth-guard.js"></script>
 </head>
 <body>
-<nav>
-    <a href="/home" class="logo">
-        <svg width="18" height="18" viewBox="0 0 24 24" fill="none">
-            <polygon points="13,2 4,14 11,14 11,22 20,10 13,10" fill="#f59e0b"/>
-        </svg>
-        Thunder ERP
-    </a>
-    <a href="/dashboard"  class="nav-link">Dashboard</a>
-    <a href="/pos"        class="nav-link">POS</a>
-    <a href="/products/"  class="nav-link active">Products</a>
-    <a href="/inventory/" class="nav-link">Inventory</a>
-    <span class="nav-spacer"></span>
-    <div class="topbar-right">
-        <button class="mode-btn" id="mode-btn" onclick="toggleMode()" title="Toggle color mode">??</button>
-        <div class="account-menu">
-            <button class="user-pill" id="account-trigger" onclick="toggleAccountMenu(event)" aria-haspopup="menu" aria-expanded="false">
-                <div class="user-avatar" id="user-avatar">A</div>
-                <span class="user-name" id="user-name">Admin</span>
-                <span class="menu-caret">&#9662;</span>
-            </button>
-            <div class="account-dropdown" id="account-dropdown" role="menu">
-                <div class="account-head">
-                    <div class="account-label">Signed in as</div>
-                    <div class="account-email" id="user-email">â€”</div>
-                </div>
-                <a href="/users/password" class="account-item" role="menuitem">Change Password</a>
-                <button class="account-item danger" onclick="logout()" role="menuitem">Sign out</button>
-            </div>
-        </div>
-    </div>
-</nav>
+""" + render_app_header(current_user, "page_products") + """
 
 <div class="content">
     <div>

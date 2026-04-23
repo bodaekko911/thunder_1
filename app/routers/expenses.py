@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.log import record
 from app.core.permissions import get_current_user, require_permission
 from app.database import get_async_session
+from app.core.navigation import render_app_header
 from app.models.accounting import Account, Journal, JournalEntry
 from app.models.expense import Expense, ExpenseCategory
 from app.models.farm import Farm, FarmDelivery, FarmDeliveryItem
@@ -559,7 +560,7 @@ async def cost_allocation(
 # ── UI ───────────────────────────────────────────────────────────────────────
 
 @router.get("/", response_class=HTMLResponse)
-def expenses_ui():
+def expenses_ui(current_user: User = Depends(require_permission("page_expenses"))):
     return """<!DOCTYPE html>
 <html>
 <head>
@@ -831,25 +832,7 @@ nav {
 </head>
 <body>
 
-<nav>
-    <a href="/home" class="logo">
-        <svg width="18" height="18" viewBox="0 0 24 24" fill="none">
-            <polygon points="13,2 4,14 11,14 11,22 20,10 13,10" fill="#f59e0b"/>
-        </svg>
-        Thunder ERP
-    </a>
-    <a href="/home" class="nav-back">
-        <svg width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path d="M19 12H5M12 5l-7 7 7 7"/></svg>
-        Home
-    </a>
-    <div class="nav-spacer"></div>
-    <button class="mode-btn" id="mode-btn" onclick="toggleMode()">🌙</button>
-    <div class="user-pill">
-        <div class="user-avatar" id="user-avatar">A</div>
-        <span class="user-name" id="user-name">Admin</span>
-    </div>
-    <button class="logout-btn" onclick="logout()">Sign out</button>
-</nav>
+""" + render_app_header(current_user, "page_expenses") + """
 
 <div class="page">
     <div class="page-header">

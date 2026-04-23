@@ -104,5 +104,5 @@ async def get_expense_cost_allocation(
 
 
 @router.get("/", response_class=HTMLResponse)
-def expenses_ui():
-    return legacy_expenses_ui()
+def expenses_ui(current_user: User = Depends(require_permission("page_expenses"))):
+    return legacy_expenses_ui(current_user)

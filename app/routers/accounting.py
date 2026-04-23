@@ -10,6 +10,7 @@ from datetime import date, datetime, time, timedelta, timezone
 from app.database import get_async_session
 from app.core.permissions import get_current_user, require_permission
 from app.core.log import record
+from app.core.navigation import render_app_header
 from app.models.accounting import Account, Journal, JournalEntry
 from app.models.b2b import B2BClient, B2BInvoice, B2BInvoiceItem, Consignment
 from app.models.expense import Expense
@@ -867,7 +868,7 @@ async def refund_b2b_client_account(client_id: int, data: B2BRefundIn, db: Async
 
 # ── UI ─────────────────────────────────────────────────
 @router.get("/", response_class=HTMLResponse)
-def accounting_ui():
+def accounting_ui(current_user: User = Depends(require_permission("page_accounting"))):
     return """
 <!DOCTYPE html>
 <html>
@@ -1032,39 +1033,7 @@ td.cr { font-family:var(--mono); color:var(--blue); }
     <script src="/static/auth-guard.js"></script>
 </head>
 <body>
-<nav>
-    <a href="/home" class="logo" style="text-decoration:none;display:flex;align-items:center;gap:8px;">
-        <svg width="18" height="18" viewBox="0 0 24 24" fill="none"><polygon points="13,2 4,14 11,14 11,22 20,10 13,10" fill="#f59e0b"/></svg>
-        Thunder ERP
-    </a>
-    <a href="/dashboard"       class="nav-link">Dashboard</a>
-    <a href="/pos"             class="nav-link">POS</a>
-    <a href="/products/"       class="nav-link">Products</a>
-    <a href="/customers-mgmt/" class="nav-link">Customers</a>
-    <a href="/suppliers/"      class="nav-link">Suppliers</a>
-    <a href="/inventory/"      class="nav-link">Inventory</a>
-    <a href="/hr/"             class="nav-link">HR</a>
-    <a href="/accounting/"     class="nav-link active">Accounting</a>
-    <span class="nav-spacer"></span>
-    <div class="topbar-right">
-        <button class="mode-btn" id="mode-btn" onclick="toggleMode()" title="Toggle color mode">??</button>
-        <div class="account-menu">
-            <button class="user-pill" id="account-trigger" onclick="toggleAccountMenu(event)" aria-haspopup="menu" aria-expanded="false">
-                <div class="user-avatar" id="user-avatar">A</div>
-                <span class="user-name" id="user-name">Admin</span>
-                <span class="menu-caret">&#9662;</span>
-            </button>
-            <div class="account-dropdown" id="account-dropdown" role="menu">
-                <div class="account-head">
-                    <div class="account-label">Signed in as</div>
-                    <div class="account-email" id="user-email">&mdash;</div>
-                </div>
-                <a href="/users/password" class="account-item" role="menuitem">Change Password</a>
-                <button class="account-item danger" onclick="logout()" role="menuitem">Sign out</button>
-            </div>
-        </div>
-    </div>
-</nav>
+""" + render_app_header(current_user, "page_accounting") + """
 
 <div class="content">
     <div>

@@ -8,6 +8,7 @@ from pydantic import BaseModel
 
 from app.database import get_async_session
 from app.core.permissions import get_current_user, require_permission
+from app.core.navigation import render_app_header
 from app.models.supplier import Supplier, Purchase, PurchaseItem
 from app.models.user import User
 from app.models.product import Product
@@ -218,7 +219,7 @@ async def products_list(db: AsyncSession = Depends(get_async_session)):
 
 # ── UI ─────────────────────────────────────────────────
 @router.get("/", response_class=HTMLResponse)
-def suppliers_ui():
+def suppliers_ui(current_user: User = Depends(require_permission("page_suppliers"))):
     html = """
 <!DOCTYPE html>
 <html>
@@ -451,24 +452,7 @@ td.mono { font-family: var(--mono); color: var(--green); }
 </head>
 <body>
 
-<nav>
-    <a href="/home" class="logo" style="text-decoration:none;display:flex;align-items:center;gap:8px;"><svg width="22" height="22" viewBox="0 0 24 24" fill="none"><polygon points="13,2 4,14 11,14 11,22 20,10 13,10" fill="#f59e0b" stroke="#fbbf24" stroke-width="0.5"/></svg>Thunder ERP</a>
-    <a href="/dashboard"       class="nav-link">Dashboard</a>
-    <a href="/pos"             class="nav-link">POS</a>
-    <a href="/products/"       class="nav-link">Products</a>
-    <a href="/customers-mgmt/" class="nav-link">Customers</a>
-    <a href="/suppliers/"      class="nav-link active">Suppliers</a>
-    <a href="/import"          class="nav-link">Import</a>
-    <span class="nav-spacer"></span>
-    <div class="topbar-right">
-        <button class="mode-btn" id="mode-btn" onclick="toggleMode()" title="Toggle color mode">??</button>
-        <div class="user-pill">
-            <div class="user-avatar" id="user-avatar">A</div>
-            <span class="user-name" id="user-name">Admin</span>
-        </div>
-        <button class="logout-btn" onclick="logout()">Sign out</button>
-    </div>
-</nav>
+""" + render_app_header(current_user, "page_suppliers") + """
 
 <div class="content">
     <div>

@@ -30,6 +30,7 @@ from app.core.security import (
     verify_password,
 )
 from app.core.log import ActivityLog
+from app.core.navigation import render_app_header
 from app.schemas.user import AdminResetPassword, AdminUserCreate, ChangePasswordData, UserUpdate
 
 router = APIRouter(prefix="/users", tags=["Users"])
@@ -501,7 +502,7 @@ initUser();
 
 # ── UI ────────────────────────────────────────────────────
 @router.get("/", response_class=HTMLResponse)
-def users_ui(_=Depends(core_require_admin)):
+def users_ui(current_user: User = Depends(core_require_admin)):
     return """<!DOCTYPE html>
 <html>
 <head>
@@ -650,25 +651,7 @@ td.name{color:var(--text);font-weight:600;}
     <script src="/static/auth-guard.js"></script>
 </head>
 <body>
-<nav>
-    <a href="/home" class="logo">
-        <svg width="18" height="18" viewBox="0 0 24 24" fill="none"><polygon points="13,2 4,14 11,14 11,22 20,10 13,10" fill="#f59e0b"/></svg>
-        <span class="logo-txt">Thunder ERP</span>
-    </a>
-    <a href="/dashboard"   class="nav-link">Dashboard</a>
-    <a href="/accounting/" class="nav-link">Accounting</a>
-    <a href="/hr/"         class="nav-link">HR</a>
-    <a href="/users/"      class="nav-link active">Users</a>
-    <span class="nav-spacer"></span>
-    <div class="topbar-right">
-        <button class="mode-btn" id="mode-btn" onclick="toggleMode()" title="Toggle color mode">??</button>
-        <div class="user-pill">
-            <div class="user-avatar" id="user-avatar">A</div>
-            <span class="user-name" id="user-name">Admin</span>
-        </div>
-        <button class="logout-btn" onclick="logout()">Sign out</button>
-    </div>
-</nav>
+""" + render_app_header(current_user, "admin_users") + """
 
 <div class="content">
     <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px">

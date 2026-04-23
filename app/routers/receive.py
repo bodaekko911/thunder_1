@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.permissions import require_action, require_permission
 from app.database import get_async_session
+from app.core.navigation import render_app_header
 from app.models.product import Product
 from app.models.user import User
 from app.services.receive_service import (
@@ -183,7 +184,7 @@ async def export_receipts_excel(
 # ── UI ────────────────────────────────────────────────────────────────────────
 
 @router.get("/", response_class=HTMLResponse)
-def receive_ui():
+def receive_ui(current_user: User = Depends(require_permission("page_receive_products"))):
     return """<!DOCTYPE html>
 <html>
 <head>
@@ -401,30 +402,7 @@ body.light table.hist tr:hover td{background:rgba(0,0,0,.03)}
 </head>
 <body>
 
-<nav>
-  <div class="nav-left">
-    <a href="/home" class="nav-logo">&#9889; Thunder ERP</a>
-    <span class="nav-title">Receive Products</span>
-  </div>
-  <div class="nav-right">
-    <button class="mode-btn" id="mode-btn" onclick="toggleMode()">&#127769;</button>
-    <div class="account-menu">
-      <button class="user-pill" id="account-trigger" onclick="toggleAccountMenu(event)" aria-haspopup="menu" aria-expanded="false">
-        <div class="user-avatar" id="user-avatar">A</div>
-        <span class="user-name" id="user-name">...</span>
-        <span class="menu-caret">&#9662;</span>
-      </button>
-      <div class="account-dropdown" id="account-dropdown" role="menu">
-        <div class="account-head">
-          <div class="account-label">Signed in as</div>
-          <div class="account-email" id="user-email">&mdash;</div>
-        </div>
-        <a href="/users/password" class="account-item" role="menuitem">Change Password</a>
-        <button class="account-item danger" onclick="logout()" role="menuitem">Sign out</button>
-      </div>
-    </div>
-  </div>
-</nav>
+""" + render_app_header(current_user, "page_receive_products") + """
 
 <div class="page">
 

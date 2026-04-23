@@ -10,9 +10,11 @@ from app.database import get_async_session
 from app.core.log import logger
 from app.core.permissions import ensure_action_permission, require_action, require_permission
 from app.core.security import get_current_user
+from app.core.navigation import render_app_header
 from app.models.product import Product
 from app.models.customer import Customer
 from app.models.invoice import Invoice
+from app.models.user import User
 from app.schemas.invoice import InvoiceCollectionRequest, InvoiceCreate
 from app.services.barcode_service import find_product_by_barcode, normalize_barcode_value
 from app.services.pos_service import create_invoice
@@ -353,7 +355,7 @@ self.addEventListener('fetch', e => {
 
 
 @router.get("/pos", response_class=HTMLResponse)
-def pos_ui():
+def pos_ui(current_user: User = Depends(require_permission("page_pos"))):
     return """<!DOCTYPE html>
 <html>
 <head>
@@ -375,11 +377,11 @@ body.light{
     --text:#1a1e14;--sub:#4a5040;--muted:#7b816f;
 }
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0;}
-body{font-family:var(--sans);background:var(--bg);color:var(--text);height:100vh;overflow:hidden;display:grid;grid-template-columns:1fr 430px;grid-template-rows:58px 1fr;font-size:14px;}
+body{font-family:var(--sans);background:var(--bg);color:var(--text);height:100vh;overflow:hidden;display:grid;grid-template-columns:1fr 430px;grid-template-rows:auto 58px 1fr;font-size:14px;}
 body>*{position:relative;z-index:1;}
 
 /* TOPBAR */
-#topbar{grid-column:1/-1;display:flex;align-items:center;gap:10px;padding:0 18px;background:rgba(10,13,24,.9);backdrop-filter:blur(20px);border-bottom:1px solid var(--border);overflow:visible;z-index:100;}
+#topbar{grid-column:1/-1;grid-row:2;display:flex;align-items:center;gap:10px;padding:0 18px;background:rgba(10,13,24,.9);backdrop-filter:blur(20px);border-bottom:1px solid var(--border);overflow:visible;z-index:100;}
 body.light #topbar{background:rgba(244,245,239,.92);}
 .logo{font-size:17px;font-weight:900;background:linear-gradient(135deg,var(--green),var(--blue));-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;margin-right:6px;text-decoration:none;display:flex;align-items:center;gap:8px;}
 .tb-field{display:flex;align-items:center;gap:9px;background:var(--card);border:1px solid var(--border);border-radius:var(--r);padding:0 13px;transition:border-color .2s;}
@@ -570,12 +572,13 @@ body.light .toast{background:var(--card);}
     .inv-row .label,.inv-total-row{color:black;}
     .inv-item-name{color:black;}
     .inv-item-total{color:black;}
-    #right,#left,#topbar{display:none!important;}
+    .app-nav,#right,#left,#topbar{display:none!important;}
 }
 </style>
     <script src="/static/auth-guard.js"></script>
 </head>
 <body>
+""" + render_app_header(current_user, "page_pos") + """
 
 <!-- TOPBAR -->
 <div id="topbar">
@@ -624,22 +627,6 @@ body.light .toast{background:var(--card);}
         <div id="offline-indicator" style="display:none;align-items:center;gap:6px;background:rgba(255,181,71,.12);border:1px solid rgba(255,181,71,.35);color:#ffb547;font-size:12px;font-weight:700;padding:7px 12px;border-radius:9px;">📴 Offline</div>
         <div id="offline-badge" style="display:none;background:rgba(255,181,71,.12);border:1px solid rgba(255,181,71,.35);color:#ffb547;font-size:12px;font-weight:700;padding:7px 12px;border-radius:9px;cursor:pointer;" onclick="showPendingQueue()" title="Pending offline sales — click to sync"></div>
         <a href="/refunds/" id="refunds-link" style="display:flex;align-items:center;gap:6px;background:rgba(255,77,109,.08);border:1px solid rgba(255,77,109,.25);color:#ff4d6d;font-family:var(--sans);font-size:12px;font-weight:700;padding:8px 14px;border-radius:9px;cursor:pointer;text-decoration:none;transition:all .2s;" onmouseover="this.style.background='rgba(255,77,109,.18)'" onmouseout="this.style.background='rgba(255,77,109,.08)'">↩ Refunds</a>
-        <button class="mode-btn" id="mode-btn" onclick="toggleMode()" title="Toggle color mode">??</button>
-        <div class="account-menu">
-            <button class="user-pill" id="account-trigger" onclick="toggleAccountMenu(event)" aria-haspopup="menu" aria-expanded="false">
-                <div class="user-avatar" id="user-avatar">A</div>
-                <span class="user-name" id="user-name">Admin</span>
-                <span class="menu-caret">&#9662;</span>
-            </button>
-            <div class="account-dropdown" id="account-dropdown" role="menu">
-                <div class="account-head">
-                    <div class="account-label">Signed in as</div>
-                    <div class="account-email" id="user-email">&mdash;</div>
-                </div>
-                <a href="/users/password" class="account-item" role="menuitem">Change Password</a>
-                <button class="account-item danger" onclick="logout()" role="menuitem">Sign out</button>
-            </div>
-        </div>
     </div>
 </div>
 

@@ -12,6 +12,7 @@ import re
 from app.database import get_async_session
 from app.core.permissions import get_current_user, require_action, require_admin, require_permission
 from app.core.log import record
+from app.core.navigation import render_app_header
 from app.models.b2b import B2BClient, B2BInvoice, B2BInvoiceItem, Consignment, ConsignmentItem, B2BRefund, B2BRefundItem, B2BClientPrice
 from app.models.product import Product
 from app.models.inventory import StockMove
@@ -2459,7 +2460,7 @@ table.summary .amt {{ text-align: right; font-family: 'Courier New', monospace; 
 
 # ── UI ─────────────────────────────────────────────────
 @router.get("/", response_class=HTMLResponse)
-def b2b_ui():
+def b2b_ui(current_user: User = Depends(require_permission("page_b2b"))):
     return """<!DOCTYPE html>
 <html>
 <head>
@@ -2622,39 +2623,7 @@ td.name{color:var(--text);font-weight:600;}
     <script src="/static/auth-guard.js"></script>
 </head>
 <body>
-<nav>
-    <a href="/home" class="logo">
-        <svg width="18" height="18" viewBox="0 0 24 24" fill="none">
-            <polygon points="13,2 4,14 11,14 11,22 20,10 13,10" fill="#f59e0b"/>
-        </svg>
-        Thunder ERP
-    </a>
-    <a href="/dashboard"  class="nav-link">Dashboard</a>
-    <a href="/pos"        class="nav-link">POS</a>
-    <a href="/b2b/"       class="nav-link active">B2B</a>
-    <a href="/inventory/" class="nav-link">Inventory</a>
-    <a href="/production/"class="nav-link">Production</a>
-    <a href="/accounting/"class="nav-link">Accounting</a>
-    <span class="nav-spacer"></span>
-    <div class="topbar-right">
-        <button class="mode-btn" id="mode-btn" onclick="toggleMode()" title="Toggle color mode">??</button>
-        <div class="account-menu">
-            <button class="user-pill" id="account-trigger" onclick="toggleAccountMenu(event)" aria-haspopup="menu" aria-expanded="false">
-                <div class="user-avatar" id="user-avatar">A</div>
-                <span class="user-name" id="user-name">Admin</span>
-                <span class="menu-caret">&#9662;</span>
-            </button>
-            <div class="account-dropdown" id="account-dropdown" role="menu">
-                <div class="account-head">
-                    <div class="account-label">Signed in as</div>
-                    <div class="account-email" id="user-email">&mdash;</div>
-                </div>
-                <a href="/users/password" class="account-item" role="menuitem">Change Password</a>
-                <button class="account-item danger" onclick="logout()" role="menuitem">Sign out</button>
-            </div>
-        </div>
-    </div>
-</nav>
+""" + render_app_header(current_user, "page_b2b") + """
 
 <div class="content">
     <div>

@@ -418,28 +418,32 @@ async function initUser() {
 }
 
 function bindEvents() {
-  document.getElementById("mode-btn").addEventListener("click", toggleTheme);
+  if (!window.__appNav) {
+    document.getElementById("mode-btn").addEventListener("click", toggleTheme);
+  }
   window.addEventListener("app:themechange", refreshThemeUi);
-  document.getElementById("account-trigger").addEventListener("click", (event) => {
-    event.stopPropagation();
-    const trigger = document.getElementById("account-trigger");
-    const dropdown = document.getElementById("account-dropdown");
-    const open = dropdown.classList.toggle("open");
-    trigger.classList.toggle("open", open);
-    trigger.setAttribute("aria-expanded", open ? "true" : "false");
-  });
-  document.getElementById("signout-btn").addEventListener("click", async () => {
-    await fetch("/auth/logout", { method: "POST" });
-    window.location.href = "/";
-  });
-  document.addEventListener("click", (event) => {
-    const dropdown = document.getElementById("account-dropdown");
-    const trigger = document.getElementById("account-trigger");
-    if (dropdown.contains(event.target) || trigger.contains(event.target)) return;
-    dropdown.classList.remove("open");
-    trigger.classList.remove("open");
-    trigger.setAttribute("aria-expanded", "false");
-  });
+  if (!window.__appNav) {
+    document.getElementById("account-trigger").addEventListener("click", (event) => {
+      event.stopPropagation();
+      const trigger = document.getElementById("account-trigger");
+      const dropdown = document.getElementById("account-dropdown");
+      const open = dropdown.classList.toggle("open");
+      trigger.classList.toggle("open", open);
+      trigger.setAttribute("aria-expanded", open ? "true" : "false");
+    });
+    document.getElementById("signout-btn").addEventListener("click", async () => {
+      await fetch("/auth/logout", { method: "POST" });
+      window.location.href = "/";
+    });
+    document.addEventListener("click", (event) => {
+      const dropdown = document.getElementById("account-dropdown");
+      const trigger = document.getElementById("account-trigger");
+      if (dropdown.contains(event.target) || trigger.contains(event.target)) return;
+      dropdown.classList.remove("open");
+      trigger.classList.remove("open");
+      trigger.setAttribute("aria-expanded", "false");
+    });
+  }
   document.querySelectorAll(".range-btn").forEach((button) => {
     button.addEventListener("click", () => {
       if (button.dataset.range === "custom") {

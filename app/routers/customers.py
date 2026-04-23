@@ -15,6 +15,7 @@ from app.models.user import User
 from app.models.invoice import Invoice, InvoiceItem
 from app.models.refund import RetailRefund
 from app.core.log import record
+from app.core.navigation import render_app_header
 from app.schemas.customer import CustomerCreate, CustomerUpdate
 
 router = APIRouter(
@@ -636,7 +637,7 @@ load();
 
 # ── UI ─────────────────────────────────────────────────
 @router.get("/", response_class=HTMLResponse)
-def customers_ui():
+def customers_ui(current_user: User = Depends(require_permission("page_customers"))):
     return """
 <!DOCTYPE html>
 <html>
@@ -891,33 +892,7 @@ td.phone { font-family: var(--mono); font-size: 12px; }
 </head>
 <body>
 
-<nav>
-    <a href="/home" class="logo" style="text-decoration:none;display:flex;align-items:center;gap:8px;"><svg width="22" height="22" viewBox="0 0 24 24" fill="none"><polygon points="13,2 4,14 11,14 11,22 20,10 13,10" fill="#f59e0b" stroke="#fbbf24" stroke-width="0.5"/></svg>Thunder ERP</a>
-    <a href="/dashboard"        class="nav-link">Dashboard</a>
-    <a href="/pos"              class="nav-link">POS</a>
-    <a href="/products/"        class="nav-link">Products</a>
-    <a href="/customers-mgmt/"  class="nav-link active">Customers</a>
-    <a href="/import"           class="nav-link">Import</a>
-    <span class="nav-spacer"></span>
-    <div class="topbar-right">
-        <button class="mode-btn" id="mode-btn" onclick="toggleMode()" title="Toggle color mode">??</button>
-        <div class="account-menu">
-            <button class="user-pill" id="account-trigger" onclick="toggleAccountMenu(event)" aria-haspopup="menu" aria-expanded="false">
-                <div class="user-avatar" id="user-avatar">A</div>
-                <span class="user-name" id="user-name">Admin</span>
-                <span class="menu-caret">&#9662;</span>
-            </button>
-            <div class="account-dropdown" id="account-dropdown" role="menu">
-                <div class="account-head">
-                    <div class="account-label">Signed in as</div>
-                    <div class="account-email" id="user-email">&mdash;</div>
-                </div>
-                <a href="/users/password" class="account-item" role="menuitem">Change Password</a>
-                <button class="account-item danger" onclick="logout()" role="menuitem">Sign out</button>
-            </div>
-        </div>
-    </div>
-</nav>
+""" + render_app_header(current_user, "page_customers") + """
 
 <div class="content">
     <div>

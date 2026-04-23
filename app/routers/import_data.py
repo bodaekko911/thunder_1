@@ -9,12 +9,14 @@ import openpyxl, io
 from app.core.permissions import require_permission
 from app.core.security import get_current_user
 from app.database import get_async_session
+from app.core.navigation import render_app_header
 from app.models.invoice import Invoice, InvoiceItem
 from app.models.accounting import Journal
 from app.models.inventory import StockMove
 from app.models.product import Product
 from app.models.customer import Customer
 from app.models.refund import RetailRefund
+from app.models.user import User
 from app.models.b2b import B2BInvoice as B2BInvoiceModel, B2BInvoiceItem, Consignment as ConsignmentModel
 from app.models.supplier import PurchaseItem
 from app.services.sales_import_service import import_sales
@@ -1024,7 +1026,7 @@ async def delete_farm_batch(
 
 
 @router.get("/", response_class=HTMLResponse)
-def import_ui():
+def import_ui(current_user: User = Depends(require_permission("page_import"))):
     return """<!DOCTYPE html>
 <html>
 <head>
@@ -1112,24 +1114,7 @@ td{padding:8px 12px;border-top:1px solid var(--border);color:var(--sub);white-sp
     <script src="/static/auth-guard.js"></script>
 </head>
 <body>
-<nav>
-    <a href="/home" class="logo">
-        <svg width="18" height="18" viewBox="0 0 24 24" fill="none"><polygon points="13,2 4,14 11,14 11,22 20,10 13,10" fill="#f59e0b"/></svg>
-        Thunder ERP
-    </a>
-    <a href="/dashboard" class="nav-link">Dashboard</a>
-    <a href="/products/"  class="nav-link">Products</a>
-    <a href="/import/"    class="nav-link active">Import</a>
-    <span class="nav-spacer"></span>
-    <div class="topbar-right">
-        <button class="mode-btn" id="mode-btn" onclick="toggleMode()" title="Toggle color mode">??</button>
-        <div class="user-pill">
-            <div class="user-avatar" id="user-avatar">A</div>
-            <span class="user-name" id="user-name">Admin</span>
-        </div>
-        <button class="logout-btn" onclick="logout()">Sign out</button>
-    </div>
-</nav>
+""" + render_app_header(current_user, "page_import") + """
 
 <div class="content">
     <div>
