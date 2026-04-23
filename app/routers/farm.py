@@ -129,7 +129,7 @@ async def get_deliveries(farm_id: int = None, skip: int = 0, limit: int = 50, db
         ],
     }
 
-@router.post("/api/deliveries", dependencies=[Depends(require_permission("action_farm_record_delivery"))])
+@router.post("/api/deliveries", dependencies=[Depends(require_permission("action_farm_delivery_create"))])
 async def create_delivery(data: DeliveryCreate, db: AsyncSession = Depends(get_async_session), current_user: User = Depends(get_current_user)):
     result = await db.execute(select(Farm).where(Farm.id == data.farm_id))
     farm = result.scalar_one_or_none()
@@ -165,7 +165,7 @@ async def create_delivery(data: DeliveryCreate, db: AsyncSession = Depends(get_a
     await db.refresh(delivery)
     return {"id": delivery.id, "delivery_number": delivery.delivery_number, "items_count": len(data.items)}
 
-@router.put("/api/deliveries/{delivery_id}", dependencies=[Depends(require_permission("action_farm_record_delivery"))])
+@router.put("/api/deliveries/{delivery_id}", dependencies=[Depends(require_permission("action_farm_delivery_update"))])
 async def edit_delivery(delivery_id: int, data: DeliveryCreate, db: AsyncSession = Depends(get_async_session), current_user: User = Depends(get_current_user)):
     del_result = await db.execute(
         select(FarmDelivery)
@@ -236,7 +236,7 @@ async def edit_delivery(delivery_id: int, data: DeliveryCreate, db: AsyncSession
     await db.commit()
     return {"ok": True, "delivery_number": delivery.delivery_number}
 
-@router.delete("/api/deliveries/{delivery_id}", dependencies=[Depends(require_permission("action_farm_record_delivery"))])
+@router.delete("/api/deliveries/{delivery_id}", dependencies=[Depends(require_permission("action_farm_delivery_delete"))])
 async def delete_delivery(delivery_id: int, db: AsyncSession = Depends(get_async_session), current_user: User = Depends(get_current_user)):
     del_result = await db.execute(
         select(FarmDelivery)
@@ -322,7 +322,7 @@ async def get_weather_logs(farm_id: Optional[int] = None, limit: int = 90, db: A
         for w in logs
     ]
 
-@router.post("/api/weather-logs", dependencies=[Depends(require_permission("action_farm_log_weather"))])
+@router.post("/api/weather-logs", dependencies=[Depends(require_permission("action_farm_weather_log"))])
 async def create_weather_log(data: WeatherLogIn, db: AsyncSession = Depends(get_async_session), current_user: User = Depends(get_current_user)):
     farm_result = await db.execute(select(Farm).where(Farm.id == data.farm_id))
     farm = farm_result.scalar_one_or_none()
@@ -344,7 +344,7 @@ async def create_weather_log(data: WeatherLogIn, db: AsyncSession = Depends(get_
     db.add(w); await db.commit(); await db.refresh(w)
     return {"id": w.id, "log_date": str(w.log_date)}
 
-@router.put("/api/weather-logs/{log_id}", dependencies=[Depends(require_permission("action_farm_log_weather"))])
+@router.put("/api/weather-logs/{log_id}", dependencies=[Depends(require_permission("action_farm_weather_log"))])
 async def update_weather_log(log_id: int, data: WeatherLogIn, db: AsyncSession = Depends(get_async_session), current_user: User = Depends(get_current_user)):
     result = await db.execute(select(WeatherLog).where(WeatherLog.id == log_id))
     w = result.scalar_one_or_none()
@@ -363,7 +363,7 @@ async def update_weather_log(log_id: int, data: WeatherLogIn, db: AsyncSession =
     await db.commit()
     return {"ok": True}
 
-@router.delete("/api/weather-logs/{log_id}", dependencies=[Depends(require_permission("action_farm_log_weather"))])
+@router.delete("/api/weather-logs/{log_id}", dependencies=[Depends(require_permission("action_farm_weather_log"))])
 async def delete_weather_log(log_id: int, db: AsyncSession = Depends(get_async_session), current_user: User = Depends(get_current_user)):
     result = await db.execute(select(WeatherLog).where(WeatherLog.id == log_id))
     w = result.scalar_one_or_none()
@@ -606,7 +606,7 @@ td.name{color:var(--text);font-weight:600;}
             <button class="tab"        id="tab-season"     onclick="switchTab('season')">Season Analysis</button>
         </div>
         <div id="tab-action-area">
-            <button class="btn btn-lime" onclick="openDeliveryModal()">+ Record Delivery</button>
+            <button class="btn btn-lime" id="btn-add-delivery" onclick="openDeliveryModal()">+ Record Delivery</button>
         </div>
     </div>
 
@@ -660,7 +660,7 @@ td.name{color:var(--text);font-weight:600;}
                     <option value="">All Farms</option>
                 </select>
             </div>
-            <button class="btn btn-lime" onclick="openWeatherModal()">+ Log Weather</button>
+            <button class="btn btn-lime" id="btn-add-weather" onclick="openWeatherModal()">+ Log Weather</button>
         </div>
         <div class="table-wrap">
             <table>
@@ -893,49 +893,69 @@ async function logout(){
     await fetch("/auth/logout", { method: "POST" });
     window.location.href = "/";
 }
-  initializeColorMode();
+let currentUserRole = "";
+let currentUserPermissions = new Set();
+let isAdmin = false;
 
-  let currentUser = null;
-  let isAdmin = false;
-  let userPermissions = new Set();
+async function initUser() {
+    try {
+        const r = await fetch("/auth/me");
+        if (!r.ok) { _redirectToLogin(); return; }
+        const u = await r.json();
+        document.getElementById("user-name").innerText = u.name;
+        document.getElementById("user-avatar").innerText = u.name.charAt(0).toUpperCase();
+        document.getElementById("user-email").innerText = u.email;
+        
+        currentUserRole = u.role || "";
+        currentUserPermissions = new Set(
+            (typeof u.permissions === "string" ? u.permissions.split(",") : (u.permissions || []))
+                .map(v => String(v).trim())
+                .filter(Boolean)
+        );
+        isAdmin = (currentUserRole === "admin");
+        return u;
+    } catch(e) { _redirectToLogin(); }
+}
 
-  function hasPermission(permission) {
-      return isAdmin || userPermissions.has(permission);
-  }
+function hasPermission(permission, u){
+    const role = u ? (u.role || "") : currentUserRole;
+    const perms = u ? new Set(typeof u.permissions === "string" ? u.permissions.split(",").map(v => v.trim()).filter(Boolean) : (u.permissions || [])) : currentUserPermissions;
+    return role === "admin" || perms.has(permission);
+}
 
-  function configureFarmPermissions(u) {
-      currentUser = u;
-      isAdmin = (u.role === "admin");
-      userPermissions = new Set((u.permissions || "").split(",").map(p => p.trim()).filter(Boolean));
+function configureFarmPermissions(u){
+    const tabMap = [
+        {id:"tab-deliveries", permission:"tab_farm_deliveries", section:"deliveries"},
+        {id:"tab-history", permission:"tab_farm_history", section:"history"},
+        {id:"tab-weather", permission:"tab_farm_weather", section:"weather"},
+        {id:"tab-season", permission:"tab_farm_season", section:"season"},
+    ];
+    let firstAvailable = null;
+    
+    tabMap.forEach(conf => {
+        let el = document.getElementById(conf.id);
+        if(el) {
+            if(!hasPermission(conf.permission, u)) {
+                el.style.display = "none";
+                document.getElementById("section-" + conf.section).style.display = "none";
+            } else if(!firstAvailable) {
+                firstAvailable = conf.section;
+            }
+        }
+    });
 
-      const tabs = [
-          { id: "tab-deliveries", perm: "tab_farm_deliveries", section: "deliveries" },
-          { id: "tab-history", perm: "tab_farm_history", section: "history" },
-          { id: "tab-weather", perm: "tab_farm_weather", section: "weather" },
-          { id: "tab-season", perm: "tab_farm_season", section: "season" }
-      ];
+    if(!hasPermission("action_farm_delivery_create", u)) document.getElementById("btn-add-delivery").style.display = "none";
+    if(!hasPermission("action_farm_weather_log", u)) document.getElementById("btn-add-weather").style.display = "none";
+    if(firstAvailable) switchTab(firstAvailable);
+}
 
-      let firstAvailableTab = null;
-      tabs.forEach(t => {
-          let tabEl = document.getElementById(t.id);
-          if (tabEl) {
-              if (!hasPermission(t.perm)) tabEl.style.display = "none";
-              else if (!firstAvailableTab) firstAvailableTab = t.section;
-          }
-      });
-
-      if (!hasPermission("action_farm_record_delivery")) {
-          let addBtn = document.querySelector("button[onclick='openDeliveryModal()']");
-          if (addBtn) addBtn.style.display = "none";
-      }
-      if (!hasPermission("action_farm_log_weather")) {
-          let weatherBtn = document.querySelector("button[onclick='openWeatherModal()']");
-          if (weatherBtn) weatherBtn.style.display = "none";
-      }
-      if (firstAvailableTab) switchTab(firstAvailableTab);
-  }
-
-  initUser().then(u => { if(u) configureFarmPermissions(u); });
+initializeColorMode();
+initUser().then(u => { 
+    if(u) {
+        configureFarmPermissions(u);
+        init(); 
+    }
+});
   let allProducts     = [];
 let allFarms        = [];
 let selectedFarmId  = null;
@@ -1060,12 +1080,10 @@ async function loadDeliveries(){
     data.deliveries.forEach(d=>{
         let farmIdx = allFarms.findIndex(f=>f.id===d.farm_id);
         let farmCls = farmIdx===0?"farm-organic":"farm-regenerative";
-        let adminBtns = hasPermission("action_farm_record_delivery")
-            ? `<div style="display:flex;gap:6px">
-                <button class="action-btn" onclick="event.stopPropagation();openEditDelivery(${d.id})">Edit</button>
-                <button class="action-btn danger" onclick="event.stopPropagation();deleteDelivery(${d.id},'${d.delivery_number}')">Delete</button>
-               </div>`
-            : `<span></span>`;
+        let adminBtns = `<div style="display:flex;gap:6px">`;
+        if (hasPermission("action_farm_delivery_update")) adminBtns += `<button class="action-btn" onclick="event.stopPropagation();openEditDelivery(${d.id})">Edit</button>`;
+        if (hasPermission("action_farm_delivery_delete")) adminBtns += `<button class="action-btn danger" onclick="event.stopPropagation();deleteDelivery(${d.id},'${d.delivery_number}')">Delete</button>`;
+        adminBtns += `</div>`;
 
         html+=`
         <tr class="expandable" onclick="toggleDetail('det-${d.id}')">
@@ -1369,12 +1387,10 @@ async function loadWeatherLogs(){
             <td style="font-family:var(--mono);color:var(--purple)">${w.humidity_pct!=null?w.humidity_pct+"%":"—"}</td>
             <td style="font-size:12px;color:var(--muted)">${w.notes||"—"}</td>
             <td>
-                ${hasPermission("action_farm_log_weather") ? `
                 <div style="display:flex;gap:6px">
-                    <button class="action-btn" onclick="openEditWeather(${JSON.stringify(w).replace(/"/g,'&quot;')})">Edit</button>
-                    <button class="action-btn danger" onclick="deleteWeatherLog(${w.id},'${w.log_date}')">Delete</button>
+                    ${hasPermission('action_farm_weather_log') ? `<button class="action-btn" onclick="openEditWeather(${JSON.stringify(w).replace(/"/g,'&quot;')})">Edit</button>
+                    <button class="action-btn danger" onclick="deleteWeatherLog(${w.id},'${w.log_date}')">Delete</button>` : `<span></span>`}
                 </div>
-                ` : `<span></span>`}
             </td>
         </tr>`).join("");
 }
@@ -1564,7 +1580,6 @@ async function loadSeasonAnalysis(){
     }
 }
 
-init();
 </script>
 </body>
 </html>
