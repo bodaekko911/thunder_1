@@ -2,11 +2,12 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import HTMLResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from typing import Optional, List
 from pydantic import BaseModel
 from decimal import Decimal
-from datetime import date, datetime
+from datetime import date, datetime, time, timedelta, timezone
+import re
 
 from app.database import get_async_session
 from app.core.permissions import get_current_user, require_action, require_admin, require_permission
@@ -103,6 +104,77 @@ def _normalized_client_terms(client: B2BClient) -> str:
 
 def _client_discount_pct(client: B2BClient) -> float:
     return float(client.discount_pct or 0)
+
+
+async def _load_client_payment_activity(
+    db: AsyncSession,
+    *,
+    client_id: int,
+    as_of: Optional[date] = None,
+):
+    payment_ref_types = ("consignment_client_payment", "consignment_payment", "b2b_payment", "b2b_collection")
+    stmt = (
+        select(Journal)
+        .where(Journal.ref_type.in_(payment_ref_types))
+        .options(selectinload(Journal.entries).selectinload(JournalEntry.account), selectinload(Journal.user))
+        .order_by(Journal.created_at)
+    )
+    if as_of:
+        stmt = stmt.where(Journal.created_at < datetime.combine(as_of + timedelta(days=1), time.min, tzinfo=timezone.utc))
+    payment_result = await db.execute(stmt)
+    journals = payment_result.scalars().all()
+
+    invoice_result = await db.execute(
+        select(B2BInvoice)
+        .where(B2BInvoice.client_id == client_id)
+        .options(selectinload(B2BInvoice.client))
+    )
+    invoices = invoice_result.scalars().all()
+    invoice_by_id = {invoice.id: invoice for invoice in invoices}
+    invoice_by_number = {str(invoice.invoice_number or "").upper(): invoice for invoice in invoices}
+    invoice_pattern = re.compile(r"(B2B-\d{5,})", re.IGNORECASE)
+
+    records = []
+    for journal in journals:
+        matched_invoice = None
+        if journal.ref_type == "consignment_client_payment":
+            if journal.ref_id != client_id:
+                continue
+        else:
+            if journal.ref_id and journal.ref_id in invoice_by_id:
+                matched_invoice = invoice_by_id[journal.ref_id]
+            else:
+                match = invoice_pattern.search(journal.description or "")
+                if match:
+                    matched_invoice = invoice_by_number.get(match.group(1).upper())
+            if not matched_invoice or matched_invoice.client_id != client_id:
+                continue
+
+        amount = 0.0
+        for entry in journal.entries:
+            if entry.account and entry.account.code == "1000" and float(entry.debit or 0) > 0:
+                amount = float(entry.debit or 0)
+                break
+        if amount <= 0:
+            amount = max((float(entry.debit or 0) for entry in journal.entries), default=0.0)
+        if amount <= 0:
+            continue
+
+        reference = f"PAY-{journal.id}"
+        if matched_invoice and matched_invoice.invoice_number:
+            reference = matched_invoice.invoice_number
+
+        records.append({
+            "date": journal.created_at,
+            "date_str": journal.created_at.strftime("%d-%b-%Y") if journal.created_at else "—",
+            "ref": reference,
+            "type": "payment",
+            "desc": journal.description or "Client payment",
+            "amount": round(amount, 2),
+            "ref_type": journal.ref_type or "payment",
+            "user_name": journal.user.name if journal.user else "—",
+        })
+    return records
 
 async def _reverse_invoice_stock(invoice, db: AsyncSession):
     for item in invoice.items:
@@ -1659,8 +1731,108 @@ table.totals .amount {{ text-align: right; font-family: monospace; font-weight: 
 
 
 # ── CLIENT STATEMENT ───────────────────────────────────
+async def _build_client_statement_payload(
+    client_id: int,
+    db: AsyncSession,
+    *,
+    as_of: Optional[date] = None,
+):
+    _r = await db.execute(select(B2BClient).where(B2BClient.id == client_id))
+    client = _r.scalar_one_or_none()
+    if not client:
+        raise HTTPException(status_code=404, detail="Client not found")
+
+    invoice_stmt = (
+        select(B2BInvoice)
+        .where(B2BInvoice.client_id == client_id)
+        .order_by(B2BInvoice.created_at)
+    )
+    refund_stmt = (
+        select(B2BRefund)
+        .where(B2BRefund.client_id == client_id)
+        .order_by(B2BRefund.created_at)
+    )
+    if as_of:
+        cutoff = datetime.combine(as_of + timedelta(days=1), time.min, tzinfo=timezone.utc)
+        invoice_stmt = invoice_stmt.where(B2BInvoice.created_at < cutoff)
+        refund_stmt = refund_stmt.where(B2BRefund.created_at < cutoff)
+
+    invoices = (await db.execute(invoice_stmt)).scalars().all()
+    refunds = (await db.execute(refund_stmt)).scalars().all()
+    payments = await _load_client_payment_activity(db, client_id=client_id, as_of=as_of)
+
+    txns = []
+    for inv in invoices:
+        txns.append({
+            "date": inv.created_at,
+            "ref": inv.invoice_number,
+            "type": "invoice",
+            "desc": f"{(inv.invoice_type or 'b2b').replace('_', ' ').title()} Invoice",
+            "debit": float(inv.total or 0),
+            "credit": float(inv.amount_paid or 0),
+            "status": inv.status,
+        })
+    for rfnd in refunds:
+        txns.append({
+            "date": rfnd.created_at,
+            "ref": rfnd.refund_number,
+            "type": "refund",
+            "desc": "Credit / Refund",
+            "debit": 0.0,
+            "credit": float(rfnd.total or 0),
+            "status": "refund",
+        })
+
+    txns.sort(key=lambda x: x["date"] or datetime.min.replace(tzinfo=timezone.utc))
+
+    running = 0.0
+    rows = []
+    for t in txns:
+        running += t["debit"] - t["credit"]
+        rows.append({
+            "date": t["date"].strftime("%d-%b-%Y") if t["date"] else "-",
+            "ref": t["ref"],
+            "type": t["type"],
+            "desc": t["desc"],
+            "debit": round(float(t["debit"] or 0), 2),
+            "credit": round(float(t["credit"] or 0), 2),
+            "balance": round(running, 2),
+            "status": t["status"],
+        })
+
+    statement_date = as_of or date.today()
+    return {
+        "client": {
+            "id": client.id,
+            "code": f"C{str(client.id).zfill(4)}",
+            "name": client.name,
+            "contact_person": client.contact_person or "",
+            "phone": client.phone or "",
+            "email": client.email or "",
+            "address": client.address or "",
+            "payment_terms": client.payment_terms or "",
+            "credit_limit": float(client.credit_limit or 0),
+            "outstanding": round(running, 2),
+        },
+        "statement_date": statement_date.strftime("%d-%b-%Y"),
+        "statement_period_label": f"As of {statement_date.strftime('%d-%b-%Y')}",
+        "transactions": rows,
+        "payment_activity": payments,
+        "total_invoiced": round(sum(t["debit"] for t in rows), 2),
+        "total_paid": round(sum(t["credit"] for t in rows), 2),
+        "balance_due": round(running, 2),
+        "as_of": as_of.isoformat() if as_of else None,
+    }
+
 @router.get("/api/clients/{client_id}/statement")
-async def client_statement_data(client_id: int, db: AsyncSession = Depends(get_async_session)):
+async def client_statement_data(
+    client_id: int,
+    as_of: Optional[date] = None,
+    db: AsyncSession = Depends(get_async_session),
+):
+    return await _build_client_statement_payload(client_id, db, as_of=as_of)
+
+async def _legacy_client_statement_data(client_id: int, db: AsyncSession = Depends(get_async_session)):
     _r = await db.execute(select(B2BClient).where(B2BClient.id == client_id))
     client = _r.scalar_one_or_none()
     if not client:
@@ -1740,11 +1912,237 @@ async def client_statement_data(client_id: int, db: AsyncSession = Depends(get_a
 
 
 @router.get("/client/{client_id}/statement", response_class=HTMLResponse)
-async def client_statement_print(client_id: int, db: AsyncSession = Depends(get_async_session)):
-    _r = await db.execute(select(B2BClient).where(B2BClient.id == client_id))
-    client = _r.scalar_one_or_none()
-    if not client:
-        raise HTTPException(status_code=404, detail="Client not found")
+async def client_statement_print(
+    client_id: int,
+    as_of: Optional[date] = None,
+    db: AsyncSession = Depends(get_async_session),
+):
+    payload = await _build_client_statement_payload(client_id, db, as_of=as_of)
+    client = payload["client"]
+    rows = payload["transactions"]
+    payments = payload["payment_activity"]
+    balance_due = payload["balance_due"]
+    total_invoiced = payload["total_invoiced"]
+    total_paid = payload["total_paid"]
+    statement_date = payload["statement_date"]
+    statement_period_label = payload["statement_period_label"]
+
+    rows_html = ""
+    for t in rows:
+        debit_str = f"EGP {t['debit']:,.2f}" if t["debit"] > 0 else "-"
+        credit_str = f"EGP {t['credit']:,.2f}" if t["credit"] > 0 else "-"
+        bal_color = "#c0392b" if t["balance"] > 0 else "#2a7a2a"
+        row_class = "refund-row" if t["type"] == "refund" else ""
+        status_badge = ""
+        if t["status"] == "paid":
+            status_badge = '<span class="badge paid">PAID</span>'
+        elif t["status"] == "partial":
+            status_badge = '<span class="badge partial">PARTIAL</span>'
+        elif t["status"] == "unpaid":
+            status_badge = '<span class="badge unpaid">UNPAID</span>'
+        elif t["status"] == "refund":
+            status_badge = '<span class="badge refund">REFUND</span>'
+        rows_html += f"""
+        <tr class="{row_class}">
+            <td>{t['date']}</td>
+            <td class="mono">{t['ref']}</td>
+            <td>{t['desc']} {status_badge}</td>
+            <td class="right mono">{debit_str}</td>
+            <td class="right mono green">{credit_str}</td>
+            <td class="right mono bold" style="color:{bal_color}">EGP {t['balance']:,.2f}</td>
+        </tr>"""
+
+    payments_html = "".join(
+        f"""
+        <tr>
+            <td>{payment['date_str']}</td>
+            <td class="mono">{payment['ref']}</td>
+            <td>{payment['desc']}</td>
+            <td class="right mono green">EGP {payment['amount']:,.2f}</td>
+        </tr>"""
+        for payment in payments
+    )
+
+    return f"""<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<title>Account Statement - {client['name']}</title>
+<style>
+* {{ box-sizing: border-box; margin: 0; padding: 0; }}
+body {{
+    font-family: Arial, sans-serif;
+    font-size: 13px;
+    color: #111;
+    background: white;
+    padding: 30px;
+    max-width: 900px;
+    margin: 0 auto;
+}}
+.header-top {{
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    margin-bottom: 20px;
+    padding-bottom: 16px;
+    border-bottom: 2px solid #2a7a2a;
+}}
+.company-block {{ text-align: center; flex: 1; }}
+.company-name {{ font-size: 20px; font-weight: 900; color: #2a7a2a; letter-spacing: 1px; margin-bottom: 3px; }}
+.company-sub {{ font-size: 11px; color: #555; }}
+.doc-title {{ font-size: 22px; font-weight: 900; color: #2a7a2a; letter-spacing: 2px; text-transform: uppercase; margin-bottom: 6px; }}
+.meta-table td {{ padding: 3px 10px 3px 0; font-size: 12px; }}
+.meta-table .lbl {{ color: #666; }}
+.client-box {{
+    background: #f7f9f7;
+    border: 1px solid #c8dfc8;
+    border-left: 4px solid #2a7a2a;
+    border-radius: 6px;
+    padding: 14px 18px;
+    margin-bottom: 20px;
+    display: flex;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 12px;
+}}
+.client-box .name {{ font-size: 16px; font-weight: 700; margin-bottom: 4px; }}
+.client-box .detail {{ font-size: 12px; color: #555; line-height: 1.7; }}
+.client-box .terms {{
+    font-size: 11px; font-weight: 700; letter-spacing: 1px;
+    text-transform: uppercase; color: #2a7a2a;
+    background: #e8f5e8; padding: 3px 10px;
+    border-radius: 20px; border: 1px solid #c8dfc8;
+    display: inline-block; margin-top: 6px;
+}}
+table.stmt {{ width: 100%; border-collapse: collapse; margin-bottom: 0; }}
+table.stmt th {{
+    background: #2a7a2a; color: white; padding: 9px 12px; text-align: left;
+    font-size: 11px; font-weight: 700; letter-spacing: .5px; text-transform: uppercase;
+}}
+table.stmt th.right {{ text-align: right; }}
+table.stmt td {{ padding: 9px 12px; border-bottom: 1px solid #e8e8e8; font-size: 13px; vertical-align: middle; }}
+table.stmt tbody tr:nth-child(even) {{ background: #f9f9f9; }}
+table.stmt tr.refund-row td {{ color: #2a7a2a; background: #f2fcf2; }}
+.right {{ text-align: right; }}
+.mono {{ font-family: 'Courier New', monospace; }}
+.green {{ color: #2a7a2a; }}
+.bold {{ font-weight: 700; }}
+.badge {{
+    display: inline-block; font-size: 9px; font-weight: 700; letter-spacing: .8px;
+    text-transform: uppercase; padding: 2px 7px; border-radius: 3px; vertical-align: middle; margin-left: 6px;
+}}
+.badge.paid {{ background: #e8f5e8; color: #2a7a2a; border: 1px solid #c8dfc8; }}
+.badge.partial {{ background: #fff8e8; color: #a07000; border: 1px solid #e8d898; }}
+.badge.unpaid {{ background: #fef0f0; color: #c0392b; border: 1px solid #f0c8c8; }}
+.badge.refund {{ background: #e8f0ff; color: #2255aa; border: 1px solid #c0d0f0; }}
+.summary-wrap {{ display: flex; justify-content: flex-end; margin-top: 0; }}
+table.summary {{ border-collapse: collapse; min-width: 320px; border: 1px solid #ccc; margin-top: 12px; }}
+table.summary td {{ padding: 9px 16px; font-size: 13px; border-bottom: 1px solid #eee; }}
+table.summary .lbl {{ color: #444; }}
+table.summary .amt {{ text-align: right; font-family: 'Courier New', monospace; font-weight: 600; }}
+.row-total {{ background: #f5f5f5; }}
+.row-paid {{ color: #2a7a2a; }}
+.row-balance {{ background: {"#c0392b" if balance_due > 0 else "#2a7a2a"}; color: white; font-weight: 700; font-size: 15px; }}
+.row-balance .amt {{ color: white; }}
+.payments-block {{ margin-top: 24px; }}
+.section-title {{ font-size: 13px; font-weight: 800; text-transform: uppercase; letter-spacing: .8px; color: #2a7a2a; margin-bottom: 10px; }}
+.notice-box {{ margin-top: 30px; padding: 12px 16px; background: #fffbf0; border: 1px solid #e8d898; border-radius: 6px; font-size: 12px; color: #555; }}
+.page-footer {{ text-align: center; margin-top: 30px; font-size: 11px; color: #888; border-top: 1px solid #eee; padding-top: 10px; font-style: italic; }}
+.no-print {{ margin-bottom: 20px; display: flex; gap: 8px; }}
+.print-btn, .back-btn {{
+    display: inline-flex; align-items: center; gap: 8px; border: none; padding: 10px 20px;
+    border-radius: 8px; font-size: 14px; font-weight: 700; cursor: pointer;
+}}
+.print-btn {{ background: #2a7a2a; color: white; }}
+.back-btn {{ background: #eee; color: #333; }}
+@media print {{
+    .no-print {{ display: none; }}
+    body {{ padding: 15px; }}
+}}
+</style>
+    <script src="/static/auth-guard.js"></script>
+</head>
+<body>
+<div class="no-print">
+    <button class="print-btn" onclick="window.print()">&#128424; Print Statement</button>
+    <button class="back-btn" onclick="history.back()">&#8592; Back</button>
+</div>
+<div class="header-top">
+    <div>
+        <div class="doc-title">Account Statement</div>
+        <table class="meta-table">
+            <tr><td class="lbl">Statement Date:</td><td><b>{statement_date}</b></td></tr>
+            <tr><td class="lbl">Period:</td><td><b>{statement_period_label}</b></td></tr>
+            <tr><td class="lbl">Client Code:</td><td><b>{client['code']}</b></td></tr>
+            <tr><td class="lbl">Credit Limit:</td><td>EGP {float(client['credit_limit'] or 0):,.2f}</td></tr>
+        </table>
+    </div>
+    <div class="company-block">
+        <img src="/static/Logo.png" alt="Habiba" style="height:110px;object-fit:contain;margin-bottom:6px;">
+        <div class="company-name">Habiba Organic Farm</div>
+        <div class="company-sub">Commercial registry: 126278</div>
+        <div class="company-sub">Tax ID: 560042604</div>
+    </div>
+</div>
+<div class="client-box">
+    <div>
+        <div class="name">{client['name']}</div>
+        <div class="detail">
+            {f"Contact: {client['contact_person']}<br>" if client['contact_person'] else ""}
+            {f"Phone: {client['phone']}<br>" if client['phone'] else ""}
+            {f"Email: {client['email']}<br>" if client['email'] else ""}
+            {f"Address: {client['address']}" if client['address'] else ""}
+        </div>
+        <span class="terms">{(client['payment_terms'] or "").replace("_"," ").title()}</span>
+    </div>
+    <div style="text-align:right">
+        <div style="font-size:12px;color:#666;margin-bottom:4px">Outstanding Balance</div>
+        <div style="font-size:28px;font-weight:900;font-family:'Courier New',monospace;color:{"#c0392b" if balance_due > 0 else "#2a7a2a"}">EGP {balance_due:,.2f}</div>
+    </div>
+</div>
+<table class="stmt">
+    <thead>
+        <tr>
+            <th>Date</th>
+            <th>Reference</th>
+            <th>Description</th>
+            <th class="right">Charges</th>
+            <th class="right">Credits</th>
+            <th class="right">Balance</th>
+        </tr>
+    </thead>
+    <tbody>
+        {rows_html if rows_html else '<tr><td colspan="6" style="text-align:center;color:#888;padding:30px">No transactions found for this statement period.</td></tr>'}
+    </tbody>
+</table>
+<div class="summary-wrap">
+    <table class="summary">
+        <tr class="row-total"><td class="lbl">Total Invoiced</td><td class="amt">EGP {total_invoiced:,.2f}</td></tr>
+        <tr class="row-paid"><td class="lbl">Total Credits &amp; Payments</td><td class="amt">EGP {total_paid:,.2f}</td></tr>
+        <tr class="row-balance"><td class="lbl">Balance Due</td><td class="amt">EGP {balance_due:,.2f}</td></tr>
+    </table>
+</div>
+<div class="payments-block">
+    <div class="section-title">Recorded Payments</div>
+    <table class="stmt">
+        <thead>
+            <tr><th>Date</th><th>Reference</th><th>Description</th><th class="right">Amount</th></tr>
+        </thead>
+        <tbody>
+            {payments_html if payments_html else '<tr><td colspan="4" style="text-align:center;color:#888;padding:24px">No recorded client payments in this statement period.</td></tr>'}
+        </tbody>
+    </table>
+</div>
+<div class="notice-box">&#9432; &nbsp;This statement reflects invoices, credits, and recorded payments {statement_period_label.lower()}.</div>
+<div class="page-footer">
+    Desert going green &nbsp;|&nbsp;
+    &#128247; habibaorganicfarm &nbsp;|&nbsp;
+    &#127760; habibacommunity.com
+</div>
+</body>
+</html>"""
+
+async def _legacy_client_statement_print(client_id: int, db: AsyncSession = Depends(get_async_session)):
 
     inv_r = await db.execute(
         select(B2BInvoice)

@@ -1178,12 +1178,16 @@ td.cr { font-family:var(--mono); color:var(--blue); }
                     <label>Search Clients</label>
                     <input id="b2b-client-search" type="search" placeholder="Search client name, contact, or phone..." oninput="queueB2BClientSearch()" autocomplete="off">
                 </div>
+                <div class="fld" style="margin:0;min-width:170px;">
+                    <label>Statement As Of</label>
+                    <input id="b2b-client-statement-date" type="date">
+                </div>
                 <button class="btn btn-outline" onclick="resetB2BClientFilters()">Clear</button>
             </div>
             <div class="table-wrap">
                 <table>
-                    <thead><tr><th>Client</th><th>Contact</th><th>Phone</th><th>Terms</th><th>Invoices</th><th>Outstanding</th><th>Credit Limit</th><th>Discount</th></tr></thead>
-                    <tbody id="b2b-clients-body"><tr><td colspan="8" style="text-align:center;color:var(--muted);padding:40px">Loading…</td></tr></tbody>
+                    <thead><tr><th>Client</th><th>Contact</th><th>Phone</th><th>Terms</th><th>Invoices</th><th>Outstanding</th><th>Credit Limit</th><th>Discount</th><th>Actions</th></tr></thead>
+                    <tbody id="b2b-clients-body"><tr><td colspan="9" style="text-align:center;color:var(--muted);padding:40px">Loading…</td></tr></tbody>
                 </table>
             </div>
         </div>
@@ -2121,6 +2125,21 @@ function getB2BClientSearchValue(){
     return (document.getElementById("b2b-client-search")?.value || "").trim().replace(/\\s+/g, " ");
 }
 
+function getB2BClientStatementDate(){
+    const input = document.getElementById("b2b-client-statement-date");
+    if(!input) return "";
+    if(!input.value) input.value = todayIso();
+    return input.value;
+}
+
+function openB2BClientStatement(clientId){
+    const params = new URLSearchParams();
+    const asOf = getB2BClientStatementDate();
+    if(asOf) params.set("as_of", asOf);
+    const qs = params.toString();
+    window.open(`/b2b/client/${clientId}/statement${qs ? `?${qs}` : ""}`, "_blank", "noopener");
+}
+
 function queueB2BClientSearch(){
     clearTimeout(b2bClientSearchTimer);
     document.getElementById("b2b-clients-body").innerHTML =
@@ -2148,6 +2167,7 @@ async function loadB2BClients(){
 function resetB2BClientFilters(){
     clearTimeout(b2bClientSearchTimer);
     document.getElementById("b2b-client-search").value = "";
+    document.getElementById("b2b-client-statement-date").value = todayIso();
     loadB2BClients();
 }
 
@@ -2155,7 +2175,7 @@ function renderB2BClients(clients){
     if(!clients.length){
         const search = getB2BClientSearchValue();
         document.getElementById("b2b-clients-body").innerHTML =
-            `<tr><td colspan="8" style="text-align:center;color:var(--muted);padding:40px">${search ? "No B2B clients matched your search" : "No B2B clients found"}</td></tr>`;
+            `<tr><td colspan="9" style="text-align:center;color:var(--muted);padding:40px">${search ? "No B2B clients matched your search" : "No B2B clients found"}</td></tr>`;
         return;
     }
     document.getElementById("b2b-clients-body").innerHTML = clients.map(client => `
@@ -2171,6 +2191,12 @@ function renderB2BClients(clients){
             <td class="mono" style="font-size:12px;color:${client.outstanding>0?"var(--warn)":"var(--muted)"};font-weight:${client.outstanding>0?"700":"400"}">${client.outstanding>0?client.outstanding.toFixed(2):"—"}</td>
             <td class="mono" style="font-size:12px">${client.credit_limit.toFixed(2)}</td>
             <td class="mono" style="font-size:12px">${client.discount_pct.toFixed(2)}%</td>
+            <td>
+                <button style="background:transparent;border:1px solid var(--border2);color:var(--sub);font-size:12px;font-weight:600;padding:5px 10px;border-radius:7px;cursor:pointer;font-family:var(--sans);"
+                    onmouseenter="this.style.borderColor='var(--blue)';this.style.color='var(--blue)'"
+                    onmouseleave="this.style.borderColor='var(--border2)';this.style.color='var(--sub)'"
+                    onclick="openB2BClientStatement(${client.id})">Statement</button>
+            </td>
         </tr>`).join("");
 }
 
