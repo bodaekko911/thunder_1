@@ -506,6 +506,7 @@ def users_ui(current_user: User = Depends(core_require_admin)):
     return """<!DOCTYPE html>
 <html>
 <head>
+<meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Users — Thunder ERP</title>
 <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
@@ -527,6 +528,9 @@ body.light{
 body.light tr:hover td{background:rgba(0,0,0,.03);}
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0;}
 body{font-family:var(--sans);background:var(--bg);color:var(--text);min-height:100vh;font-size:14px;}
+.app-nav{position:sticky;top:0;z-index:300;}
+.app-nav .app-nav-menu{z-index:650;}
+.app-nav + .content{padding-top:24px;}
 .content{max-width:1200px;margin:0 auto;padding:28px 24px;display:flex;flex-direction:column;gap:20px;}
 .page-title{font-size:24px;font-weight:800;letter-spacing:-.5px;}
 .page-sub{color:var(--muted);font-size:13px;margin-top:3px;}
@@ -629,6 +633,10 @@ td.name{color:var(--text);font-weight:600;}
 .btn-cancel:hover{border-color:var(--danger);color:var(--danger);}
 .toast{position:fixed;bottom:22px;left:50%;transform:translateX(-50%) translateY(16px);background:var(--card2);border:1px solid var(--border2);border-radius:var(--r);padding:12px 20px;font-size:13px;font-weight:600;color:var(--text);box-shadow:0 20px 50px rgba(0,0,0,.5);opacity:0;pointer-events:none;transition:opacity .25s,transform .25s;z-index:999;}
 .toast.show{opacity:1;transform:translateX(-50%) translateY(0);}
+@media(max-width:900px){
+    .app-nav + .content{padding-top:18px;}
+    .content{padding:22px 14px 28px;}
+}
 </style>
     <script src="/static/auth-guard.js"></script>
 </head>
