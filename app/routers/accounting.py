@@ -558,6 +558,57 @@ async def get_b2b_invoices(
         for i in invoices
     ]
 
+
+@router.get("/api/b2b-clients")
+async def get_accounting_b2b_clients(
+    q: Optional[str] = Query(None, max_length=150),
+    db: AsyncSession = Depends(get_async_session),
+):
+    q = " ".join(q.split()) if isinstance(q, str) and q.strip() else None
+    outstanding_sub = (
+        select(
+            B2BInvoice.client_id,
+            func.coalesce(func.sum(B2BInvoice.total - B2BInvoice.amount_paid), 0).label("outstanding"),
+        )
+        .where(B2BInvoice.status.in_(["unpaid", "partial"]))
+        .group_by(B2BInvoice.client_id)
+        .subquery()
+    )
+    stmt = (
+        select(B2BClient, func.coalesce(outstanding_sub.c.outstanding, 0).label("computed_outstanding"))
+        .outerjoin(outstanding_sub, outstanding_sub.c.client_id == B2BClient.id)
+        .where(B2BClient.is_active == True)
+        .options(selectinload(B2BClient.invoices))
+        .order_by(B2BClient.name)
+    )
+    if q:
+        term = f"%{q}%"
+        stmt = stmt.where(
+            or_(
+                B2BClient.name.ilike(term),
+                B2BClient.phone.ilike(term),
+                B2BClient.contact_person.ilike(term),
+            )
+        )
+    result = await db.execute(stmt)
+    rows = result.all()
+    return [
+        {
+            "id": c.id,
+            "name": c.name,
+            "contact_person": c.contact_person or "—",
+            "phone": c.phone or "—",
+            "email": c.email or "—",
+            "payment_terms": c.payment_terms,
+            "credit_limit": float(c.credit_limit or 0),
+            "discount_pct": float(c.discount_pct or 0),
+            "outstanding": float(computed_outstanding or 0),
+            "invoice_count": len(c.invoices),
+            "is_consignment": (c.payment_terms or "").strip().lower() == "consignment",
+        }
+        for c, computed_outstanding in rows
+    ]
+
 @router.post("/api/b2b-invoices/{invoice_id}/collect")
 async def collect_b2b_payment(
     invoice_id: int,
@@ -892,6 +943,12 @@ nav {
 .tabs { display:flex; gap:4px; background:var(--card); border:1px solid var(--border); border-radius:var(--r); padding:4px; width:fit-content; flex-wrap:wrap; }
 .tab { padding:8px 18px; border-radius:9px; font-size:13px; font-weight:700; cursor:pointer; border:none; background:transparent; color:var(--muted); transition:all .2s; font-family:var(--sans); }
 .tab.active { background:var(--card2); color:var(--text); }
+.subtabs { display:flex; gap:4px; background:var(--card2); border:1px solid var(--border); border-radius:12px; padding:4px; width:fit-content; flex-wrap:wrap; margin-bottom:14px; }
+.subtab { padding:7px 15px; border-radius:9px; font-size:12px; font-weight:700; cursor:pointer; border:none; background:transparent; color:var(--muted); transition:all .2s; font-family:var(--sans); }
+.subtab.active { background:var(--card); color:var(--text); box-shadow:0 6px 16px rgba(0,0,0,.12); }
+.section-card { background:var(--card); border:1px solid var(--border); border-radius:var(--r); padding:18px; margin-bottom:14px; }
+.section-card-title { font-size:16px; font-weight:800; margin-bottom:4px; }
+.section-card-sub { color:var(--muted); font-size:12px; }
 .toolbar { display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
 .btn { display:flex; align-items:center; gap:7px; padding:10px 16px; border-radius:var(--r); font-family:var(--sans); font-size:13px; font-weight:700; cursor:pointer; border:none; transition:all .2s; white-space:nowrap; }
 .btn-green  { background:linear-gradient(135deg,var(--green),#00d4ff); color:#021a10; }
@@ -1022,7 +1079,7 @@ td.cr { font-family:var(--mono); color:var(--blue); }
             <button class="tab"        id="tab-journals" onclick="switchTab('journals')">Journal Entries</button>
             <button class="tab"        id="tab-pl"       onclick="switchTab('pl')">Profit & Loss</button>
             <button class="tab"        id="tab-tb"       onclick="switchTab('tb')">Trial Balance</button>
-            <button class="tab"        id="tab-b2b"      onclick="switchTab('b2b')">B2B Invoices</button>
+            <button class="tab"        id="tab-b2b"      onclick="switchTab('b2b')">B2B Clients</button>
         </div>
         <div style="display:flex;gap:10px;">
             <button class="btn btn-outline" id="btn-seed"   onclick="seedAccounts()" style="display:none">⚡ Setup Default Accounts</button>
@@ -1106,47 +1163,74 @@ td.cr { font-family:var(--mono); color:var(--blue); }
 
     <!-- B2B INVOICES -->
     <div id="section-b2b" style="display:none">
-        <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:14px;">
-            <div class="fld" style="margin:0;min-width:250px;flex:1 1 260px;">
-                <label>Search</label>
-                <input id="b2b-search" type="search" placeholder="Search client or invoice number..." oninput="queueB2BSearch()" autocomplete="off">
-            </div>
-            <select id="b2b-type-filter" onchange="loadB2BInvoices()" style="background:var(--card2);border:1px solid var(--border2);border-radius:var(--r);padding:9px 13px;color:var(--text);font-family:var(--sans);font-size:13px;outline:none;">
-                <option value="">All Types</option>
-                <option value="cash">💵 Cash</option>
-                <option value="full_payment">📋 Full Payment</option>
-                <option value="consignment">🔄 Consignment</option>
-            </select>
-            <select id="b2b-status-filter" onchange="loadB2BInvoices()" style="background:var(--card2);border:1px solid var(--border2);border-radius:var(--r);padding:9px 13px;color:var(--text);font-family:var(--sans);font-size:13px;outline:none;">
-                <option value="">All Statuses</option>
-                <option value="paid">Paid</option>
-                <option value="unpaid">Unpaid</option>
-                <option value="partial">Partial</option>
-            </select>
-            <div class="fld" style="margin:0;min-width:170px;">
-                <label>From Date</label>
-                <input type="date" id="b2b-from-date" onchange="loadB2BInvoices()">
-            </div>
-            <div class="fld" style="margin:0;min-width:170px;">
-                <label>To Date</label>
-                <input type="date" id="b2b-to-date" onchange="loadB2BInvoices()">
-            </div>
-            <button class="btn btn-outline" onclick="resetB2BFilters()">Clear</button>
+        <div class="section-card">
+            <div class="section-card-title">B2B Clients</div>
+            <div class="section-card-sub">Client-first accounting view using the same B2B client records as the main B2B page.</div>
         </div>
-        <div class="table-wrap">
-            <table>
-                <thead><tr><th>Invoice #</th><th>Client</th><th>Type</th><th>Total</th><th>Paid</th><th>Balance</th><th>Status</th><th>Date</th><th>Actions</th></tr></thead>
-                <tbody id="b2b-invoices-body"><tr><td colspan="9" style="text-align:center;color:var(--muted);padding:40px">Loading…</td></tr></tbody>
-            </table>
+        <div class="subtabs">
+            <button class="subtab active" id="b2b-subtab-clients" onclick="switchB2BSubtab('clients')">Clients</button>
+            <button class="subtab" id="b2b-subtab-invoices" onclick="switchB2BSubtab('invoices')">Invoices</button>
         </div>
 
-        <!-- CONSIGNMENT PAYMENTS SUB-SECTION -->
-        <div id="cons-payment-section" style="display:none;margin-top:20px">
-            <div style="font-size:11px;font-weight:700;letter-spacing:2px;text-transform:uppercase;color:var(--muted);margin-bottom:12px;display:flex;align-items:center;gap:8px;">
-                Consignment Payment History
-                <span style="flex:1;height:1px;background:linear-gradient(90deg,var(--border2),transparent)"></span>
+        <div id="b2b-clients-panel">
+            <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:14px;">
+                <div class="fld" style="margin:0;min-width:250px;flex:1 1 260px;">
+                    <label>Search Clients</label>
+                    <input id="b2b-client-search" type="search" placeholder="Search client name, contact, or phone..." oninput="queueB2BClientSearch()" autocomplete="off">
+                </div>
+                <button class="btn btn-outline" onclick="resetB2BClientFilters()">Clear</button>
             </div>
-            <div id="cons-payment-list"></div>
+            <div class="table-wrap">
+                <table>
+                    <thead><tr><th>Client</th><th>Contact</th><th>Phone</th><th>Terms</th><th>Invoices</th><th>Outstanding</th><th>Credit Limit</th><th>Discount</th></tr></thead>
+                    <tbody id="b2b-clients-body"><tr><td colspan="8" style="text-align:center;color:var(--muted);padding:40px">Loading…</td></tr></tbody>
+                </table>
+            </div>
+        </div>
+
+        <div id="b2b-invoices-panel" style="display:none">
+            <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:14px;">
+                <div class="fld" style="margin:0;min-width:250px;flex:1 1 260px;">
+                    <label>Search</label>
+                    <input id="b2b-search" type="search" placeholder="Search client or invoice number..." oninput="queueB2BSearch()" autocomplete="off">
+                </div>
+                <select id="b2b-type-filter" onchange="loadB2BInvoices()" style="background:var(--card2);border:1px solid var(--border2);border-radius:var(--r);padding:9px 13px;color:var(--text);font-family:var(--sans);font-size:13px;outline:none;">
+                    <option value="">All Types</option>
+                    <option value="cash">💵 Cash</option>
+                    <option value="full_payment">📋 Full Payment</option>
+                    <option value="consignment">🔄 Consignment</option>
+                </select>
+                <select id="b2b-status-filter" onchange="loadB2BInvoices()" style="background:var(--card2);border:1px solid var(--border2);border-radius:var(--r);padding:9px 13px;color:var(--text);font-family:var(--sans);font-size:13px;outline:none;">
+                    <option value="">All Statuses</option>
+                    <option value="paid">Paid</option>
+                    <option value="unpaid">Unpaid</option>
+                    <option value="partial">Partial</option>
+                </select>
+                <div class="fld" style="margin:0;min-width:170px;">
+                    <label>From Date</label>
+                    <input type="date" id="b2b-from-date" onchange="loadB2BInvoices()">
+                </div>
+                <div class="fld" style="margin:0;min-width:170px;">
+                    <label>To Date</label>
+                    <input type="date" id="b2b-to-date" onchange="loadB2BInvoices()">
+                </div>
+                <button class="btn btn-outline" onclick="resetB2BFilters()">Clear</button>
+            </div>
+            <div class="table-wrap">
+                <table>
+                    <thead><tr><th>Invoice #</th><th>Client</th><th>Type</th><th>Total</th><th>Paid</th><th>Balance</th><th>Status</th><th>Date</th><th>Actions</th></tr></thead>
+                    <tbody id="b2b-invoices-body"><tr><td colspan="9" style="text-align:center;color:var(--muted);padding:40px">Loading…</td></tr></tbody>
+                </table>
+            </div>
+
+            <!-- CONSIGNMENT PAYMENTS SUB-SECTION -->
+            <div id="cons-payment-section" style="display:none;margin-top:20px">
+                <div style="font-size:11px;font-weight:700;letter-spacing:2px;text-transform:uppercase;color:var(--muted);margin-bottom:12px;display:flex;align-items:center;gap:8px;">
+                    Consignment Payment History
+                    <span style="flex:1;height:1px;background:linear-gradient(90deg,var(--border2),transparent)"></span>
+                </div>
+                <div id="cons-payment-list"></div>
+            </div>
         </div>
     </div>
 </div>
@@ -1493,7 +1577,7 @@ function switchTab(tab){
     if(tab==="journals") loadJournals();
     if(tab==="pl")       loadPL();
     if(tab==="tb")       loadTB();
-    if(tab==="b2b")      loadB2BInvoices();
+    if(tab==="b2b")      switchB2BSubtab("clients");
 }
 
 /* ── ACCOUNTS ── */
@@ -2012,6 +2096,7 @@ function showToast(msg){
 
 /* ── B2B INVOICES ── */
 let allB2BInvoices  = [];
+let allB2BClients   = [];
 let collectInvoiceId = null;
 let consClientId     = null;
 let consClientName   = null;
@@ -2019,6 +2104,75 @@ let currentInvDetail = null;
 let refundInvoiceId  = null;
 let refundInvoiceNum = null;
 let b2bSearchTimer   = null;
+let b2bClientSearchTimer = null;
+let currentB2BSubtab = "clients";
+
+function switchB2BSubtab(subtab){
+    currentB2BSubtab = subtab === "invoices" ? "invoices" : "clients";
+    document.getElementById("b2b-subtab-clients").classList.toggle("active", currentB2BSubtab === "clients");
+    document.getElementById("b2b-subtab-invoices").classList.toggle("active", currentB2BSubtab === "invoices");
+    document.getElementById("b2b-clients-panel").style.display = currentB2BSubtab === "clients" ? "" : "none";
+    document.getElementById("b2b-invoices-panel").style.display = currentB2BSubtab === "invoices" ? "" : "none";
+    if(currentB2BSubtab === "clients") loadB2BClients();
+    else loadB2BInvoices();
+}
+
+function getB2BClientSearchValue(){
+    return (document.getElementById("b2b-client-search")?.value || "").trim().replace(/\\s+/g, " ");
+}
+
+function queueB2BClientSearch(){
+    clearTimeout(b2bClientSearchTimer);
+    document.getElementById("b2b-clients-body").innerHTML =
+        `<tr><td colspan="8" style="text-align:center;color:var(--muted);padding:40px">Searching clients…</td></tr>`;
+    b2bClientSearchTimer = setTimeout(() => loadB2BClients(), 180);
+}
+
+async function loadB2BClients(){
+    const search = getB2BClientSearchValue();
+    const params = new URLSearchParams();
+    if(search) params.set("q", search);
+    let res = await fetch(`/accounting/api/b2b-clients?${params.toString()}`);
+    let data = await res.json();
+    if(!res.ok){
+        showToast("Error: " + (data.detail || "Unable to load B2B clients"));
+        document.getElementById("b2b-clients-body").innerHTML =
+            `<tr><td colspan="8" style="text-align:center;color:var(--danger);padding:40px">${data.detail || "Unable to load B2B clients"}</td></tr>`;
+        allB2BClients = [];
+        return;
+    }
+    allB2BClients = data;
+    renderB2BClients(allB2BClients);
+}
+
+function resetB2BClientFilters(){
+    clearTimeout(b2bClientSearchTimer);
+    document.getElementById("b2b-client-search").value = "";
+    loadB2BClients();
+}
+
+function renderB2BClients(clients){
+    if(!clients.length){
+        const search = getB2BClientSearchValue();
+        document.getElementById("b2b-clients-body").innerHTML =
+            `<tr><td colspan="8" style="text-align:center;color:var(--muted);padding:40px">${search ? "No B2B clients matched your search" : "No B2B clients found"}</td></tr>`;
+        return;
+    }
+    document.getElementById("b2b-clients-body").innerHTML = clients.map(client => `
+        <tr>
+            <td style="color:var(--text);font-weight:700">
+                ${client.name}
+                ${client.is_consignment ? `<div style="font-size:10px;color:var(--teal);font-weight:700;letter-spacing:.5px;margin-top:3px">Consignment Client</div>` : ``}
+            </td>
+            <td style="font-size:12px;color:var(--sub)">${client.contact_person}</td>
+            <td class="mono" style="font-size:12px;color:var(--muted)">${client.phone}</td>
+            <td><span style="font-size:11px;font-weight:700;padding:2px 9px;border-radius:20px;background:${client.is_consignment?"rgba(45,212,191,.1)":"rgba(77,159,255,.1)"};color:${client.is_consignment?"var(--teal)":"var(--blue)"}">${(client.payment_terms || "—").replace(/_/g," ")}</span></td>
+            <td class="mono" style="font-size:12px">${client.invoice_count}</td>
+            <td class="mono" style="font-size:12px;color:${client.outstanding>0?"var(--warn)":"var(--muted)"};font-weight:${client.outstanding>0?"700":"400"}">${client.outstanding>0?client.outstanding.toFixed(2):"—"}</td>
+            <td class="mono" style="font-size:12px">${client.credit_limit.toFixed(2)}</td>
+            <td class="mono" style="font-size:12px">${client.discount_pct.toFixed(2)}%</td>
+        </tr>`).join("");
+}
 
 function getB2BSearchValue(){
     return (document.getElementById("b2b-search")?.value || "").trim().replace(/\\s+/g, " ");
