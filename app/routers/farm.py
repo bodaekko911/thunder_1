@@ -129,7 +129,7 @@ async def get_deliveries(farm_id: int = None, skip: int = 0, limit: int = 50, db
         ],
     }
 
-@router.post("/api/deliveries")
+@router.post("/api/deliveries", dependencies=[Depends(require_permission("action_farm_record_delivery"))])
 async def create_delivery(data: DeliveryCreate, db: AsyncSession = Depends(get_async_session), current_user: User = Depends(get_current_user)):
     result = await db.execute(select(Farm).where(Farm.id == data.farm_id))
     farm = result.scalar_one_or_none()
@@ -165,7 +165,7 @@ async def create_delivery(data: DeliveryCreate, db: AsyncSession = Depends(get_a
     await db.refresh(delivery)
     return {"id": delivery.id, "delivery_number": delivery.delivery_number, "items_count": len(data.items)}
 
-@router.put("/api/deliveries/{delivery_id}")
+@router.put("/api/deliveries/{delivery_id}", dependencies=[Depends(require_permission("action_farm_record_delivery"))])
 async def edit_delivery(delivery_id: int, data: DeliveryCreate, db: AsyncSession = Depends(get_async_session), current_user: User = Depends(get_current_user)):
     del_result = await db.execute(
         select(FarmDelivery)
@@ -236,7 +236,7 @@ async def edit_delivery(delivery_id: int, data: DeliveryCreate, db: AsyncSession
     await db.commit()
     return {"ok": True, "delivery_number": delivery.delivery_number}
 
-@router.delete("/api/deliveries/{delivery_id}")
+@router.delete("/api/deliveries/{delivery_id}", dependencies=[Depends(require_permission("action_farm_record_delivery"))])
 async def delete_delivery(delivery_id: int, db: AsyncSession = Depends(get_async_session), current_user: User = Depends(get_current_user)):
     del_result = await db.execute(
         select(FarmDelivery)
@@ -299,7 +299,7 @@ class WeatherLogIn(BaseModel):
     humidity_pct: Optional[float] = None
     notes:        Optional[str]  = None
 
-@router.get("/api/weather-logs")
+@router.get("/api/weather-logs", dependencies=[Depends(require_permission("tab_farm_weather"))])
 async def get_weather_logs(farm_id: Optional[int] = None, limit: int = 90, db: AsyncSession = Depends(get_async_session)):
     stmt = select(WeatherLog).options(selectinload(WeatherLog.farm))
     if farm_id:
@@ -322,7 +322,7 @@ async def get_weather_logs(farm_id: Optional[int] = None, limit: int = 90, db: A
         for w in logs
     ]
 
-@router.post("/api/weather-logs")
+@router.post("/api/weather-logs", dependencies=[Depends(require_permission("action_farm_log_weather"))])
 async def create_weather_log(data: WeatherLogIn, db: AsyncSession = Depends(get_async_session), current_user: User = Depends(get_current_user)):
     farm_result = await db.execute(select(Farm).where(Farm.id == data.farm_id))
     farm = farm_result.scalar_one_or_none()
@@ -344,7 +344,7 @@ async def create_weather_log(data: WeatherLogIn, db: AsyncSession = Depends(get_
     db.add(w); await db.commit(); await db.refresh(w)
     return {"id": w.id, "log_date": str(w.log_date)}
 
-@router.put("/api/weather-logs/{log_id}")
+@router.put("/api/weather-logs/{log_id}", dependencies=[Depends(require_permission("action_farm_log_weather"))])
 async def update_weather_log(log_id: int, data: WeatherLogIn, db: AsyncSession = Depends(get_async_session), current_user: User = Depends(get_current_user)):
     result = await db.execute(select(WeatherLog).where(WeatherLog.id == log_id))
     w = result.scalar_one_or_none()
@@ -363,7 +363,7 @@ async def update_weather_log(log_id: int, data: WeatherLogIn, db: AsyncSession =
     await db.commit()
     return {"ok": True}
 
-@router.delete("/api/weather-logs/{log_id}")
+@router.delete("/api/weather-logs/{log_id}", dependencies=[Depends(require_permission("action_farm_log_weather"))])
 async def delete_weather_log(log_id: int, db: AsyncSession = Depends(get_async_session), current_user: User = Depends(get_current_user)):
     result = await db.execute(select(WeatherLog).where(WeatherLog.id == log_id))
     w = result.scalar_one_or_none()
@@ -894,7 +894,48 @@ async function logout(){
     window.location.href = "/";
 }
   initializeColorMode();
-  initUser().then(u => { if(u) isAdmin = (u.role === "admin"); });
+
+  let currentUser = null;
+  let isAdmin = false;
+  let userPermissions = new Set();
+
+  function hasPermission(permission) {
+      return isAdmin || userPermissions.has(permission);
+  }
+
+  function configureFarmPermissions(u) {
+      currentUser = u;
+      isAdmin = (u.role === "admin");
+      userPermissions = new Set((u.permissions || "").split(",").map(p => p.trim()).filter(Boolean));
+
+      const tabs = [
+          { id: "tab-deliveries", perm: "tab_farm_deliveries", section: "deliveries" },
+          { id: "tab-history", perm: "tab_farm_history", section: "history" },
+          { id: "tab-weather", perm: "tab_farm_weather", section: "weather" },
+          { id: "tab-season", perm: "tab_farm_season", section: "season" }
+      ];
+
+      let firstAvailableTab = null;
+      tabs.forEach(t => {
+          let tabEl = document.getElementById(t.id);
+          if (tabEl) {
+              if (!hasPermission(t.perm)) tabEl.style.display = "none";
+              else if (!firstAvailableTab) firstAvailableTab = t.section;
+          }
+      });
+
+      if (!hasPermission("action_farm_record_delivery")) {
+          let addBtn = document.querySelector("button[onclick='openDeliveryModal()']");
+          if (addBtn) addBtn.style.display = "none";
+      }
+      if (!hasPermission("action_farm_log_weather")) {
+          let weatherBtn = document.querySelector("button[onclick='openWeatherModal()']");
+          if (weatherBtn) weatherBtn.style.display = "none";
+      }
+      if (firstAvailableTab) switchTab(firstAvailableTab);
+  }
+
+  initUser().then(u => { if(u) configureFarmPermissions(u); });
   let allProducts     = [];
 let allFarms        = [];
 let selectedFarmId  = null;
@@ -902,7 +943,6 @@ let editingDeliveryId = null;   // null = creating new, number = editing existin
 let deliveryPage    = 0;
 let pageSize        = 20;
 let totalDeliveries = 0;
-let isAdmin         = false;
 
 async function init(){
     await fetch("/farm/api/seed-farms", {method:"POST"});
@@ -1020,7 +1060,7 @@ async function loadDeliveries(){
     data.deliveries.forEach(d=>{
         let farmIdx = allFarms.findIndex(f=>f.id===d.farm_id);
         let farmCls = farmIdx===0?"farm-organic":"farm-regenerative";
-        let adminBtns = isAdmin
+        let adminBtns = hasPermission("action_farm_record_delivery")
             ? `<div style="display:flex;gap:6px">
                 <button class="action-btn" onclick="event.stopPropagation();openEditDelivery(${d.id})">Edit</button>
                 <button class="action-btn danger" onclick="event.stopPropagation();deleteDelivery(${d.id},'${d.delivery_number}')">Delete</button>
@@ -1329,10 +1369,12 @@ async function loadWeatherLogs(){
             <td style="font-family:var(--mono);color:var(--purple)">${w.humidity_pct!=null?w.humidity_pct+"%":"—"}</td>
             <td style="font-size:12px;color:var(--muted)">${w.notes||"—"}</td>
             <td>
+                ${hasPermission("action_farm_log_weather") ? `
                 <div style="display:flex;gap:6px">
                     <button class="action-btn" onclick="openEditWeather(${JSON.stringify(w).replace(/"/g,'&quot;')})">Edit</button>
                     <button class="action-btn danger" onclick="deleteWeatherLog(${w.id},'${w.log_date}')">Delete</button>
                 </div>
+                ` : `<span></span>`}
             </td>
         </tr>`).join("");
 }
