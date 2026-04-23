@@ -2,11 +2,12 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import HTMLResponse, StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from datetime import datetime, date, timedelta, timezone
 from collections import defaultdict
 from typing import Optional
 import io
+import re
 
 from app.core.permissions import require_permission
 from app.database import get_async_session
@@ -268,10 +269,11 @@ async def _load_b2b_client_payment_records(
     d_from: datetime,
     d_to: datetime,
 ):
+    payment_ref_types = ("consignment_client_payment", "consignment_payment", "b2b_payment", "b2b_collection")
     payment_result = await db.execute(
         select(Journal)
         .where(
-            Journal.ref_type == "consignment_client_payment",
+            Journal.ref_type.in_(payment_ref_types),
             Journal.created_at >= d_from,
             Journal.created_at <= d_to,
         )
@@ -280,6 +282,36 @@ async def _load_b2b_client_payment_records(
     )
     journals = payment_result.scalars().all()
     client_ids = {journal.ref_id for journal in journals if journal.ref_id}
+    invoice_ids = set()
+    invoice_numbers = set()
+    invoice_pattern = re.compile(r"(B2B-\d{5,})", re.IGNORECASE)
+    for journal in journals:
+        if journal.ref_type == "consignment_client_payment":
+            continue
+        if journal.ref_id:
+            invoice_ids.add(journal.ref_id)
+        match = invoice_pattern.search(journal.description or "")
+        if match:
+            invoice_numbers.add(match.group(1).upper())
+
+    invoice_map_by_id = {}
+    invoice_map_by_number = {}
+    if invoice_ids or invoice_numbers:
+        conditions = []
+        if invoice_ids:
+            conditions.append(B2BInvoice.id.in_(invoice_ids))
+        if invoice_numbers:
+            conditions.append(func.upper(B2BInvoice.invoice_number).in_(invoice_numbers))
+        invoice_result = await db.execute(
+            select(B2BInvoice)
+            .where(or_(*conditions))
+            .options(selectinload(B2BInvoice.client))
+        )
+        invoices = invoice_result.scalars().all()
+        invoice_map_by_id = {invoice.id: invoice for invoice in invoices}
+        invoice_map_by_number = {str(invoice.invoice_number or "").upper(): invoice for invoice in invoices}
+        client_ids.update(invoice.client_id for invoice in invoices if invoice.client_id)
+
     client_map = {}
     if client_ids:
         client_result = await db.execute(select(B2BClient).where(B2BClient.id.in_(client_ids)))
@@ -295,10 +327,21 @@ async def _load_b2b_client_payment_records(
         if amount <= 0:
             amount = max((_num(entry.debit) for entry in journal.entries), default=0.0)
         client = client_map.get(journal.ref_id)
+        reference = f"BCP-{journal.id}"
+        if journal.ref_type != "consignment_client_payment":
+            invoice = invoice_map_by_id.get(journal.ref_id) if journal.ref_id else None
+            if not invoice:
+                match = invoice_pattern.search(journal.description or "")
+                if match:
+                    reference = match.group(1).upper()
+                    invoice = invoice_map_by_number.get(reference)
+            if invoice:
+                reference = invoice.invoice_number or reference
+                client = invoice.client or client_map.get(invoice.client_id)
         payment_records.append({
             "journal_id": journal.id,
-            "reference": f"BCP-{journal.id}",
-            "client_id": journal.ref_id,
+            "reference": reference,
+            "client_id": client.id if client else journal.ref_id,
             "client": client.name if client else "—",
             "datetime": journal.created_at.strftime("%Y-%m-%d %H:%M") if journal.created_at else "—",
             "date": journal.created_at.strftime("%Y-%m-%d") if journal.created_at else "",
@@ -307,6 +350,7 @@ async def _load_b2b_client_payment_records(
             "notes": journal.description or "",
             "payment_method": "cash",
             "status": "posted",
+            "journal_ref_type": journal.ref_type or "—",
         })
     return payment_records
 
