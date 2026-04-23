@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import HTMLResponse
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import func, or_, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.orm import selectinload
 from typing import Optional, List
 from pydantic import BaseModel, Field
@@ -12,6 +12,7 @@ from app.core.permissions import get_current_user, require_permission
 from app.core.log import record
 from app.models.accounting import Account, Journal, JournalEntry
 from app.models.b2b import B2BClient, B2BInvoice, B2BInvoiceItem, Consignment
+from app.models.expense import Expense
 from app.models.product import Product
 from app.models.inventory import StockMove
 from app.models.user import User
@@ -285,6 +286,33 @@ def _apply_as_of_date(stmt, column, as_of: Optional[date]):
     return stmt
 
 
+def _apply_period_with_fallback_date(stmt, journal_column, from_date: Optional[date], to_date: Optional[date], fallback_date_column=None):
+    _validate_date_range(from_date, to_date)
+    if from_date:
+        journal_from = datetime.combine(from_date, time.min, tzinfo=timezone.utc)
+        if fallback_date_column is not None:
+            stmt = stmt.where(
+                or_(
+                    and_(fallback_date_column.is_not(None), fallback_date_column >= from_date),
+                    and_(fallback_date_column.is_(None), journal_column >= journal_from),
+                )
+            )
+        else:
+            stmt = stmt.where(journal_column >= journal_from)
+    if to_date:
+        journal_to = datetime.combine(to_date + timedelta(days=1), time.min, tzinfo=timezone.utc)
+        if fallback_date_column is not None:
+            stmt = stmt.where(
+                or_(
+                    and_(fallback_date_column.is_not(None), fallback_date_column <= to_date),
+                    and_(fallback_date_column.is_(None), journal_column < journal_to),
+                )
+            )
+        else:
+            stmt = stmt.where(journal_column < journal_to)
+    return stmt
+
+
 # ── REPORTS API ────────────────────────────────────────
 @router.get("/api/trial-balance")
 async def trial_balance(
@@ -380,6 +408,24 @@ async def profit_loss(
         .group_by(JournalEntry.account_id)
         .subquery()
     )
+    expense_journal_sums = (
+        _apply_period_with_fallback_date(
+            select(
+                JournalEntry.account_id.label("account_id"),
+                func.coalesce(func.sum(JournalEntry.debit), 0).label("debit_sum"),
+                func.coalesce(func.sum(JournalEntry.credit), 0).label("credit_sum"),
+            )
+            .select_from(JournalEntry)
+            .join(Journal, Journal.id == JournalEntry.journal_id)
+            .outerjoin(Expense, Expense.journal_id == Journal.id),
+            Journal.created_at,
+            from_date,
+            to_date,
+            Expense.expense_date,
+        )
+        .group_by(JournalEntry.account_id)
+        .subquery()
+    )
     rev_result = await db.execute(
         select(
             Account,
@@ -394,10 +440,10 @@ async def profit_loss(
     exp_result = await db.execute(
         select(
             Account,
-            func.coalesce(journal_sums.c.debit_sum, 0).label("debit_sum"),
-            func.coalesce(journal_sums.c.credit_sum, 0).label("credit_sum"),
+            func.coalesce(expense_journal_sums.c.debit_sum, 0).label("debit_sum"),
+            func.coalesce(expense_journal_sums.c.credit_sum, 0).label("credit_sum"),
         )
-        .outerjoin(journal_sums, journal_sums.c.account_id == Account.id)
+        .outerjoin(expense_journal_sums, expense_journal_sums.c.account_id == Account.id)
         .where(Account.type == "expense")
         .order_by(Account.code)
     )
