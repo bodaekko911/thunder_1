@@ -971,6 +971,11 @@ function filterUsers(){
     ) : allUsers);
 }
 
+function escapeHtml(str) {
+    if (str == null) return '';
+    return String(str).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+}
+
 function renderUsers(users){
     if(!users.length){
         document.getElementById("users-body").innerHTML =
@@ -979,9 +984,9 @@ function renderUsers(users){
     }
     document.getElementById("users-body").innerHTML = users.map(u=>`
         <tr>
-            <td class="name">${u.name}</td>
-            <td style="font-family:var(--mono);font-size:12px;color:var(--muted)">${u.email}</td>
-            <td><span class="role-badge role-${u.role}">${u.role}</span></td>
+            <td class="name">${escapeHtml(u.name)}</td>
+            <td style="font-family:var(--mono);font-size:12px;color:var(--muted)">${escapeHtml(u.email)}</td>
+            <td><span class="role-badge role-${u.role}">${escapeHtml(u.role)}</span></td>
             <td style="font-size:11px;color:var(--muted);max-width:180px">
                 ${(()=>{
                     if(!u.permissions) return '<span style="color:var(--muted);font-size:12px">—</span>';
@@ -1384,12 +1389,12 @@ function filterLogs(){
     document.getElementById("logs-body").innerHTML = filtered.map(l=>`
         <tr>
             <td style="font-family:var(--mono);font-size:11px;color:var(--muted);white-space:nowrap">${l.created_at}</td>
-            <td class="name" style="white-space:nowrap;font-size:13px">${l.user_name}</td>
-            <td><span class="role-badge role-${l.user_role}" style="font-size:10px">${l.user_role}</span></td>
-            <td><span class="log-module lm-${l.module}">${l.module}</span></td>
-            <td style="font-size:12px;color:var(--text);font-weight:600;white-space:nowrap">${l.action.replace(/_/g," ")}</td>
-            <td style="font-size:12px;color:var(--sub)">${l.description}</td>
-            <td style="font-family:var(--mono);font-size:11px;color:var(--muted);white-space:nowrap">${l.ref_id?l.ref_type+" "+l.ref_id:""}</td>
+            <td class="name" style="white-space:nowrap;font-size:13px">${escapeHtml(l.user_name)}</td>
+            <td><span class="role-badge role-${l.user_role}" style="font-size:10px">${escapeHtml(l.user_role)}</span></td>
+            <td><span class="log-module lm-${l.module}">${escapeHtml(l.module)}</span></td>
+            <td style="font-size:12px;color:var(--text);font-weight:600;white-space:nowrap">${escapeHtml(l.action).replace(/_/g," ")}</td>
+            <td style="font-size:12px;color:var(--sub)">${escapeHtml(l.description)}</td>
+            <td style="font-family:var(--mono);font-size:11px;color:var(--muted);white-space:nowrap">${l.ref_id?escapeHtml(l.ref_type)+" "+escapeHtml(l.ref_id):""}</td>
         </tr>`).join("");
 }
 
