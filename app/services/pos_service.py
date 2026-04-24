@@ -65,17 +65,21 @@ async def create_invoice(db: AsyncSession, data: InvoiceCreate, user_id: int, us
         subtotal = 0
         line_items = []  # (product, qty, line_total, sell_price, catalog_price)
         price_edits = []
+        raw_skus = [item.sku for item in data.items]
+        normalized_skus = [normalize_barcode_value(s) for s in raw_skus]
+        _r = await db.execute(
+            select(Product).where(
+                or_(Product.is_active.is_(True), Product.is_active.is_(None))
+            )
+        )
+        all_products = _r.scalars().all()
+        product_map = {
+            normalize_barcode_value(p.sku): p
+            for p in all_products
+        }
 
         for item in data.items:
-            normalized_sku = normalize_barcode_value(item.sku)
-            _r = await db.execute(
-                select(Product).where(or_(Product.is_active.is_(True), Product.is_active.is_(None)))
-            )
-            products = _r.scalars().all()
-            product = next(
-                (candidate for candidate in products if normalize_barcode_value(candidate.sku) == normalized_sku),
-                None,
-            )
+            product = product_map.get(normalize_barcode_value(item.sku))
             if not product:
                 raise HTTPException(status_code=404, detail=f"Product not found: {item.sku}")
             if product.stock < item.qty:
