@@ -8,6 +8,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
+from app.core.middleware import get_trusted_client_ip
 from app.core.permission_catalog import get_permission_catalog
 from app.core.permissions import (
     get_effective_permissions,
@@ -270,7 +271,7 @@ async def login(
     # Brute-force protection: track failed attempts per IP in Redis
     import logging
     _brute_logger = logging.getLogger("erp")
-    _client_ip = request.headers.get("x-forwarded-for", "").split(",")[0].strip() or "unknown"
+    _client_ip = get_trusted_client_ip(request)
     _fail_key = f"login_fail:{_client_ip}"
     try:
         _redis = _redis_client()
