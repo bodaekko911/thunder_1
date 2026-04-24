@@ -22,7 +22,7 @@ class CloudCopilotProvider:
             system_prompt += f"\n\nHere is the current dashboard context:\n{json.dumps(dashboard_context, indent=2)}"
             
         payload = {
-            "model": "llama3-8b-8192",
+            "model": "llama-3.1-8b-instant",
             "messages": [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": question}
@@ -52,5 +52,5 @@ class CloudCopilotProvider:
             logger.error(f"Network error communicating with Cloud LLM: {e}")
             return {"type": "text", "content": "I'm sorry, but I cannot reach the AI service right now."}
         except Exception as e:
-            logger.exception(f"Unexpected error in CloudCopilotProvider: {e}")
-            return {"type": "text", "content": "I encountered an unexpected error while processing your request."}
+            logger.exception("LLM API Error")
+            return {"type": "text", "content": f"Connection failed: {str(e)}"}
