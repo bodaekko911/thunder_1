@@ -44,6 +44,7 @@ PERMISSION_MATRIX = [
             {"action": "discount_override", "key": "action_pos_discount", "label": "Discount override"},
             {"action": "approve", "key": "action_pos_settle_later", "label": "Approve settle later"},
             {"action": "refund", "key": "action_pos_refund", "label": "Create retail refunds"},
+            {"action": "edit_price", "key": "action_pos_edit_price", "label": "Edit unit prices in POS cart"},
         ],
     },
     {
@@ -233,6 +234,7 @@ ROLE_DEFINITIONS = {
             "action_pos_discount",
             "action_pos_settle_later",
             "action_pos_refund",
+            "action_pos_edit_price",
             "page_b2b",
             "tab_b2b_clients",
             "tab_b2b_invoices",

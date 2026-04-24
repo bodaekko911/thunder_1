@@ -1,3 +1,5 @@
+import json
+
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import or_, select
 from fastapi import HTTPException
@@ -12,6 +14,7 @@ from app.schemas.invoice import InvoiceCreate
 from app.services.barcode_service import normalize_barcode_value
 from app.services.location_inventory_service import sync_product_stock_to_default_location
 from app.core.log import record
+from app.core.permissions import has_permission
 
 
 async def post_journal(
@@ -54,13 +57,14 @@ async def get_walk_in_customer_id(db: AsyncSession) -> int:
     return customer.id
 
 
-async def create_invoice(db: AsyncSession, data: InvoiceCreate, user_id: int) -> dict:
+async def create_invoice(db: AsyncSession, data: InvoiceCreate, user_id: int, user=None) -> dict:
     try:
         if not data.items:
             raise HTTPException(status_code=400, detail="Cart is empty")
 
         subtotal = 0
-        line_items = []
+        line_items = []  # (product, qty, line_total, sell_price, catalog_price)
+        price_edits = []
 
         for item in data.items:
             normalized_sku = normalize_barcode_value(item.sku)
@@ -79,9 +83,36 @@ async def create_invoice(db: AsyncSession, data: InvoiceCreate, user_id: int) ->
                     status_code=400,
                     detail=f"Not enough stock for {product.name}. Available: {float(product.stock)}",
                 )
-            line_total = float(product.price) * item.qty
+
+            catalog_price = float(product.price)
+            sell_price = item.unit_price if item.unit_price is not None else catalog_price
+
+            # Defense: named customers may not receive price edits
+            if data.customer_id is not None and sell_price != catalog_price:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Price edits only allowed for general customer.",
+                )
+
+            # Enforce permission for discounts greater than 50% off catalog
+            if sell_price < catalog_price * 0.5:
+                if user is None or not has_permission(user, "action_pos_edit_price"):
+                    raise HTTPException(
+                        status_code=403,
+                        detail="Permission denied: action_pos_edit_price",
+                    )
+
+            line_total = sell_price * item.qty
             subtotal += line_total
-            line_items.append((product, item.qty, line_total))
+            line_items.append((product, item.qty, line_total, sell_price, catalog_price))
+
+            if sell_price != catalog_price:
+                price_edits.append({
+                    "sku": product.sku,
+                    "catalog_price": catalog_price,
+                    "sold_at": sell_price,
+                    "qty": item.qty,
+                })
 
         discount_amount = subtotal * (data.discount_percent / 100)
         total = subtotal - discount_amount
@@ -105,14 +136,14 @@ async def create_invoice(db: AsyncSession, data: InvoiceCreate, user_id: int) ->
         await db.flush()
         invoice.invoice_number = f"INV-{str(invoice.id).zfill(5)}"
 
-        for product, qty, line_total in line_items:
+        for product, qty, line_total, sell_price, _catalog_price in line_items:
             db.add(InvoiceItem(
                 invoice_id=invoice.id,
                 product_id=product.id,
                 sku=product.sku,
                 name=product.name,
                 qty=qty,
-                unit_price=float(product.price),
+                unit_price=sell_price,
                 total=round(line_total, 2),
             ))
             before = float(product.stock)
@@ -165,6 +196,26 @@ async def create_invoice(db: AsyncSession, data: InvoiceCreate, user_id: int) ->
             ref_type="invoice",
             ref_id=invoice.id,
         )
+
+        if price_edits:
+            total_discount_vs_catalog = sum(
+                (e["catalog_price"] - e["sold_at"]) * e["qty"] for e in price_edits
+            )
+            record(
+                db,
+                "POS",
+                "pos_sale_with_price_edits",
+                json.dumps({
+                    "invoice_id": invoice.id,
+                    "customer_id": None,
+                    "edits": price_edits,
+                    "total_discount_vs_catalog": round(total_discount_vs_catalog, 2),
+                }),
+                user=user_obj,
+                ref_type="invoice",
+                ref_id=invoice.id,
+            )
+
         await db.commit()
         await db.refresh(invoice)
         return {

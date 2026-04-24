@@ -140,7 +140,7 @@ async def checkout(
     if data.settle_later:
         await ensure_action_permission(db, user, "pos", "sales", "approve", path="/invoice")
     user_id = user.id
-    invoice = await create_invoice(db=db, data=data, user_id=user_id)
+    invoice = await create_invoice(db=db, data=data, user_id=user_id, user=user)
     if not isinstance(invoice, dict) or invoice.get("id") is None:
         logger.error(
             "Checkout did not return a persisted invoice",
@@ -483,6 +483,13 @@ body.light #right{background:rgba(244,245,239,.92);}
 .ci-unit{font-family:var(--mono);font-size:11px;color:var(--muted);margin-left:3px;flex:1;}
 .rm-btn{width:28px;height:28px;display:flex;align-items:center;justify-content:center;background:transparent;border:1px solid transparent;border-radius:8px;color:var(--muted);font-size:13px;cursor:pointer;transition:all .15s;margin-left:auto;}
 .rm-btn:hover{border-color:var(--danger);color:var(--danger);background:rgba(255,77,109,.08);}
+.ci-unit-editable{display:inline-flex;align-items:center;gap:4px;}
+.ci-price-input{width:64px;font-family:var(--mono);background:var(--surface-raised,rgba(255,255,255,.04));border:1px solid var(--border);border-radius:6px;padding:2px 6px;color:inherit;font-size:12px;text-align:right;}
+.ci-price-input:focus{outline:2px solid var(--accent,var(--green));outline-offset:1px;}
+.ci-unit-edited .ci-price-input{border-color:var(--warning,#a67418);}
+.ci-was{font-size:10px;color:var(--muted);text-decoration:line-through;}
+.ci-reset-price{background:none;border:none;color:var(--muted);cursor:pointer;font-size:14px;padding:0 2px;}
+.ci-reset-price:hover{color:var(--accent,var(--green));}
 
 /* TOTALS */
 #totals{border-top:1px solid var(--border);padding:12px 16px;display:flex;flex-direction:column;gap:8px;flex-shrink:0;}
@@ -834,6 +841,7 @@ let customers=[], products=[], cart=[], lastCart=[];
 let categories=[], selectedCategory=null;
 let searchMode=false;
 let selectedCustomer = null;
+let userCanEditPrice = false;
 let selectedPayMethod = "cash";
 let toastTimer = null;
 let currentInvoiceData = null;
@@ -855,6 +863,8 @@ initUser().then(u => {
         const refundsLink = document.getElementById("refunds-link");
         if(refundsLink) refundsLink.style.display = "none";
     }
+    userCanEditPrice = hasPermission("action_pos_edit_price", u);
+    if(userCanEditPrice) drawCart();
 });
 
 /* ── OFFLINE / INDEXEDDB ── */
@@ -1045,6 +1055,15 @@ function applyCustomerDiscount(discountPct){
 }
 
 function selectCustomer(id, name, discountPct){
+    const edited = cart.filter(c => c.original_price !== undefined && c.price !== c.original_price);
+    if(edited.length > 0 && id !== null){
+        const reset = confirm(
+            `You've edited prices for ${edited.length} item(s). ` +
+            `Switching to a named customer will apply their normal pricing. ` +
+            `Click OK to reset prices to catalog, or Cancel to keep your edits.`
+        );
+        if(reset) cart.forEach(c => { c.price = c.original_price; });
+    }
     selectedCustomer = id;
     document.getElementById("cust_search").value = name;
     document.getElementById("cust_dropdown").style.display = "none";
@@ -1242,7 +1261,7 @@ function addWithRipple(e, sku, name, price){
 
 function add(sku,name,price){
     let ex=cart.find(c=>c.sku===sku);
-    ex?ex.qty++:cart.push({sku,name,price:parseFloat(price),qty:1});
+    ex?ex.qty++:cart.push({sku,name,price:parseFloat(price),original_price:parseFloat(price),qty:1});
     drawCart();
 }
 function inc(sku){ cart.find(c=>c.sku===sku).qty++; drawCart(); }
@@ -1257,11 +1276,46 @@ function clearCart(){
 function undoCart(){ cart=[...lastCart]; drawCart(); hideToast(); }
 async function logout(){ await fetch("/auth/logout", { method: "POST" }); window.location.href="/"; }
 
+function canEditPrice(){
+    return userCanEditPrice && selectedCustomer === null;
+}
+
+function updatePrice(sku, val){
+    let item = cart.find(c => c.sku === sku);
+    if(!item) return;
+    let newPrice = parseFloat(val);
+    if(isNaN(newPrice) || newPrice < 0.01){
+        showToast("Price must be at least 0.01");
+        drawCart();
+        return;
+    }
+    if(item.original_price && newPrice > item.original_price * 10){
+        if(!confirm(`New price ${newPrice.toFixed(2)} is over 10× the catalog price (${item.original_price.toFixed(2)}). Continue?`)){
+            drawCart();
+            return;
+        }
+    }
+    item.price = newPrice;
+    drawCart();
+}
+
+function resetPrice(sku){
+    let item = cart.find(c => c.sku === sku);
+    if(!item) return;
+    item.price = item.original_price;
+    drawCart();
+}
+
 function drawCart(){
     let empty=document.getElementById("cart_empty"), cartEl=document.getElementById("cart"), countEl=document.getElementById("cart_count"), total=0;
     if(!cart.length){ cartEl.innerHTML=""; empty.style.display="flex"; countEl.style.display="none"; }
     else { empty.style.display="none"; countEl.style.display=""; countEl.innerText=cart.reduce((s,c)=>s+c.qty,0); }
-    cartEl.innerHTML=cart.map(c=>{ let t=c.qty*c.price; total+=t; return `
+    cartEl.innerHTML=cart.map(c=>{ let t=c.qty*c.price; total+=t;
+        const edited = c.original_price !== undefined && c.price !== c.original_price;
+        const unitEl = canEditPrice()
+            ? `<span class="ci-unit ci-unit-editable${edited?' ci-unit-edited':''}">× <input class="ci-price-input" type="number" step="0.01" min="0.01" value="${c.price.toFixed(2)}" data-sku="${c.sku}" onchange="updatePrice('${c.sku}',this.value)" onfocus="this.select()"/>${edited?`<span class="ci-was">was ${c.original_price.toFixed(2)}</span><button class="ci-reset-price" onclick="resetPrice('${c.sku}')" title="Reset to catalog price">↺</button>`:''}</span>`
+            : `<span class="ci-unit">× ${c.price.toFixed(2)}</span>`;
+        return `
         <div class="cart-item">
             <div class="ci-name">${c.name}</div>
             <div class="ci-subtotal">${t.toFixed(2)}</div>
@@ -1269,7 +1323,7 @@ function drawCart(){
                 <button class="qty-btn" onclick="dec('${c.sku}')">−</button>
                 <input class="qty-input" value="${c.qty}" onchange="updateQty('${c.sku}',this.value)">
                 <button class="qty-btn" onclick="inc('${c.sku}')">+</button>
-                <span class="ci-unit">× ${c.price.toFixed(2)}</span>
+                ${unitEl}
                 <button class="rm-btn" onclick="removeItem('${c.sku}')">✕</button>
             </div>
         </div>`;}).join("");
@@ -1307,7 +1361,7 @@ async function checkout(settleLater=false){
 
     const payload = {
         customer_id:      selectedCustomer?parseInt(selectedCustomer):null,
-        items:            cart.map(c=>({sku:c.sku,name:c.name,price:c.price,qty:c.qty})),
+        items:            cart.map(c=>({sku:c.sku,name:c.name,price:c.price,qty:c.qty,unit_price:c.price,catalog_price:c.original_price||c.price,price_edited:c.price!==(c.original_price||c.price)})),
         discount_percent: parseFloat(document.getElementById("discount").value)||0,
         notes:            "",
         payment_method:   settleLater?"unpaid":selectedPayMethod,

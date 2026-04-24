@@ -3,10 +3,13 @@ from typing import Optional, List
 
 
 class InvoiceItemCreate(BaseModel):
-    sku:   str = Field(..., min_length=1, max_length=80)
-    name:  Optional[str] = Field(None, max_length=200)
-    price: Optional[float] = Field(None, ge=0)
-    qty:   float = Field(..., gt=0)
+    sku:           str = Field(..., min_length=1, max_length=80)
+    name:          Optional[str] = Field(None, max_length=200)
+    price:         Optional[float] = Field(None, ge=0)
+    qty:           float = Field(..., gt=0)
+    unit_price:    Optional[float] = None
+    catalog_price: Optional[float] = None
+    price_edited:  Optional[bool] = False
 
 
 class InvoiceCreate(BaseModel):
