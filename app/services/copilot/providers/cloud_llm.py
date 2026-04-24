@@ -1,6 +1,7 @@
 import json
 import httpx
 from sqlalchemy import select
+from sqlalchemy.orm import joinedload
 from app.core.log import logger
 from app.core.config import settings
 
@@ -23,9 +24,14 @@ class CloudCopilotProvider:
         
         try:
             from app.models.b2b import B2BClient
-            res = await db.execute(select(B2BClient).where(B2BClient.is_active == True, B2BClient.outstanding > 0))
+            res = await db.execute(
+                select(B2BClient)
+                .where(B2BClient.is_active == True, B2BClient.outstanding > 0)
+                .order_by(B2BClient.outstanding.desc())
+                .limit(5)
+            )
             deep_context["outstanding_debt"] = [
-                {"name": c.name, "phone": c.phone, "outstanding": float(c.outstanding or 0)}
+                {"name": c.name, "amount": float(c.outstanding or 0)}
                 for c in res.scalars().all()
             ]
         except Exception as e:
@@ -35,26 +41,32 @@ class CloudCopilotProvider:
             from app.models.product import Product
             res = await db.execute(select(Product).where(Product.is_active == True))
             products = res.scalars().all()
-            deep_context["low_stock_inventory"] = [
-                {"name": p.name, "sku": p.sku, "stock": float(p.stock or 0), "min_stock": float(p.min_stock or 5)}
+            low_stock = [
+                {"name": p.name, "stock": float(p.stock or 0)}
                 for p in products
                 if float(p.stock or 0) <= float(p.min_stock or 5)
             ]
+            low_stock.sort(key=lambda x: x["stock"])
+            deep_context["low_stock_inventory"] = low_stock[:5]
         except Exception as e:
             logger.error(f"Failed to fetch low stock inventory for AI context: {e}")
             
         try:
             from app.models.expense import Expense
-            res = await db.execute(select(Expense).order_by(Expense.id.desc()).limit(20))
-            deep_context["recent_expenses"] = [
-                {
-                    "category": getattr(e, "category", "Unknown"),
-                    "amount": float(getattr(e, "amount", getattr(e, "total", 0))),
-                    "description": getattr(e, "description", getattr(e, "notes", "")),
-                    "date": str(getattr(e, "date", getattr(e, "expense_date", getattr(e, "created_at", ""))))
-                }
-                for e in res.scalars().all()
-            ]
+            stmt = select(Expense).order_by(Expense.id.desc()).limit(5)
+            
+            # Safely use joinedload if category is a mapped relationship to prevent greenlet_spawn errors
+            if hasattr(Expense, "category") and hasattr(getattr(Expense, "category"), "property"):
+                stmt = stmt.options(joinedload(Expense.category))
+                
+            res = await db.execute(stmt)
+            for e in res.scalars().all():
+                cat = getattr(e, "category", None)
+                cat_name = cat.name if hasattr(cat, "name") else str(cat) if cat else "Unknown"
+                deep_context["recent_expenses"].append({
+                    "category": cat_name,
+                    "amount": float(getattr(e, "amount", getattr(e, "total", 0)))
+                })
         except Exception as e:
             logger.error(f"Failed to fetch recent expenses for AI context: {e}")
             
@@ -64,9 +76,23 @@ class CloudCopilotProvider:
         )
         
         if dashboard_context:
-            system_prompt += f"\n\nHere is the Dashboard Summary:\n{json.dumps(dashboard_context, indent=2)}"
+            trimmed_context = {}
+            for k, v in dashboard_context.items():
+                if k.startswith("_"):
+                    continue
+                if isinstance(v, list):
+                    trimmed_context[k] = v[:5]
+                elif isinstance(v, dict):
+                    trimmed_context[k] = {
+                        sk: sv[:5] if isinstance(sv, list) else sv
+                        for sk, sv in v.items()
+                    }
+                else:
+                    trimmed_context[k] = v
+                    
+            system_prompt += f"\n\nHere is the Dashboard Summary:\n{json.dumps(trimmed_context, separators=(',', ':'))}"
             
-        system_prompt += f"\n\nHere is the Deep Business Context:\n{json.dumps(deep_context, indent=2)}"
+        system_prompt += f"\n\nHere is the Deep Business Context:\n{json.dumps(deep_context, separators=(',', ':'))}"
             
         payload = {
             "model": "llama-3.1-8b-instant",
