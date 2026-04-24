@@ -491,7 +491,7 @@ function bindChatEvents() {
   trigger.addEventListener("click", () => widget.classList.remove("hidden"));
   closeBtn.addEventListener("click", () => widget.classList.add("hidden"));
 
-  const sendMessage = async () => {
+  const sendCopilotQuestion = async () => {
     const text = input.value.trim();
     if (!text) return;
     
@@ -519,8 +519,8 @@ function bindChatEvents() {
     body.scrollTop = body.scrollHeight;
   };
 
-  sendBtn.addEventListener("click", sendMessage);
-  input.addEventListener("keypress", (e) => { if (e.key === "Enter") sendMessage(); });
+  sendBtn.addEventListener("click", sendCopilotQuestion);
+  input.addEventListener("keypress", (e) => { if (e.key === "Enter") sendCopilotQuestion(); });
 }
 
 function startAutoRefresh() {

@@ -1,5 +1,5 @@
 from datetime import date, datetime, timedelta
-from typing import Optional
+from typing import Any, Dict, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import HTMLResponse
@@ -20,7 +20,6 @@ from app.models.production import ProductionBatch
 from app.models.refund import RetailRefund
 from app.models.user import User
 from app.services.expense_service import get_summary as get_expense_summary
-from app.services.copilot.engine import answer_question
 
 router = APIRouter(
     tags=["Dashboard"],
@@ -329,22 +328,23 @@ async def dashboard_data(db: AsyncSession = Depends(get_async_session)):
 
 # ── assistant endpoint ─────────────────────────────────────────────────
 
-class AskAssistantRequest(BaseModel):
+class CopilotRequest(BaseModel):
     question: str
-    dashboard_context: dict | None = None
+    dashboard_context: Optional[Dict[str, Any]] = None
 
 @router.post("/dashboard/assistant/ask")
 async def dashboard_assistant_ask(
-    request: AskAssistantRequest,
+    payload: CopilotRequest,
     db: AsyncSession = Depends(get_async_session),
     current_user: User = Depends(get_current_user),
 ):
+    from app.services.copilot.engine import answer_question
     try:
         return await answer_question(
             db,
-            question=request.question,
+            question=payload.question,
             current_user=current_user,
-            dashboard_context=request.dashboard_context,
+            dashboard_context=payload.dashboard_context,
         )
     except Exception as e:
         return {"type": "text", "content": "An error occurred while processing your request."}
