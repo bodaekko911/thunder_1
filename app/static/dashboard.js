@@ -478,6 +478,51 @@ function bindEvents() {
   });
 }
 
+function bindChatEvents() {
+  const trigger = document.getElementById("ai-chat-trigger");
+  const widget = document.getElementById("ai-chat-widget");
+  const closeBtn = document.getElementById("ai-chat-close");
+  const sendBtn = document.getElementById("ai-chat-send");
+  const input = document.getElementById("ai-chat-input");
+  const body = document.getElementById("ai-chat-body");
+
+  if (!trigger || !widget) return;
+
+  trigger.addEventListener("click", () => widget.classList.remove("hidden"));
+  closeBtn.addEventListener("click", () => widget.classList.add("hidden"));
+
+  const sendMessage = async () => {
+    const text = input.value.trim();
+    if (!text) return;
+    
+    input.value = "";
+    body.innerHTML += `<div class="chat-bubble user">${escHtml(text)}</div>`;
+    body.scrollTop = body.scrollHeight;
+    
+    const thinkingId = "thinking-" + Date.now();
+    body.innerHTML += `<div id="${thinkingId}" class="chat-bubble ai thinking">Thinking...</div>`;
+    body.scrollTop = body.scrollHeight;
+    
+    try {
+      const res = await fetch("/dashboard/assistant/ask", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ question: text, dashboard_context: dashboardData })
+      });
+      const data = await res.json();
+      document.getElementById(thinkingId).remove();
+      body.innerHTML += `<div class="chat-bubble ai">${escHtml(data.content)}</div>`;
+    } catch (err) {
+      document.getElementById(thinkingId).remove();
+      body.innerHTML += `<div class="chat-bubble ai error">Failed to get response.</div>`;
+    }
+    body.scrollTop = body.scrollHeight;
+  };
+
+  sendBtn.addEventListener("click", sendMessage);
+  input.addEventListener("keypress", (e) => { if (e.key === "Enter") sendMessage(); });
+}
+
 function startAutoRefresh() {
   refreshTimer = setInterval(() => {
     if (!document.hidden) loadDashboard();
@@ -491,6 +536,7 @@ async function initDashboard() {
   bindEvents();
   await initUser();
   await loadDashboard();
+  bindChatEvents();
   startAutoRefresh();
 }
 

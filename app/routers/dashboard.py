@@ -3,13 +3,13 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import HTMLResponse
+from pydantic import BaseModel
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
 from app.core.permissions import require_permission
 from app.core.security import get_current_user
 from app.database import get_async_session
-from app.core.navigation import render_app_header
 from app.models.invoice import Invoice, InvoiceItem
 from app.models.product import Product
 from app.models.customer import Customer
@@ -20,6 +20,7 @@ from app.models.production import ProductionBatch
 from app.models.refund import RetailRefund
 from app.models.user import User
 from app.services.expense_service import get_summary as get_expense_summary
+from app.services.copilot.engine import answer_question
 
 router = APIRouter(
     tags=["Dashboard"],
@@ -328,6 +329,26 @@ async def dashboard_data(db: AsyncSession = Depends(get_async_session)):
 
 # ── assistant endpoint ─────────────────────────────────────────────────
 
+class AskAssistantRequest(BaseModel):
+    question: str
+    dashboard_context: dict | None = None
+
+@router.post("/dashboard/assistant/ask")
+async def dashboard_assistant_ask(
+    request: AskAssistantRequest,
+    db: AsyncSession = Depends(get_async_session),
+    current_user: User = Depends(get_current_user),
+):
+    try:
+        return await answer_question(
+            db,
+            question=request.question,
+            current_user=current_user,
+            dashboard_context=request.dashboard_context,
+        )
+    except Exception as e:
+        return {"type": "text", "content": "An error occurred while processing your request."}
+
 # ── new: /dashboard/summary ────────────────────────────────────────────
 
 @router.get("/dashboard/summary")
@@ -397,7 +418,7 @@ async def dashboard_insights(db: AsyncSession = Depends(get_async_session)):
 # ── UI ─────────────────────────────────────────────────────────────────
 
 @router.get("/dashboard", response_class=HTMLResponse)
-def dashboard_ui(current_user: User = Depends(get_current_user)):
+def dashboard_ui():
     locale_dir = getattr(settings, "APP_LOCALE_DIR", "ltr")
     return f"""<!DOCTYPE html>
 <html lang="en" dir="{locale_dir}" data-theme="light">
@@ -419,7 +440,39 @@ def dashboard_ui(current_user: User = Depends(get_current_user)):
 </div>
 <div class="bg-grain"></div>
 <div id="loading"><div class="spinner"></div></div>
-{render_app_header(current_user, "page_dashboard")}
+<nav class="top-nav" aria-label="Primary">
+  <a href="/home" class="logo">
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+      <polygon points="13,2 4,14 11,14 11,22 20,10 13,10" fill="#f59e0b"></polygon>
+    </svg>
+    <span class="logo-text">Thunder ERP</span>
+  </a>
+  <div class="nav-links">
+    <a href="/dashboard" class="nav-link active">Dashboard</a>
+    <a href="/pos" class="nav-link">POS</a>
+    <a href="/b2b/" class="nav-link">B2B</a>
+    <a href="/reports/" class="nav-link">Reports</a>
+    <a href="/inventory/" class="nav-link">Inventory</a>
+  </div>
+  <div class="nav-actions">
+    <button class="mode-btn" id="mode-btn" type="button" aria-label="Toggle color mode" title="Toggle light/dark mode">&#127769;</button>
+    <div class="account-menu">
+      <button class="user-pill" id="account-trigger" type="button" aria-haspopup="menu" aria-expanded="false">
+        <div class="user-avatar" id="user-avatar">A</div>
+        <span class="user-name" id="user-name">Admin</span>
+        <span class="menu-caret">&#9662;</span>
+      </button>
+      <div class="account-dropdown" id="account-dropdown" role="menu">
+        <div class="account-head">
+          <div class="account-label">Signed in as</div>
+          <div class="account-email" id="user-email">&#8212;</div>
+        </div>
+        <a href="/users/password" class="account-item" role="menuitem">Change Password</a>
+        <button class="account-item danger" id="signout-btn" type="button" role="menuitem">Sign out</button>
+      </div>
+    </div>
+  </div>
+</nav>
 <main class="page-shell">
   <header class="header-strip">
     <div>
@@ -506,6 +559,22 @@ def dashboard_ui(current_user: User = Depends(get_current_user)):
     </div>
   </div>
 </div>
+
+<div id="ai-chat-widget" class="ai-chat-widget hidden">
+  <div class="ai-chat-header">
+    <h3>AI Assistant</h3>
+    <button id="ai-chat-close" aria-label="Close chat">&#215;</button>
+  </div>
+  <div class="ai-chat-body" id="ai-chat-body">
+    <div class="chat-bubble ai">Hello! I'm your ERP Assistant. How can I help you today?</div>
+  </div>
+  <div class="ai-chat-input-area">
+    <input type="text" id="ai-chat-input" placeholder="Ask a question..." />
+    <button id="ai-chat-send" aria-label="Send">📤</button>
+  </div>
+</div>
+<button id="ai-chat-trigger" class="ai-chat-trigger" aria-label="Open AI Assistant">✨</button>
+
 <script src="/static/dashboard.js"></script>
 </body>
 </html>"""

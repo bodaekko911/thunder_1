@@ -1,13 +1,12 @@
 import json
-import os
 import httpx
 from app.core.log import logger
+from app.core.config import settings
 
 
 class LocalCopilotProvider:
     async def answer(self, db, *, question: str, current_user, dashboard_context: dict | None = None) -> dict:
-        url = os.environ.get("OLLAMA_URL", "http://ollama:11434/v1/chat/completions")
-        model_name = os.environ.get("OLLAMA_MODEL", "llama3")
+        url = f"{settings.OLLAMA_BASE_URL}/api/chat"
         
         system_prompt = (
             "You are an AI assistant for an ERP system. Answer the user's questions clearly and concisely."
@@ -17,11 +16,12 @@ class LocalCopilotProvider:
             system_prompt += f"\n\nHere is the current dashboard context:\n{json.dumps(dashboard_context, indent=2)}"
             
         payload = {
-            "model": model_name,
+            "model": "llama3",
             "messages": [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": question}
-            ]
+            ],
+            "stream": False
         }
         
         try:
@@ -31,7 +31,7 @@ class LocalCopilotProvider:
                 response.raise_for_status()
                 
                 data = response.json()
-                content = data["choices"][0]["message"]["content"]
+                content = data["message"]["content"]
                 
                 return {"type": "text", "content": content}
                 

@@ -90,6 +90,8 @@ class BaseAppSettings(BaseSettings):
     MIGRATION_CHECK_ON_STARTUP: bool = True
     MIGRATION_CHECK_STRICT: bool = False
 
+    OLLAMA_BASE_URL: str = Field(default="http://localhost:11434")
+
     model_config = CONFIG_MODEL
 
     @model_validator(mode="before")
@@ -200,6 +202,7 @@ class DevelopmentSettings(BaseAppSettings):
     COOKIE_SECURE: bool = False
     ALLOWED_HOSTS: Annotated[list[str], NoDecode] = ["localhost", "127.0.0.1", "testserver"]
     CORS_ALLOW_ORIGINS: Annotated[list[str], NoDecode] = ["http://localhost:3000", "http://localhost:8000"]
+    OLLAMA_BASE_URL: str = "http://localhost:11434"
 
 
 class ProductionSettings(BaseAppSettings):
@@ -210,6 +213,7 @@ class ProductionSettings(BaseAppSettings):
     COOKIE_SECURE: bool = True
     ALLOWED_HOSTS: Annotated[list[str], NoDecode] = []
     CORS_ALLOW_ORIGINS: Annotated[list[str], NoDecode] = []
+    OLLAMA_BASE_URL: str = "http://ollama:11434"
 
 
 @lru_cache
