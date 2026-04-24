@@ -440,9 +440,10 @@ async def refresh(
     if not refresh_token:
         raise HTTPException(status_code=401, detail="No refresh token")
 
-    new_token = await try_refresh_access_token(db, refresh_token)
-    if not new_token:
+    refreshed = await try_refresh_access_token(db, refresh_token)
+    if not refreshed:
         raise HTTPException(status_code=401, detail="Refresh token expired or invalid")
+    new_token, new_raw_rt = refreshed
 
     response.set_cookie(
         key="access_token",
@@ -461,5 +462,14 @@ async def refresh(
         secure=settings.COOKIE_SECURE,
         path="/",
         max_age=settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60,
+    )
+    response.set_cookie(
+        key="refresh_token",
+        value=new_raw_rt,
+        httponly=True,
+        samesite="lax",
+        secure=settings.COOKIE_SECURE,
+        path="/",
+        max_age=settings.REFRESH_TOKEN_EXPIRE_DAYS * 86400,
     )
     return {"ok": True}

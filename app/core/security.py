@@ -156,11 +156,13 @@ def require_role(*roles: str):
     return checker
 
 
-async def try_refresh_access_token(db: AsyncSession, refresh_token_value: str) -> Optional[str]:
+async def try_refresh_access_token(
+    db: AsyncSession, refresh_token_value: str
+) -> Optional[tuple[str, str]]:
     """
-    Validate a raw refresh-token value and, if valid, mint a new access token.
-    Returns the new token string, or None on any failure (bad/expired token,
-    user not found, user inactive).
+    Validate a raw refresh-token value and, if valid, rotate it and mint a new
+    access token. Returns ``(access_token, refresh_token)`` or None on failure
+    (bad/expired token, user not found, user inactive).
 
     Uses deferred imports to avoid a circular dependency with app.core.permissions,
     which imports get_current_user from this module.
@@ -169,6 +171,7 @@ async def try_refresh_access_token(db: AsyncSession, refresh_token_value: str) -
     app_factory.py so the DB + token logic lives in exactly one place.
     """
     import hashlib
+    import secrets
     from app.models.refresh_token import RefreshToken
 
     token_hash = hashlib.sha256(refresh_token_value.encode()).hexdigest()
@@ -185,6 +188,16 @@ async def try_refresh_access_token(db: AsyncSession, refresh_token_value: str) -
     if not user or not user.is_active:
         return None
 
+    await db.delete(rt)
+    new_raw_rt = secrets.token_urlsafe(48)
+    new_rt_hash = hashlib.sha256(new_raw_rt.encode()).hexdigest()
+    rt_expires = now + timedelta(days=settings.REFRESH_TOKEN_EXPIRE_DAYS)
+    db.add(RefreshToken(user_id=user.id, token_hash=new_rt_hash, expires_at=rt_expires))
+    await db.commit()
+
     from app.core.permissions import get_effective_permissions, serialize_permissions
     permissions = serialize_permissions(get_effective_permissions(user.role, user.permissions))
-    return create_access_token({"sub": user.id, "role": user.role, "permissions": permissions})
+    return (
+        create_access_token({"sub": user.id, "role": user.role, "permissions": permissions}),
+        new_raw_rt,
+    )
