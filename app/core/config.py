@@ -91,6 +91,7 @@ class BaseAppSettings(BaseSettings):
     MIGRATION_CHECK_STRICT: bool = False
 
     OLLAMA_BASE_URL: str = Field(default="http://localhost:11434")
+    AI_API_KEY: str | None = None
 
     model_config = CONFIG_MODEL
 
