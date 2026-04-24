@@ -1,5 +1,6 @@
 import json
 import httpx
+from sqlalchemy import select
 from app.core.log import logger
 from app.core.config import settings
 
@@ -14,12 +15,58 @@ class CloudCopilotProvider:
 
         url = "https://api.groq.com/openai/v1/chat/completions"
         
+        deep_context = {
+            "outstanding_debt": [],
+            "low_stock_inventory": [],
+            "recent_expenses": []
+        }
+        
+        try:
+            from app.models.b2b import B2BClient
+            res = await db.execute(select(B2BClient).where(B2BClient.is_active == True, B2BClient.outstanding > 0))
+            deep_context["outstanding_debt"] = [
+                {"name": c.name, "phone": c.phone, "outstanding": float(c.outstanding or 0)}
+                for c in res.scalars().all()
+            ]
+        except Exception as e:
+            logger.error(f"Failed to fetch outstanding debt for AI context: {e}")
+            
+        try:
+            from app.models.product import Product
+            res = await db.execute(select(Product).where(Product.is_active == True))
+            products = res.scalars().all()
+            deep_context["low_stock_inventory"] = [
+                {"name": p.name, "sku": p.sku, "stock": float(p.stock or 0), "min_stock": float(p.min_stock or 5)}
+                for p in products
+                if float(p.stock or 0) <= float(p.min_stock or 5)
+            ]
+        except Exception as e:
+            logger.error(f"Failed to fetch low stock inventory for AI context: {e}")
+            
+        try:
+            from app.models.expense import Expense
+            res = await db.execute(select(Expense).order_by(Expense.id.desc()).limit(20))
+            deep_context["recent_expenses"] = [
+                {
+                    "category": getattr(e, "category", "Unknown"),
+                    "amount": float(getattr(e, "amount", getattr(e, "total", 0))),
+                    "description": getattr(e, "description", getattr(e, "notes", "")),
+                    "date": str(getattr(e, "date", getattr(e, "expense_date", getattr(e, "created_at", ""))))
+                }
+                for e in res.scalars().all()
+            ]
+        except Exception as e:
+            logger.error(f"Failed to fetch recent expenses for AI context: {e}")
+            
         system_prompt = (
-            "You are an AI assistant for an ERP system. Answer the user's questions clearly and concisely."
+            "You are a business assistant. Use the provided Dashboard Summary and the Deep Business Context "
+            "to answer the user's questions accurately."
         )
         
         if dashboard_context:
-            system_prompt += f"\n\nHere is the current dashboard context:\n{json.dumps(dashboard_context, indent=2)}"
+            system_prompt += f"\n\nHere is the Dashboard Summary:\n{json.dumps(dashboard_context, indent=2)}"
+            
+        system_prompt += f"\n\nHere is the Deep Business Context:\n{json.dumps(deep_context, indent=2)}"
             
         payload = {
             "model": "llama-3.1-8b-instant",
