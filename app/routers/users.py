@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, Header, HTTPException, Request
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
@@ -95,7 +95,7 @@ async def log_action(
 async def get_logs(
     module:  Optional[str] = None,
     user_id: Optional[int] = None,
-    limit:   int = 300,
+    limit:   int = Query(default=100, ge=1, le=200),
     db:      AsyncSession = Depends(get_async_session),
     _=Depends(core_require_admin),
 ):
