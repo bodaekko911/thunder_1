@@ -324,8 +324,6 @@ function renderChart() {
 function renderTopProducts() {
   const products = dashboardData?.panels?.top_products_by_revenue || [];
   const container = document.getElementById("top-products-list");
-  const rangeLabel = dashboardData?.range?.label || "This period";
-  document.getElementById("top-products-title").textContent = `Best-sellers · ${rangeLabel}`;
   if (!products.length) {
     container.innerHTML = `<div class="empty-state">No products sold in this range.</div>`;
     return;
