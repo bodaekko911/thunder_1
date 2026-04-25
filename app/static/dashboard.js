@@ -10,6 +10,9 @@ let currentUser = null;
 let dashboardAbortController = null;
 let dashboardRequestId = 0;
 let dashboardHasLoaded = false;
+let assistantRequestInFlight = false;
+const AI_ASSISTANT_MAX_QUESTION_CHARS = 500;
+const AI_ASSISTANT_CONTEXT_LIST_LIMIT = 5;
 
 function escHtml(value) {
   return String(value || "").replace(/[&<>"']/g, (char) => (
@@ -552,6 +555,123 @@ function bindEvents() {
   });
 }
 
+function bindChatEvents() {
+  const trigger = document.getElementById("ai-chat-trigger");
+  const widget = document.getElementById("ai-chat-widget");
+  const closeBtn = document.getElementById("ai-chat-close");
+  const sendBtn = document.getElementById("ai-chat-send");
+  const input = document.getElementById("ai-chat-input");
+  const body = document.getElementById("ai-chat-body");
+
+  if (!trigger || !widget) return;
+
+  input.maxLength = AI_ASSISTANT_MAX_QUESTION_CHARS;
+
+  trigger.addEventListener("click", () => widget.classList.remove("hidden"));
+  closeBtn.addEventListener("click", () => widget.classList.add("hidden"));
+
+  function trimList(items, keys) {
+    if (!Array.isArray(items)) return [];
+    return items.slice(0, AI_ASSISTANT_CONTEXT_LIST_LIMIT).map((item) => {
+      const next = {};
+      if (!item || typeof item !== "object") return next;
+      keys.forEach((key) => {
+        if (Object.prototype.hasOwnProperty.call(item, key)) next[key] = item[key];
+      });
+      return next;
+    });
+  }
+
+  function buildAssistantContext() {
+    const context = {
+      range: currentRange,
+      start: currentRange === "custom" ? customStart : undefined,
+      end: currentRange === "custom" ? customEnd : undefined,
+    };
+    if (!dashboardData) return context;
+
+    if (dashboardData.range) {
+      context.range = dashboardData.range.key || dashboardData.range.label || currentRange;
+      context.start = dashboardData.range.date_from || context.start;
+      context.end = dashboardData.range.date_to || context.end;
+    }
+    if (dashboardData.numbers) {
+      context.numbers = {
+        sales: dashboardData.numbers.sales,
+        clients_owe: dashboardData.numbers.clients_owe,
+        spent: dashboardData.numbers.spent,
+        stock_alerts: dashboardData.numbers.stock_alerts,
+      };
+    }
+    if (dashboardData.panels) {
+      context.panels = {
+        top_products_by_revenue: trimList(dashboardData.panels.top_products_by_revenue, ["name", "qty", "revenue"]),
+        top_products_by_qty: trimList(dashboardData.panels.top_products_by_qty, ["name", "qty", "revenue"]),
+        recent_activity: trimList(dashboardData.panels.recent_activity, ["invoice_number", "customer", "total", "type", "time_relative"]),
+      };
+    }
+    if (dashboardData.briefing) {
+      context.briefing = {
+        lead: dashboardData.briefing.lead,
+        body: dashboardData.briefing.body,
+      };
+    }
+    return context;
+  }
+
+  const sendCopilotQuestion = async () => {
+    const text = input.value.trim();
+    if (!text || assistantRequestInFlight) return;
+    if (text.length > AI_ASSISTANT_MAX_QUESTION_CHARS) {
+      body.innerHTML += `<div class="chat-bubble ai error">Questions must be ${AI_ASSISTANT_MAX_QUESTION_CHARS} characters or fewer.</div>`;
+      body.scrollTop = body.scrollHeight;
+      return;
+    }
+    
+    input.value = "";
+    assistantRequestInFlight = true;
+    sendBtn.disabled = true;
+    input.disabled = true;
+    body.innerHTML += `<div class="chat-bubble user">${escHtml(text)}</div>`;
+    body.scrollTop = body.scrollHeight;
+    
+    const thinkingId = "thinking-" + Date.now();
+    body.innerHTML += `<div id="${thinkingId}" class="chat-bubble ai thinking">Thinking...</div>`;
+    body.scrollTop = body.scrollHeight;
+    
+    try {
+      const res = await fetch("/dashboard/assistant/ask", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ question: text, dashboard_context: buildAssistantContext() })
+      });
+      if (!res.ok) {
+        let errorMessage = "Failed to get response.";
+        try {
+          const errorPayload = await res.json();
+          errorMessage = errorPayload.detail || errorPayload.content || errorMessage;
+        } catch {}
+        throw new Error(errorMessage);
+      }
+      const data = await res.json();
+      document.getElementById(thinkingId).remove();
+      body.innerHTML += `<div class="chat-bubble ai">${escHtml(data.content)}</div>`;
+    } catch (err) {
+      document.getElementById(thinkingId).remove();
+      body.innerHTML += `<div class="chat-bubble ai error">${escHtml(err.message || "Failed to get response.")}</div>`;
+    } finally {
+      assistantRequestInFlight = false;
+      sendBtn.disabled = false;
+      input.disabled = false;
+      input.focus();
+    }
+    body.scrollTop = body.scrollHeight;
+  };
+
+  sendBtn.addEventListener("click", sendCopilotQuestion);
+  input.addEventListener("keypress", (e) => { if (e.key === "Enter") sendCopilotQuestion(); });
+}
+
 function startAutoRefresh() {
   refreshTimer = setInterval(() => {
     if (!document.hidden) loadDashboard();
@@ -565,6 +685,7 @@ async function initDashboard() {
   bindEvents();
   await initUser();
   await loadDashboard();
+  bindChatEvents();
   startAutoRefresh();
 }
 

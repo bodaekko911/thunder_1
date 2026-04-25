@@ -1,8 +1,14 @@
+from collections import defaultdict, deque
 from datetime import date, datetime, timedelta
-from typing import Optional
+import asyncio
+import json
+import time
+from typing import Any, Dict, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+import redis.asyncio as aioredis
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
@@ -24,6 +30,171 @@ router = APIRouter(
     tags=["Dashboard"],
     dependencies=[Depends(require_permission("page_dashboard"))],
 )
+
+_assistant_rate_limit_fallback: dict[str, deque[float]] = defaultdict(deque)
+_assistant_rate_limit_lock = asyncio.Lock()
+_assistant_redis_client = None
+
+
+def _get_assistant_redis_client():
+    global _assistant_redis_client
+    if _assistant_redis_client is None:
+        _assistant_redis_client = aioredis.from_url(
+            settings.REDIS_URL,
+            socket_connect_timeout=settings.REDIS_SOCKET_CONNECT_TIMEOUT,
+            socket_timeout=settings.REDIS_SOCKET_TIMEOUT,
+            decode_responses=True,
+        )
+    return _assistant_redis_client
+
+
+def _client_ip(request: Request) -> str:
+    forwarded_for = request.headers.get("x-forwarded-for", "")
+    if forwarded_for:
+        return forwarded_for.split(",", 1)[0].strip() or "unknown"
+    if request.client and request.client.host:
+        return request.client.host
+    return "unknown"
+
+
+def _assistant_rate_limit_key(request: Request, current_user: User) -> str:
+    user_id = getattr(current_user, "id", None)
+    if user_id is not None:
+        return f"user:{user_id}"
+    return f"ip:{_client_ip(request)}"
+
+
+async def _enforce_assistant_rate_limit(request: Request, current_user: User) -> None:
+    limit = max(1, int(settings.ASSISTANT_RATE_LIMIT_REQUESTS))
+    window = max(1, int(settings.ASSISTANT_RATE_LIMIT_WINDOW_SECONDS))
+    key = _assistant_rate_limit_key(request, current_user)
+    redis_key = f"assistant:rate_limit:{key}"
+
+    try:
+        redis_client = _get_assistant_redis_client()
+        current = await redis_client.incr(redis_key)
+        if current == 1:
+            await redis_client.expire(redis_key, window)
+        if current > limit:
+            raise HTTPException(
+                status_code=429,
+                detail=f"Assistant rate limit exceeded. Try again in about {window} seconds.",
+            )
+        return
+    except HTTPException:
+        raise
+    except Exception:
+        pass
+
+    now = time.monotonic()
+    async with _assistant_rate_limit_lock:
+        bucket = _assistant_rate_limit_fallback[key]
+        while bucket and now - bucket[0] >= window:
+            bucket.popleft()
+        if len(bucket) >= limit:
+            raise HTTPException(
+                status_code=429,
+                detail=f"Assistant rate limit exceeded. Try again in about {window} seconds.",
+            )
+        bucket.append(now)
+
+
+def _trim_text(value: Any, *, limit: int = 160) -> str:
+    text = str(value or "").strip()
+    return text[:limit]
+
+
+def _trim_list_of_dicts(items: Any, *, keys: tuple[str, ...]) -> list[dict[str, Any]]:
+    if not isinstance(items, list):
+        return []
+    trimmed: list[dict[str, Any]] = []
+    for item in items[: settings.ASSISTANT_CONTEXT_LIST_LIMIT]:
+        if not isinstance(item, dict):
+            continue
+        trimmed.append({key: item.get(key) for key in keys if key in item})
+    return trimmed
+
+
+def _trim_dashboard_context(dashboard_context: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not dashboard_context:
+        return None
+
+    trimmed: dict[str, Any] = {}
+
+    range_key = dashboard_context.get("range")
+    if isinstance(range_key, dict):
+        trimmed["range"] = {
+            key: range_key.get(key)
+            for key in ("key", "label", "date_from", "date_to", "granularity")
+            if key in range_key
+        }
+    elif isinstance(range_key, str):
+        trimmed["range"] = range_key
+
+    for key in ("start", "end"):
+        value = dashboard_context.get(key)
+        if value:
+            trimmed[key] = str(value)
+
+    numbers = dashboard_context.get("numbers")
+    if isinstance(numbers, dict):
+        kept_numbers: dict[str, Any] = {}
+        for key in ("sales", "clients_owe", "spent", "stock_alerts"):
+            value = numbers.get(key)
+            if isinstance(value, dict):
+                kept_numbers[key] = {
+                    sub_key: value.get(sub_key)
+                    for sub_key in ("value", "delta_pct", "overdue_count", "out_count", "low_count")
+                    if sub_key in value
+                }
+        if kept_numbers:
+            trimmed["numbers"] = kept_numbers
+
+    panels = dashboard_context.get("panels")
+    if isinstance(panels, dict):
+        kept_panels: dict[str, Any] = {}
+        top_revenue = _trim_list_of_dicts(
+            panels.get("top_products_by_revenue"),
+            keys=("name", "qty", "revenue"),
+        )
+        if top_revenue:
+            kept_panels["top_products_by_revenue"] = top_revenue
+        top_qty = _trim_list_of_dicts(
+            panels.get("top_products_by_qty"),
+            keys=("name", "qty", "revenue"),
+        )
+        if top_qty:
+            kept_panels["top_products_by_qty"] = top_qty
+        recent_activity = _trim_list_of_dicts(
+            panels.get("recent_activity"),
+            keys=("invoice_number", "customer", "total", "type", "time_relative"),
+        )
+        if recent_activity:
+            kept_panels["recent_activity"] = recent_activity
+        if kept_panels:
+            trimmed["panels"] = kept_panels
+
+    briefing = dashboard_context.get("briefing")
+    if isinstance(briefing, dict):
+        kept_briefing = {
+            "lead": _trim_text(briefing.get("lead")),
+            "body": _trim_text(briefing.get("body"), limit=240),
+        }
+        trimmed["briefing"] = {key: value for key, value in kept_briefing.items() if value}
+
+    if trimmed:
+        serialized = json.dumps(trimmed, default=str, separators=(",", ":"))
+        if len(serialized) > settings.ASSISTANT_MAX_CONTEXT_CHARS:
+            raise HTTPException(
+                status_code=413,
+                detail="Assistant dashboard context is too large. Refresh the dashboard and try again.",
+            )
+
+    return trimmed or None
+
+
+def _reset_assistant_rate_limit_state() -> None:
+    _assistant_rate_limit_fallback.clear()
 
 # ── legacy data endpoint ───────────────────────────────────────────────
 
@@ -324,6 +495,45 @@ async def dashboard_data(db: AsyncSession = Depends(get_async_session)):
             },
         )
 
+
+# ── assistant endpoint ─────────────────────────────────────────────────
+
+class CopilotRequest(BaseModel):
+    question: str = Field(min_length=1, max_length=settings.ASSISTANT_MAX_QUESTION_CHARS)
+    dashboard_context: Optional[Dict[str, Any]] = None
+
+    @field_validator("question", mode="before")
+    @classmethod
+    def _normalize_question(cls, value: Any) -> str:
+        normalized = str(value or "").strip()
+        if not normalized:
+            raise ValueError("Question cannot be empty.")
+        return normalized
+
+@router.post("/dashboard/assistant/ask")
+async def dashboard_assistant_ask(
+    request: Request,
+    payload: CopilotRequest,
+    db: AsyncSession = Depends(get_async_session),
+    current_user: User = Depends(get_current_user),
+):
+    from app.services.copilot.engine import answer_question
+
+    await _enforce_assistant_rate_limit(request, current_user)
+    trimmed_context = _trim_dashboard_context(payload.dashboard_context)
+
+    try:
+        return await answer_question(
+            db,
+            question=payload.question,
+            current_user=current_user,
+            dashboard_context=trimmed_context,
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        return {"type": "text", "content": "An error occurred while processing your request."}
+
 # ── new: /dashboard/summary ────────────────────────────────────────────
 
 @router.get("/dashboard/summary")
@@ -547,6 +757,21 @@ def dashboard_ui():
     </div>
   </div>
 </div>
+
+<div id="ai-chat-widget" class="ai-chat-widget hidden">
+  <div class="ai-chat-header">
+    <h3>AI Assistant</h3>
+    <button id="ai-chat-close" aria-label="Close chat">&#215;</button>
+  </div>
+  <div class="ai-chat-body" id="ai-chat-body">
+    <div class="chat-bubble ai">Hello! I'm your ERP Assistant. How can I help you today?</div>
+  </div>
+  <div class="ai-chat-input-area">
+    <input type="text" id="ai-chat-input" placeholder="Ask a question..." />
+    <button id="ai-chat-send" aria-label="Send">📤</button>
+  </div>
+</div>
+<button id="ai-chat-trigger" class="ai-chat-trigger" aria-label="Open AI Assistant">✨</button>
 
 <script src="/static/dashboard.js"></script>
 </body>
