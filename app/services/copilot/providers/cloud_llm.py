@@ -1,7 +1,7 @@
 import re
 import json
 import httpx
-from sqlalchemy import select, or_, func
+from sqlalchemy import select, and_, func
 from sqlalchemy.orm import joinedload
 from app.core.log import logger
 from app.core.config import settings
@@ -51,7 +51,7 @@ class CloudCopilotProvider:
             if keywords:
                 from app.models.product import Product
                 conditions = [Product.name.ilike(f"%{kw}%") for kw in keywords]
-                stmt = select(Product).where(Product.is_active == True, or_(*conditions)).limit(5)
+                stmt = select(Product).where(Product.is_active == True, and_(*conditions)).limit(10)
                 
                 res = await db.execute(stmt)
                 for p in res.scalars().all():
