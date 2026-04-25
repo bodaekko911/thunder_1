@@ -55,14 +55,16 @@ _ERROR_HTML_PAGE = """<!DOCTYPE html>
 </body></html>"""
 
 
-async def _try_silent_refresh(refresh_token_value: str):
+async def _try_silent_refresh(refresh_token_value: str) -> tuple[str, str] | None:
     """
-    Open a fresh DB session and attempt to mint a new access token from the
-    given raw refresh-token value.  Returns the new token string on success,
-    or None on any failure, so callers can safely fall through to a login
-    redirect without raising.
+    Open a fresh DB session and attempt to rotate the given raw refresh token.
+    Returns ``(access_token, refresh_token)`` on success, or None on any
+    failure, so callers can safely fall through to a login redirect without
+    raising.
 
-    Defined at module level (not inside create_app) so tests can monkeypatch
+    The refresh token is rotated server-side on success, so callers MUST write
+    both returned cookies back to the browser. Defined at module level (not
+    inside create_app) so tests can monkeypatch
     ``app.app_factory._try_silent_refresh`` without a real DB connection.
     """
     from app.db.session import AsyncSessionLocal
@@ -181,14 +183,15 @@ def create_app() -> FastAPI:
 
             refresh_token_value = request.cookies.get("refresh_token")
             if refresh_token_value:
-                new_token = await _try_silent_refresh(refresh_token_value)
-                if new_token:
+                refreshed = await _try_silent_refresh(refresh_token_value)
+                if refreshed:
+                    new_access_token, new_refresh_token = refreshed
                     # Redirect to the same URL; the new cookie rides along so
                     # the retry succeeds without another round-trip.
                     redirect = RedirectResponse(url=path, status_code=307)
                     redirect.set_cookie(
                         key="access_token",
-                        value=new_token,
+                        value=new_access_token,
                         httponly=True,
                         samesite="lax",
                         secure=settings.COOKIE_SECURE,
@@ -203,6 +206,15 @@ def create_app() -> FastAPI:
                         secure=settings.COOKIE_SECURE,
                         path="/",
                         max_age=settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60,
+                    )
+                    redirect.set_cookie(
+                        key="refresh_token",
+                        value=new_refresh_token,
+                        httponly=True,
+                        samesite="lax",
+                        secure=settings.COOKIE_SECURE,
+                        path="/",
+                        max_age=settings.REFRESH_TOKEN_EXPIRE_DAYS * 86400,
                     )
                     return redirect
 

@@ -18,6 +18,7 @@ The tests use monkeypatching for two things that would require a real DB:
   - app.app_factory._try_silent_refresh      (DB + token logic in middleware)
 """
 
+import asyncio
 from collections.abc import AsyncGenerator
 
 import pytest
@@ -74,7 +75,7 @@ def test_html_get_no_auth_redirects_to_login_with_next_and_reason(client: TestCl
     response = client.get(
         "/dashboard",
         headers={"Accept": "text/html,application/xhtml+xml"},
-        allow_redirects=False,
+        follow_redirects=False,
     )
     assert response.status_code == 307
     location = response.headers["location"]
@@ -88,7 +89,7 @@ def test_json_get_no_auth_returns_401_json(client: TestClient) -> None:
     response = client.get(
         "/dashboard",
         headers={"Accept": "application/json"},
-        allow_redirects=False,
+        follow_redirects=False,
     )
     assert response.status_code == 401
     body = response.json()
@@ -105,7 +106,7 @@ def test_html_get_valid_refresh_cookie_triggers_silent_refresh(
     """
     async def _mock_refresh(token_value: str):
         assert token_value == "valid-refresh-token"
-        return "new-access-token-xyz"
+        return ("new-access-token-xyz", "new-refresh-token-abc")
 
     monkeypatch.setattr("app.app_factory._try_silent_refresh", _mock_refresh)
 
@@ -113,14 +114,66 @@ def test_html_get_valid_refresh_cookie_triggers_silent_refresh(
         "/dashboard",
         headers={"Accept": "text/html,application/xhtml+xml"},
         cookies={"refresh_token": "valid-refresh-token"},
-        allow_redirects=False,
+        follow_redirects=False,
     )
     assert response.status_code == 307
     # Should redirect back to the original path, not to the login page.
     assert response.headers["location"] == "/dashboard"
-    # New access_token cookie must be present in the redirect response.
-    set_cookie = response.headers.get("set-cookie", "")
-    assert "access_token" in set_cookie
+    set_cookie = " ".join(response.headers.get_list("set-cookie"))
+    assert "access_token=new-access-token-xyz" in set_cookie
+    assert "refresh_token=new-refresh-token-abc" in set_cookie
+    assert "logged_in=true" in set_cookie
+
+
+def test_html_get_failed_silent_refresh_falls_back_to_login(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def _mock_refresh(token_value: str):
+        assert token_value == "stale-refresh-token"
+        return None
+
+    monkeypatch.setattr("app.app_factory._try_silent_refresh", _mock_refresh)
+
+    response = client.get(
+        "/dashboard",
+        headers={"Accept": "text/html,application/xhtml+xml"},
+        cookies={"refresh_token": "stale-refresh-token"},
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 307
+    location = response.headers["location"]
+    assert location.startswith("/?")
+    assert "next=%2Fdashboard" in location
+    assert "reason=expired" in location
+
+
+def test_silent_refresh_helper_contract_matches_security_module(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    expected = ("access-token-value", "refresh-token-value")
+
+    class _StubAsyncSessionLocal:
+        async def __aenter__(self):
+            return object()
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    async def _mock_refresh_access_token(db, refresh_token_value: str):
+        assert refresh_token_value == "any-token"
+        assert db is not None
+        return expected
+
+    monkeypatch.setattr("app.db.session.AsyncSessionLocal", _StubAsyncSessionLocal)
+    monkeypatch.setattr(
+        "app.core.security.try_refresh_access_token",
+        _mock_refresh_access_token,
+    )
+
+    result = asyncio.run(app_factory_module._try_silent_refresh("any-token"))
+    assert result == expected
 
 
 def test_post_no_auth_returns_non_redirect(client: TestClient) -> None:
@@ -133,7 +186,7 @@ def test_post_no_auth_returns_non_redirect(client: TestClient) -> None:
             "confirm_new_password": "irrelevant2",
         },
         headers={"Accept": "text/html,application/xhtml+xml"},
-        allow_redirects=False,
+        follow_redirects=False,
     )
     assert response.status_code != 307
 
@@ -144,7 +197,7 @@ def test_auth_login_bad_credentials_returns_json_not_redirect(client: TestClient
         "/auth/login",
         json={"email": "nobody@example.com", "password": "wrongpassword"},
         headers={"Accept": "text/html,application/xhtml+xml"},
-        allow_redirects=False,
+        follow_redirects=False,
     )
     # Redis brute-force check will fail gracefully in tests; the endpoint
     # should still return 401 (or possibly 429/500 if Redis is completely
