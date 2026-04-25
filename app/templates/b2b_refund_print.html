@@ -1,0 +1,129 @@
+{% extends "base_print.html" %}
+
+{% block page_title %}Refund {{ refund.refund_number }}{% endblock %}
+
+{% block print_button_label %}Print Refund{% endblock %}
+
+{% block extra_styles %}
+.status-stamp {
+    display: inline-block;
+    border: 2px solid #fb923c;
+    color: #fb923c;
+    padding: 3px 10px;
+    border-radius: 4px;
+    font-weight: 700;
+    font-size: 11px;
+    letter-spacing: 1px;
+    transform: rotate(-5deg);
+    margin-left: 10px;
+    vertical-align: middle;
+}
+{% endblock %}
+
+{% block content %}
+<div class="header-top">
+    <table class="inv-meta">
+        <tr>
+            <td class="label">Refund No:</td>
+            <td><b>{{ refund.refund_number }}</b></td>
+        </tr>
+        <tr>
+            <td class="label">Date:</td>
+            <td>{{ refund.created_at | shortdate }}</td>
+        </tr>
+        <tr>
+            <td class="label">Status:</td>
+            <td>
+                <b>POSTED</b>
+                <span class="status-stamp">REFUND</span>
+            </td>
+        </tr>
+    </table>
+
+    <div class="logo-block">
+        <img src="{{ BRAND.logo_path }}" alt="{{ BRAND.company_name }}" style="height:120px;object-fit:contain;">
+        <div class="company-name">{{ BRAND.company_name }}</div>
+        <div class="company-sub" style="margin-top:4px">Commercial registry: {{ BRAND.commercial_registry }}</div>
+        <div class="company-sub">Tax ID: {{ BRAND.tax_id }}</div>
+    </div>
+</div>
+
+<table class="customer-block">
+    <tr>
+        <td class="label" style="color:#555">Customer Code:</td>
+        <td><b>{{ client_code }}</b></td>
+        <td width="40"></td>
+        <td class="label" style="color:#555">Document:</td>
+        <td><b>Client Refund</b></td>
+    </tr>
+    <tr>
+        <td class="label" style="color:#555">Customer Name:</td>
+        <td><b>{{ client_name }}</b></td>
+        <td></td>
+        <td class="label" style="color:#555">Reference:</td>
+        <td>{{ refund.refund_number }}</td>
+    </tr>
+</table>
+
+<div style="height:12px"></div>
+
+<table class="items">
+    <thead>
+        <tr>
+            <th>Item Description</th>
+            <th class="center">QTY</th>
+            <th class="center">Price</th>
+            <th class="right">Total</th>
+        </tr>
+    </thead>
+    <tbody>
+        {% for item in refund.items %}
+        <tr>
+            <td>
+                {{ item.product.name if item.product else "—" }}
+                <div style='font-size:11px;color:#666'>{{ item.product.sku if item.product else "—" }}</div>
+            </td>
+            <td class="center">{{ "%.0f" | format(item.qty | float) }}</td>
+            <td class="center">{{ "%.2f" | format(item.unit_price | float) }}</td>
+            <td class="right">{{ "%.2f" | format(item.total | float) }}</td>
+        </tr>
+        {% endfor %}
+    </tbody>
+</table>
+
+<div class="totals-wrap">
+    <table class="totals">
+        <tr>
+            <td class="label">Subtotal</td>
+            <td class="amount">{{ subtotal | ar_egp }}</td>
+        </tr>
+        {% if discount > 0 %}
+        <tr class="discount-row">
+            <td class="label">Discount &nbsp; {{ "%.2f" | format(discount_pct) }}%</td>
+            <td class="amount">{{ discount | ar_egp }}</td>
+        </tr>
+        {% endif %}
+        <tr class="total-final">
+            <td class="label">Refund Total</td>
+            <td class="amount">{{ total | ar_egp }}</td>
+        </tr>
+    </table>
+</div>
+
+{% if refund.notes %}
+<div style="margin-top:18px;font-size:12px;color:#555">
+    <b>Notes:</b> {{ refund.notes }}
+</div>
+{% endif %}
+
+<div class="footer-sign">
+    <div class="sign-block">
+        <div class="sign-line"></div>
+        <div>Received by</div>
+    </div>
+    <div class="sign-block" style="text-align:right">
+        <div class="sign-line"></div>
+        <div>Approval</div>
+    </div>
+</div>
+{% endblock %}

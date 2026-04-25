@@ -1,0 +1,151 @@
+{# ---------------------------------------------------------------------------
+   base_print.html — shared scaffold for all printable B2B pages.
+
+   Child templates extend this and override:
+     - ``page_title``        : <title> contents
+     - ``extra_styles``      : page-specific CSS appended after the shared base
+     - ``print_button_label``: text on the green "Print" button (default "Print")
+     - ``content``           : main body between toolbar and footer
+
+   The shared base styles cover header, customer block, items table, totals
+   table, signature, page footer, and print-button styling.  Page-specific
+   tweaks (e.g. statement summary table, refund stamp colors) go in
+   ``extra_styles``.
+--------------------------------------------------------------------------- #}
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<title>{% block page_title %}Document{% endblock %}</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+    font-family: Arial, sans-serif;
+    font-size: 13px;
+    color: #111;
+    background: white;
+    padding: 30px;
+    max-width: {% block body_max_width %}800px{% endblock %};
+    margin: 0 auto;
+}
+.header-top {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    margin-bottom: 16px;
+}
+.inv-meta { font-size: 13px; }
+.inv-meta td { padding: 2px 8px 2px 0; }
+.inv-meta .label { color: #555; }
+.logo-block { text-align: center; flex: 1; }
+.logo-block img { height: 70px; object-fit: contain; }
+.company-name {
+    font-size: 18px;
+    font-weight: 900;
+    color: {{ BRAND.primary_color }};
+    letter-spacing: 1px;
+    margin-bottom: 2px;
+}
+.company-sub { font-size: 11px; color: #555; }
+.customer-block { margin-bottom: 16px; font-size: 13px; }
+.customer-block td { padding: 2px 12px 2px 0; }
+table.items { width: 100%; border-collapse: collapse; margin-bottom: 0; }
+table.items th {
+    background: {{ BRAND.primary_color }};
+    color: white;
+    padding: 8px 12px;
+    text-align: left;
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: .5px;
+}
+table.items th.center { text-align: center; }
+table.items th.right  { text-align: right; }
+table.items td {
+    padding: 9px 12px;
+    border-bottom: 1px solid #e0e0e0;
+    font-size: 13px;
+}
+table.items td.center { text-align: center; }
+table.items td.right  { text-align: right; font-family: monospace; }
+table.items tbody tr:nth-child(even) { background: #f7f7f7; }
+.totals-wrap { display: flex; justify-content: flex-end; margin-top: 0; }
+table.totals { border-collapse: collapse; min-width: 280px; border: 1px solid #ddd; }
+table.totals td {
+    padding: 8px 14px;
+    font-size: 13px;
+    border-bottom: 1px solid #eee;
+}
+table.totals .label { color: #444; }
+table.totals .amount { text-align: right; font-family: monospace; font-weight: 600; }
+.total-final {
+    background: {{ BRAND.primary_color }};
+    color: white;
+    font-weight: 700;
+    font-size: 15px;
+}
+.total-final .amount { color: white; }
+.discount-row { color: #c0392b; }
+.footer-sign {
+    display: flex;
+    justify-content: space-between;
+    margin-top: 40px;
+    padding-top: 16px;
+    border-top: 1px solid #ddd;
+    font-size: 12px;
+    color: #555;
+}
+.sign-block { min-width: 180px; }
+.sign-line {
+    border-bottom: 1px solid #aaa;
+    margin-top: 30px;
+    margin-bottom: 4px;
+}
+.page-footer {
+    text-align: center;
+    margin-top: 30px;
+    font-size: 11px;
+    color: #888;
+    border-top: 1px solid #eee;
+    padding-top: 10px;
+    font-style: italic;
+}
+.print-btn {
+    display: inline-flex; align-items: center; gap: 8px;
+    background: {{ BRAND.primary_color }}; color: white; border: none;
+    padding: 10px 20px; border-radius: 8px;
+    font-size: 14px; font-weight: 700; cursor: pointer;
+    margin-right: 8px;
+}
+.back-btn {
+    display: inline-flex; align-items: center; gap: 8px;
+    background: #eee; color: #333; border: none;
+    padding: 10px 20px; border-radius: 8px;
+    font-size: 14px; font-weight: 700; cursor: pointer;
+}
+.no-print { margin-bottom: 20px; }
+@media print {
+    .no-print { display: none; }
+    body { padding: 15px; }
+}
+{% block extra_styles %}{% endblock %}
+</style>
+<script src="/static/auth-guard.js"></script>
+</head>
+<body>
+
+<div class="no-print">
+    <button class="print-btn" onclick="window.print()">🖨 {% block print_button_label %}Print{% endblock %}</button>
+    <button class="back-btn" onclick="history.back()">← Back</button>
+</div>
+
+{% block content %}{% endblock %}
+
+<div class="page-footer">
+    {{ BRAND.tagline }} &nbsp;|&nbsp;
+    📷 {{ BRAND.instagram }} &nbsp;|&nbsp;
+    🌐 {{ BRAND.website }}
+</div>
+
+</body>
+</html>

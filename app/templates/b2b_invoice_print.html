@@ -1,0 +1,128 @@
+{% extends "base_print.html" %}
+
+{% block page_title %}Invoice {{ invoice.invoice_number }}{% endblock %}
+
+{% block print_button_label %}Print Invoice{% endblock %}
+
+{% block extra_styles %}
+.status-stamp {
+    display: inline-block;
+    border: 2px solid #c0392b;
+    color: #c0392b;
+    padding: 3px 10px;
+    border-radius: 4px;
+    font-weight: 700;
+    font-size: 11px;
+    letter-spacing: 1px;
+    transform: rotate(-5deg);
+    margin-left: 10px;
+    vertical-align: middle;
+}
+.status-stamp.paid {
+    border-color: {{ BRAND.primary_color }};
+    color: {{ BRAND.primary_color }};
+}
+{% endblock %}
+
+{% block content %}
+<div class="header-top">
+    <table class="inv-meta">
+        <tr>
+            <td class="label">Invoice No:</td>
+            <td><b>{{ invoice.invoice_number }}</b></td>
+        </tr>
+        <tr>
+            <td class="label">Date:</td>
+            <td>{{ invoice.created_at | shortdate }}</td>
+        </tr>
+        <tr>
+            <td class="label">Status:</td>
+            <td>
+                <b>{{ invoice.status | upper }}</b>
+                {% if invoice.status == "paid" %}
+                    <span class="status-stamp paid">PAID</span>
+                {% elif invoice.status == "unpaid" %}
+                    <span class="status-stamp">UNPAID</span>
+                {% endif %}
+            </td>
+        </tr>
+    </table>
+
+    <div class="logo-block">
+        <img src="{{ BRAND.logo_path }}" alt="{{ BRAND.company_name }}" style="height:120px;object-fit:contain;">
+        <div class="company-name">{{ BRAND.company_name }}</div>
+        <div class="company-sub" style="margin-top:4px">Commercial registry: {{ BRAND.commercial_registry }}</div>
+        <div class="company-sub">Tax ID: {{ BRAND.tax_id }}</div>
+    </div>
+</div>
+
+<table class="customer-block">
+    <tr>
+        <td class="label" style="color:#555">Customer Code:</td>
+        <td><b>{{ client_code }}</b></td>
+        <td width="40"></td>
+        <td class="label" style="color:#555">Type:</td>
+        <td><b>{{ invoice.invoice_type | humanize_snake }}</b></td>
+    </tr>
+    <tr>
+        <td class="label" style="color:#555">Customer Name:</td>
+        <td><b>{{ client_name }}</b></td>
+        <td></td>
+        <td class="label" style="color:#555">Payment:</td>
+        <td>{{ invoice.payment_method or "—" }}</td>
+    </tr>
+</table>
+
+<div style="height:12px"></div>
+
+<table class="items">
+    <thead>
+        <tr>
+            <th>Item Description</th>
+            <th class="center">QTY</th>
+            <th class="center">Price</th>
+            <th class="right">Total</th>
+        </tr>
+    </thead>
+    <tbody>
+        {% for item in invoice.items %}
+        <tr>
+            <td>{{ item.product.name if item.product else "—" }}</td>
+            <td class="center">{{ "%.0f" | format(item.qty | float) }}</td>
+            <td class="center">{{ "%.2f" | format(item.unit_price | float) }}</td>
+            <td class="right">{{ "%.2f" | format(item.total | float) }}</td>
+        </tr>
+        {% endfor %}
+    </tbody>
+</table>
+
+<div class="totals-wrap">
+    <table class="totals">
+        <tr>
+            <td class="label">Total</td>
+            <td class="amount">{{ subtotal | ar_egp }}</td>
+        </tr>
+        {% if discount > 0 %}
+        <tr class="discount-row">
+            <td class="label">Discount &nbsp; {{ "%.2f" | format(discount_pct) }}%</td>
+            <td class="amount">{{ discount | ar_egp }}</td>
+        </tr>
+        {% endif %}
+        <tr class="total-final">
+            <td class="label">Total after discount</td>
+            <td class="amount">{{ total | ar_egp }}</td>
+        </tr>
+    </table>
+</div>
+
+<div class="footer-sign">
+    <div class="sign-block">
+        <div class="sign-line"></div>
+        <div>Received by</div>
+    </div>
+    <div class="sign-block" style="text-align:right">
+        <div class="sign-line"></div>
+        <div>Receipt Date</div>
+    </div>
+</div>
+{% endblock %}

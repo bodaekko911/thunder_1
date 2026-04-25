@@ -1,0 +1,221 @@
+{% extends "base_print.html" %}
+
+{% block page_title %}Account Statement - {{ client.name }}{% endblock %}
+
+{% block body_max_width %}900px{% endblock %}
+
+{% block print_button_label %}Print Statement{% endblock %}
+
+{% block extra_styles %}
+.header-top {
+    padding-bottom: 16px;
+    border-bottom: 2px solid {{ BRAND.primary_color }};
+    margin-bottom: 20px;
+}
+.doc-title {
+    font-size: 22px;
+    font-weight: 900;
+    color: {{ BRAND.primary_color }};
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    margin-bottom: 6px;
+}
+.meta-table td { padding: 3px 10px 3px 0; font-size: 12px; }
+.meta-table .lbl { color: #666; }
+.client-box {
+    background: #f7f9f7;
+    border: 1px solid #c8dfc8;
+    border-left: 4px solid {{ BRAND.primary_color }};
+    border-radius: 6px;
+    padding: 14px 18px;
+    margin-bottom: 20px;
+    display: flex;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 12px;
+}
+.client-box .name { font-size: 16px; font-weight: 700; margin-bottom: 4px; }
+.client-box .detail { font-size: 12px; color: #555; line-height: 1.7; }
+.client-box .terms {
+    font-size: 11px; font-weight: 700; letter-spacing: 1px;
+    text-transform: uppercase; color: {{ BRAND.primary_color }};
+    background: #e8f5e8; padding: 3px 10px;
+    border-radius: 20px; border: 1px solid #c8dfc8;
+    display: inline-block; margin-top: 6px;
+}
+table.stmt { width: 100%; border-collapse: collapse; margin-bottom: 0; }
+table.stmt th {
+    background: {{ BRAND.primary_color }}; color: white; padding: 9px 12px;
+    text-align: left; font-size: 11px; font-weight: 700;
+    letter-spacing: .5px; text-transform: uppercase;
+}
+table.stmt th.right { text-align: right; }
+table.stmt td {
+    padding: 9px 12px; border-bottom: 1px solid #e8e8e8;
+    font-size: 13px; vertical-align: middle;
+}
+table.stmt tbody tr:nth-child(even) { background: #f9f9f9; }
+table.stmt tr.refund-row td { color: {{ BRAND.primary_color }}; background: #f2fcf2; }
+.right { text-align: right; }
+.mono { font-family: 'Courier New', monospace; }
+.green { color: {{ BRAND.primary_color }}; }
+.bold { font-weight: 700; }
+.badge {
+    display: inline-block; font-size: 9px; font-weight: 700; letter-spacing: .8px;
+    text-transform: uppercase; padding: 2px 7px; border-radius: 3px;
+    vertical-align: middle; margin-left: 6px;
+}
+.badge.paid    { background: #e8f5e8; color: {{ BRAND.primary_color }}; border: 1px solid #c8dfc8; }
+.badge.partial { background: #fff8e8; color: #a07000; border: 1px solid #e8d898; }
+.badge.unpaid  { background: #fef0f0; color: #c0392b; border: 1px solid #f0c8c8; }
+.badge.refund  { background: #e8f0ff; color: #2255aa; border: 1px solid #c0d0f0; }
+.summary-wrap { display: flex; justify-content: flex-end; margin-top: 0; }
+table.summary {
+    border-collapse: collapse; min-width: 320px;
+    border: 1px solid #ccc; margin-top: 12px;
+}
+table.summary td {
+    padding: 9px 16px; font-size: 13px; border-bottom: 1px solid #eee;
+}
+table.summary .lbl { color: #444; }
+table.summary .amt { text-align: right; font-family: 'Courier New', monospace; font-weight: 600; }
+.row-total { background: #f5f5f5; }
+.row-paid { color: {{ BRAND.primary_color }}; }
+.row-balance {
+    background: {% if balance_due > 0 %}#c0392b{% else %}{{ BRAND.primary_color }}{% endif %};
+    color: white; font-weight: 700; font-size: 15px;
+}
+.row-balance .amt { color: white; }
+.payments-block { margin-top: 24px; }
+.section-title {
+    font-size: 13px; font-weight: 800; text-transform: uppercase;
+    letter-spacing: .8px; color: {{ BRAND.primary_color }}; margin-bottom: 10px;
+}
+.notice-box {
+    margin-top: 30px; padding: 12px 16px; background: #fffbf0;
+    border: 1px solid #e8d898; border-radius: 6px;
+    font-size: 12px; color: #555;
+}
+{% endblock %}
+
+{% block content %}
+<div class="header-top">
+    <div>
+        <div class="doc-title">Account Statement</div>
+        <table class="meta-table">
+            <tr><td class="lbl">Statement Date:</td><td><b>{{ statement_date }}</b></td></tr>
+            <tr><td class="lbl">Period:</td><td><b>{{ statement_period_label }}</b></td></tr>
+            <tr><td class="lbl">Client Code:</td><td><b>{{ client.code }}</b></td></tr>
+            <tr><td class="lbl">Credit Limit:</td><td>{{ client.credit_limit | egp }}</td></tr>
+        </table>
+    </div>
+    <div class="logo-block">
+        <img src="{{ BRAND.logo_path }}" alt="{{ BRAND.company_name }}" style="height:110px;object-fit:contain;margin-bottom:6px;">
+        <div class="company-name">{{ BRAND.company_name }}</div>
+        <div class="company-sub">Commercial registry: {{ BRAND.commercial_registry }}</div>
+        <div class="company-sub">Tax ID: {{ BRAND.tax_id }}</div>
+    </div>
+</div>
+
+<div class="client-box">
+    <div>
+        <div class="name">{{ client.name }}</div>
+        <div class="detail">
+            {% if client.contact_person %}Contact: {{ client.contact_person }}<br>{% endif %}
+            {% if client.phone %}Phone: {{ client.phone }}<br>{% endif %}
+            {% if client.email %}Email: {{ client.email }}<br>{% endif %}
+            {% if client.address %}Address: {{ client.address }}{% endif %}
+        </div>
+        <span class="terms">{{ client.payment_terms | humanize_snake }}</span>
+    </div>
+    <div style="text-align:right">
+        <div style="font-size:12px;color:#666;margin-bottom:4px">Outstanding Balance</div>
+        <div style="font-size:28px;font-weight:900;font-family:'Courier New',monospace;color:{% if balance_due > 0 %}#c0392b{% else %}{{ BRAND.primary_color }}{% endif %}">
+            {{ balance_due | egp }}
+        </div>
+    </div>
+</div>
+
+<table class="stmt">
+    <thead>
+        <tr>
+            <th>Date</th>
+            <th>Reference</th>
+            <th>Description</th>
+            <th class="right">Charges</th>
+            <th class="right">Credits</th>
+            <th class="right">Balance</th>
+        </tr>
+    </thead>
+    <tbody>
+        {% for t in transactions %}
+        <tr class="{{ 'refund-row' if t.type == 'refund' else '' }}">
+            <td>{{ t.date }}</td>
+            <td class="mono">{{ t.ref }}</td>
+            <td>
+                {{ t.desc }}
+                {% if t.status == "paid" %}<span class="badge paid">PAID</span>
+                {% elif t.status == "partial" %}<span class="badge partial">PARTIAL</span>
+                {% elif t.status == "unpaid" %}<span class="badge unpaid">UNPAID</span>
+                {% elif t.status == "refund" %}<span class="badge refund">REFUND</span>
+                {% endif %}
+            </td>
+            <td class="right mono">{% if t.debit > 0 %}{{ t.debit | egp }}{% else %}-{% endif %}</td>
+            <td class="right mono green">{% if t.credit > 0 %}{{ t.credit | egp }}{% else %}-{% endif %}</td>
+            <td class="right mono bold" style="color:{% if t.balance > 0 %}#c0392b{% else %}{{ BRAND.primary_color }}{% endif %}">
+                {{ t.balance | egp }}
+            </td>
+        </tr>
+        {% else %}
+        <tr><td colspan="6" style="text-align:center;color:#888;padding:30px">No transactions found for this statement period.</td></tr>
+        {% endfor %}
+    </tbody>
+</table>
+
+<div class="summary-wrap">
+    <table class="summary">
+        <tr class="row-total">
+            <td class="lbl">Total Invoiced</td>
+            <td class="amt">{{ total_invoiced | egp }}</td>
+        </tr>
+        <tr class="row-paid">
+            <td class="lbl">Total Credits &amp; Payments</td>
+            <td class="amt">{{ total_paid | egp }}</td>
+        </tr>
+        <tr class="row-balance">
+            <td class="lbl">Balance Due</td>
+            <td class="amt">{{ balance_due | egp }}</td>
+        </tr>
+    </table>
+</div>
+
+<div class="payments-block">
+    <div class="section-title">Recorded Payments</div>
+    <table class="stmt">
+        <thead>
+            <tr>
+                <th>Date</th>
+                <th>Reference</th>
+                <th>Description</th>
+                <th class="right">Amount</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for p in payment_activity %}
+            <tr>
+                <td>{{ p.date_str }}</td>
+                <td class="mono">{{ p.ref }}</td>
+                <td>{{ p.desc }}</td>
+                <td class="right mono green">{{ p.amount | egp }}</td>
+            </tr>
+            {% else %}
+            <tr><td colspan="4" style="text-align:center;color:#888;padding:24px">No recorded client payments in this statement period.</td></tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+
+<div class="notice-box">
+    ⓘ &nbsp;This statement reflects invoices, credits, and recorded payments {{ statement_period_label | lower }}.
+</div>
+{% endblock %}
