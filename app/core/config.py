@@ -81,18 +81,6 @@ class BaseAppSettings(BaseSettings):
     APP_TIMEZONE: str = "Africa/Cairo"
     APP_LOCALE_DIR: str = "ltr"
 
-    ASSISTANT_MEMORY_CHANNEL: str = "dashboard"
-    ASSISTANT_MAX_QUESTION_CHARS: int = 500
-    ASSISTANT_MAX_CONTEXT_CHARS: int = 12000
-    ASSISTANT_CONTEXT_LIST_LIMIT: int = 5
-    ASSISTANT_PRODUCT_MATCH_LIMIT: int = 5
-    ASSISTANT_PRODUCT_KEYWORD_LIMIT: int = 4
-    ASSISTANT_LOW_STOCK_LIMIT: int = 5
-    ASSISTANT_RATE_LIMIT_REQUESTS: int = 12
-    ASSISTANT_RATE_LIMIT_WINDOW_SECONDS: int = 60
-    ASSISTANT_LLM_TIMEOUT_SECONDS: float = 12.0
-    ASSISTANT_STATIC_CONTEXT_TTL_SECONDS: int = 3600
-
     SENTRY_DSN: str | None = None
     SENTRY_ENVIRONMENT: str | None = None
     SENTRY_TRACES_SAMPLE_RATE: float = 0.0
@@ -101,7 +89,6 @@ class BaseAppSettings(BaseSettings):
     MIGRATION_CHECK_STRICT: bool = False
 
     OLLAMA_BASE_URL: str = Field(default="http://localhost:11434")
-    AI_API_KEY: str | None = None
 
     model_config = CONFIG_MODEL
 
