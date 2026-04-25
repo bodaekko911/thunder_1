@@ -1,3 +1,4 @@
+import re
 import json
 import httpx
 from sqlalchemy import select, or_, func
@@ -42,27 +43,22 @@ class CloudCopilotProvider:
             logger.error(f"Failed to fetch lifetime expenses for AI context: {e}")
             
         try:
-            stop_words = {"what", "show", "tell", "does", "have", "give", "some", "this", "that", "with", "from", "find", "search", "about", "there", "need", "know", "much"}
-            words = [w.strip("?.,!") for w in question.lower().split() if len(w.strip("?.,!")) > 3]
-            keywords = [w for w in words if w not in stop_words]
+            ignore_words = {"what", "show", "tell", "product", "products", "detail", "details", "find", "search", "about", "for", "the", "and", "how", "much", "many", "have", "we", "do", "does", "is", "are"}
+            clean_question = re.sub(r'[^\w\s]', '', question).lower()
+            words = clean_question.split()
+            keywords = [w for w in words if w not in ignore_words and len(w) >= 3]
             
             if keywords:
                 from app.models.product import Product
                 conditions = [Product.name.ilike(f"%{kw}%") for kw in keywords]
                 stmt = select(Product).where(Product.is_active == True, or_(*conditions)).limit(5)
                 
-                if hasattr(Product, "category") and hasattr(getattr(Product, "category"), "property"):
-                    stmt = stmt.options(joinedload(Product.category))
-                    
                 res = await db.execute(stmt)
                 for p in res.scalars().all():
-                    cat = getattr(p, "category", None)
-                    cat_name = cat.name if hasattr(cat, "name") else str(cat) if cat else "Unknown"
                     deep_context["matched_products"].append({
                         "name": p.name,
                         "stock": float(p.stock or 0),
-                        "price": float(p.price or 0),
-                        "category": cat_name
+                        "price": float(p.price or 0)
                     })
         except Exception as e:
             logger.error(f"Failed to fetch dynamic product search for AI context: {e}")
