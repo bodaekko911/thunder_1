@@ -1,6 +1,7 @@
 import re
 import json
 import httpx
+import redis.asyncio as aioredis
 from sqlalchemy import select, and_, func
 from sqlalchemy.orm import joinedload
 from app.core.log import logger
@@ -17,31 +18,111 @@ class CloudCopilotProvider:
 
         url = "https://api.groq.com/openai/v1/chat/completions"
         
-        deep_context = {
-            "lifetime_sales": 0.0,
-            "lifetime_expenses": 0.0,
-            "outstanding_debt": [],
-            "low_stock_inventory": [],
-            "recent_expenses": [],
-            "matched_products": []
-        }
+        static_context = None
+        redis_client = None
+        cache_key = f"copilot_static_context:{current_user.id}"
         
         try:
-            from app.models.invoice import Invoice
-            res = await db.execute(select(func.sum(Invoice.total)).where(Invoice.status == "paid"))
-            deep_context["lifetime_sales"] = float(res.scalar() or 0)
+            redis_client = aioredis.from_url(
+                settings.REDIS_URL,
+                socket_connect_timeout=settings.REDIS_SOCKET_CONNECT_TIMEOUT,
+                socket_timeout=settings.REDIS_SOCKET_TIMEOUT,
+                decode_responses=True
+            )
+            cached = await redis_client.get(cache_key)
+            if cached:
+                static_context = json.loads(cached)
         except Exception as e:
-            logger.error(f"Failed to fetch lifetime sales for AI context: {e}")
+            logger.error(f"Redis cache read error in Copilot: {e}")
             
         try:
-            from app.models.expense import Expense
-            amount_col = getattr(Expense, "amount", getattr(Expense, "total", None))
-            if amount_col is not None:
-                res = await db.execute(select(func.sum(amount_col)))
-                deep_context["lifetime_expenses"] = float(res.scalar() or 0)
-        except Exception as e:
-            logger.error(f"Failed to fetch lifetime expenses for AI context: {e}")
-            
+            if not static_context:
+                static_context = {
+                    "lifetime_sales": 0.0,
+                    "lifetime_expenses": 0.0,
+                    "outstanding_debt": [],
+                    "low_stock_inventory": [],
+                    "recent_expenses": []
+                }
+                
+                try:
+                    from app.models.invoice import Invoice
+                    res = await db.execute(select(func.sum(Invoice.total)).where(Invoice.status == "paid"))
+                    static_context["lifetime_sales"] = float(res.scalar() or 0)
+                except Exception as e:
+                    logger.error(f"Failed to fetch lifetime sales for AI context: {e}")
+                    
+                try:
+                    from app.models.expense import Expense
+                    amount_col = getattr(Expense, "amount", getattr(Expense, "total", None))
+                    if amount_col is not None:
+                        res = await db.execute(select(func.sum(amount_col)))
+                        static_context["lifetime_expenses"] = float(res.scalar() or 0)
+                except Exception as e:
+                    logger.error(f"Failed to fetch lifetime expenses for AI context: {e}")
+
+                try:
+                    from app.models.b2b import B2BClient
+                    res = await db.execute(
+                        select(B2BClient)
+                        .where(B2BClient.is_active == True, B2BClient.outstanding > 0)
+                        .order_by(B2BClient.outstanding.desc())
+                        .limit(5)
+                    )
+                    static_context["outstanding_debt"] = [
+                        {"name": c.name, "amount": float(c.outstanding or 0)}
+                        for c in res.scalars().all()
+                    ]
+                except Exception as e:
+                    logger.error(f"Failed to fetch outstanding debt for AI context: {e}")
+                    
+                try:
+                    from app.models.product import Product
+                    res = await db.execute(select(Product).where(Product.is_active == True))
+                    products = res.scalars().all()
+                    low_stock = [
+                        {"name": p.name, "stock": float(p.stock or 0)}
+                        for p in products
+                        if float(p.stock or 0) <= float(p.min_stock or 5)
+                    ]
+                    low_stock.sort(key=lambda x: x["stock"])
+                    static_context["low_stock_inventory"] = low_stock[:5]
+                except Exception as e:
+                    logger.error(f"Failed to fetch low stock inventory for AI context: {e}")
+                    
+                try:
+                    from app.models.expense import Expense
+                    stmt = select(Expense).order_by(Expense.id.desc()).limit(5)
+                    
+                    if hasattr(Expense, "category") and hasattr(getattr(Expense, "category"), "property"):
+                        stmt = stmt.options(joinedload(Expense.category))
+                        
+                    res = await db.execute(stmt)
+                    for e in res.scalars().all():
+                        cat = getattr(e, "category", None)
+                        cat_name = cat.name if hasattr(cat, "name") else str(cat) if cat else "Unknown"
+                        static_context["recent_expenses"].append({
+                            "category": cat_name,
+                            "amount": float(getattr(e, "amount", getattr(e, "total", 0)))
+                        })
+                except Exception as e:
+                    logger.error(f"Failed to fetch recent expenses for AI context: {e}")
+                    
+                if redis_client:
+                    try:
+                        await redis_client.setex(cache_key, 3600, json.dumps(static_context))
+                    except Exception as e:
+                        logger.error(f"Redis cache write error in Copilot: {e}")
+        finally:
+            if redis_client:
+                try:
+                    await redis_client.aclose()
+                except Exception:
+                    pass
+
+        deep_context = static_context.copy()
+        deep_context["matched_products"] = []
+        
         try:
             ignore_words = {"what", "show", "tell", "product", "products", "detail", "details", "find", "search", "about", "for", "the", "and", "how", "much", "many", "have", "we", "do", "does", "is", "are"}
             clean_question = re.sub(r'[^\w\s]', '', question).lower()
@@ -62,54 +143,6 @@ class CloudCopilotProvider:
                     })
         except Exception as e:
             logger.error(f"Failed to fetch dynamic product search for AI context: {e}")
-
-        try:
-            from app.models.b2b import B2BClient
-            res = await db.execute(
-                select(B2BClient)
-                .where(B2BClient.is_active == True, B2BClient.outstanding > 0)
-                .order_by(B2BClient.outstanding.desc())
-                .limit(5)
-            )
-            deep_context["outstanding_debt"] = [
-                {"name": c.name, "amount": float(c.outstanding or 0)}
-                for c in res.scalars().all()
-            ]
-        except Exception as e:
-            logger.error(f"Failed to fetch outstanding debt for AI context: {e}")
-            
-        try:
-            from app.models.product import Product
-            res = await db.execute(select(Product).where(Product.is_active == True))
-            products = res.scalars().all()
-            low_stock = [
-                {"name": p.name, "stock": float(p.stock or 0)}
-                for p in products
-                if float(p.stock or 0) <= float(p.min_stock or 5)
-            ]
-            low_stock.sort(key=lambda x: x["stock"])
-            deep_context["low_stock_inventory"] = low_stock[:5]
-        except Exception as e:
-            logger.error(f"Failed to fetch low stock inventory for AI context: {e}")
-            
-        try:
-            from app.models.expense import Expense
-            stmt = select(Expense).order_by(Expense.id.desc()).limit(5)
-            
-            # Safely use joinedload if category is a mapped relationship to prevent greenlet_spawn errors
-            if hasattr(Expense, "category") and hasattr(getattr(Expense, "category"), "property"):
-                stmt = stmt.options(joinedload(Expense.category))
-                
-            res = await db.execute(stmt)
-            for e in res.scalars().all():
-                cat = getattr(e, "category", None)
-                cat_name = cat.name if hasattr(cat, "name") else str(cat) if cat else "Unknown"
-                deep_context["recent_expenses"].append({
-                    "category": cat_name,
-                    "amount": float(getattr(e, "amount", getattr(e, "total", 0)))
-                })
-        except Exception as e:
-            logger.error(f"Failed to fetch recent expenses for AI context: {e}")
             
         system_prompt = (
             "You are a business assistant. You have the Dashboard Summary (which is limited to a specific date range), "
