@@ -1,10 +1,14 @@
 from decimal import Decimal
+from pathlib import Path
 from typing import Optional
-from fastapi import APIRouter, Form, UploadFile, File, Depends
+from zipfile import BadZipFile
+
+from fastapi import APIRouter, Form, UploadFile, File, Depends, HTTPException
 from fastapi.responses import HTMLResponse, StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import delete, select
 import openpyxl, io
+from openpyxl.utils.exceptions import InvalidFileException
 
 from app.core.permissions import require_permission
 from app.core.security import get_current_user
@@ -53,6 +57,9 @@ ITEM_TYPE_ALIASES = {
     "ingredients": "ingredient",
 }
 
+ALLOWED_IMPORT_SUFFIXES = {".xlsx", ".xlsm", ".xltx", ".xltm"}
+MAX_IMPORT_UPLOAD_BYTES = 5 * 1024 * 1024
+
 
 def find_col(raw_headers, names):
     for name in names:
@@ -78,11 +85,47 @@ def normalize_item_type(value):
     return ITEM_TYPE_ALIASES.get(raw_value, raw_value)
 
 
+def _validate_upload_filename(file: UploadFile) -> str:
+    filename = (file.filename or "").strip() or "upload.xlsx"
+    suffix = Path(filename).suffix.lower()
+    if suffix not in ALLOWED_IMPORT_SUFFIXES:
+        allowed = ", ".join(sorted(ALLOWED_IMPORT_SUFFIXES))
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported file type. Please upload one of: {allowed}.",
+        )
+    return filename
+
+
+async def _read_validated_excel_upload(file: UploadFile) -> tuple[str, bytes]:
+    filename = _validate_upload_filename(file)
+    await file.seek(0)
+    contents = await file.read(MAX_IMPORT_UPLOAD_BYTES + 1)
+    if not contents:
+        raise HTTPException(status_code=400, detail="Uploaded file is empty.")
+    if len(contents) > MAX_IMPORT_UPLOAD_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=f"File too large. Maximum allowed size is {MAX_IMPORT_UPLOAD_BYTES // (1024 * 1024)} MB.",
+        )
+    return filename, contents
+
+
+async def _load_validated_workbook(file: UploadFile):
+    _filename, contents = await _read_validated_excel_upload(file)
+    try:
+        return openpyxl.load_workbook(io.BytesIO(contents), data_only=True)
+    except (InvalidFileException, BadZipFile, OSError, ValueError) as exc:
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid Excel workbook. Please upload a valid .xlsx-compatible file.",
+        ) from exc
+
+
 # ── PREVIEW ────────────────────────────────────────────
 @router.post("/api/preview")
 async def preview_file(file: UploadFile = File(...)):
-    contents = await file.read()
-    wb = openpyxl.load_workbook(io.BytesIO(contents), data_only=True)
+    wb = await _load_validated_workbook(file)
     ws = wb.active
     max_col = min(ws.max_column, 10)
     headers = [str(ws.cell(1, c).value or "") for c in range(1, max_col + 1)]
@@ -95,8 +138,7 @@ async def preview_file(file: UploadFile = File(...)):
 # ── PRODUCTS ───────────────────────────────────────────
 @router.post("/api/products")
 async def import_products(file: UploadFile = File(...), db: AsyncSession = Depends(get_async_session)):
-    contents = await file.read()
-    wb = openpyxl.load_workbook(io.BytesIO(contents), data_only=True)
+    wb = await _load_validated_workbook(file)
     ws = wb.active
     hdrs = [str(ws.cell(1, c).value or "").strip().lower() for c in range(1, ws.max_column + 2)]
 
@@ -181,8 +223,7 @@ async def import_products(file: UploadFile = File(...), db: AsyncSession = Depen
 # ── STOCK ──────────────────────────────────────────────
 @router.post("/api/stock")
 async def import_stock(file: UploadFile = File(...), db: AsyncSession = Depends(get_async_session)):
-    contents = await file.read()
-    wb = openpyxl.load_workbook(io.BytesIO(contents), data_only=True)
+    wb = await _load_validated_workbook(file)
     ws = wb.active
     hdrs = [str(ws.cell(1, c).value or "").strip().lower() for c in range(1, ws.max_column + 2)]
 
@@ -246,8 +287,7 @@ async def import_stock(file: UploadFile = File(...), db: AsyncSession = Depends(
 # ── CUSTOMERS ──────────────────────────────────────────
 @router.post("/api/customers")
 async def import_customers(file: UploadFile = File(...), db: AsyncSession = Depends(get_async_session)):
-    contents = await file.read()
-    wb = openpyxl.load_workbook(io.BytesIO(contents), data_only=True)
+    wb = await _load_validated_workbook(file)
     ws = wb.active
     hdrs = [str(ws.cell(1, c).value or "").strip().lower() for c in range(1, ws.max_column + 2)]
 
@@ -313,11 +353,11 @@ async def import_sales_endpoint(
     force=True: skip duplicate detection and re-import even if records exist.
     default_cost_ratio: if set, auto-created products get cost = price × ratio.
     """
-    contents = await file.read()
+    filename, contents = await _read_validated_excel_upload(file)
     return await import_sales(
         db=db,
         workbook_bytes=contents,
-        filename=file.filename or "upload.xlsx",
+        filename=filename,
         current_user_id=current_user.id,
         dry_run=dry_run,
         mode=mode,
@@ -546,11 +586,11 @@ async def import_b2b_sales_endpoint(
     db: AsyncSession = Depends(get_async_session),
     current_user=Depends(get_current_user),
 ):
-    contents = await file.read()
+    filename, contents = await _read_validated_excel_upload(file)
     return await import_b2b_sales(
         db=db,
         workbook_bytes=contents,
-        filename=file.filename or "upload.xlsx",
+        filename=filename,
         current_user_id=current_user.id,
         dry_run=dry_run,
         mode=mode,
@@ -763,11 +803,11 @@ async def import_farm_intake_endpoint(
     db: AsyncSession = Depends(get_async_session),
     current_user=Depends(get_current_user),
 ):
-    contents = await file.read()
+    filename, contents = await _read_validated_excel_upload(file)
     return await import_farm_intake(
         db=db,
         workbook_bytes=contents,
-        filename=file.filename or "farm_intake.xlsx",
+        filename=filename,
         current_user_id=current_user.id,
         dry_run=dry_run,
         record_stock_movement=record_stock_movement,
@@ -837,11 +877,11 @@ async def import_expenses_endpoint(
     db: AsyncSession = Depends(get_async_session),
     current_user=Depends(get_current_user),
 ):
-    contents = await file.read()
+    filename, contents = await _read_validated_excel_upload(file)
     return await import_expenses(
         db=db,
         workbook_bytes=contents,
-        filename=file.filename or "expenses.xlsx",
+        filename=filename,
         current_user=current_user,
         dry_run=dry_run,
     )
@@ -926,11 +966,11 @@ async def import_receive_products_endpoint(
     db: AsyncSession = Depends(get_async_session),
     current_user=Depends(get_current_user),
 ):
-    contents = await file.read()
+    filename, contents = await _read_validated_excel_upload(file)
     return await import_receive_products(
         db=db,
         workbook_bytes=contents,
-        filename=file.filename or "receive_products.xlsx",
+        filename=filename,
         current_user=current_user,
         dry_run=dry_run,
     )
@@ -1146,7 +1186,7 @@ td{padding:8px 12px;border-top:1px solid var(--border);color:var(--sub);white-sp
                     <div class="col-row"><span class="col-excel">Item Type</span><span class="col-arrow">→</span><span class="col-field">Raw / Finished / Fresh / Packing / Ingredient</span><span class="col-opt">(defaults to finished)</span></div>
                 </div>
                 <div class="drop-zone" id="drop-products" ondragover="onDrag(event,'products')" ondragleave="offDrag('products')" ondrop="onDrop(event,'products')">
-                    <input type="file" accept=".xlsx,.xls" onchange="onFile(this,'products')">
+                    <input type="file" accept=".xlsx,.xlsm,.xltx,.xltm" onchange="onFile(this,'products')">
                     <div class="drop-icon">📄</div>
                     <div class="drop-text">Click or drag products.xlsx here</div>
                     <div class="drop-hint" id="hint-products">Same SKU = update existing product</div>
@@ -1178,7 +1218,7 @@ td{padding:8px 12px;border-top:1px solid var(--border);color:var(--sub);white-sp
                     </div>
                 </div>
                 <div class="drop-zone" id="drop-stock" ondragover="onDrag(event,'stock')" ondragleave="offDrag('stock')" ondrop="onDrop(event,'stock')">
-                    <input type="file" accept=".xlsx,.xls" onchange="onFile(this,'stock')">
+                    <input type="file" accept=".xlsx,.xlsm,.xltx,.xltm" onchange="onFile(this,'stock')">
                     <div class="drop-icon">📊</div>
                     <div class="drop-text">Click or drag SOH.xlsx here</div>
                     <div class="drop-hint" id="hint-stock">Overwrites current stock for matched SKUs</div>
@@ -1213,7 +1253,7 @@ td{padding:8px 12px;border-top:1px solid var(--border);color:var(--sub);white-sp
                     <div class="col-row"><span class="col-excel">Address</span><span class="col-arrow">→</span><span class="col-field">Address / Area</span></div>
                 </div>
                 <div class="drop-zone" id="drop-customers" ondragover="onDrag(event,'customers')" ondragleave="offDrag('customers')" ondrop="onDrop(event,'customers')">
-                    <input type="file" accept=".xlsx,.xls" onchange="onFile(this,'customers')">
+                    <input type="file" accept=".xlsx,.xlsm,.xltx,.xltm" onchange="onFile(this,'customers')">
                     <div class="drop-icon">📋</div>
                     <div class="drop-text">Click or drag Customers.xlsx here</div>
                     <div class="drop-hint" id="hint-customers">Duplicates automatically skipped</div>
@@ -1262,7 +1302,7 @@ td{padding:8px 12px;border-top:1px solid var(--border);color:var(--sub);white-sp
                 </div>
 
                 <div class="drop-zone" id="drop-receive-products" ondragover="onDrag(event,'receive-products')" ondragleave="offDrag('receive-products')" ondrop="onDrop(event,'receive-products')">
-                    <input type="file" accept=".xlsx,.xls" onchange="onFile(this,'receive-products')">
+                    <input type="file" accept=".xlsx,.xlsm,.xltx,.xltm" onchange="onFile(this,'receive-products')">
                     <div class="drop-icon">&#128230;</div>
                     <div class="drop-text">Click or drag receive_products.xlsx here</div>
                     <div class="drop-hint" id="hint-receive-products">Uses the same stock and expense logic as Receive Products</div>
@@ -1314,7 +1354,7 @@ td{padding:8px 12px;border-top:1px solid var(--border);color:var(--sub);white-sp
                 </div>
 
                 <div class="drop-zone" id="drop-expenses" ondragover="onDrag(event,'expenses')" ondragleave="offDrag('expenses')" ondrop="onDrop(event,'expenses')">
-                    <input type="file" accept=".xlsx,.xls" onchange="onFile(this,'expenses')">
+                    <input type="file" accept=".xlsx,.xlsm,.xltx,.xltm" onchange="onFile(this,'expenses')">
                     <div class="drop-icon">&#128184;</div>
                     <div class="drop-text">Click or drag expenses.xlsx here</div>
                     <div class="drop-hint" id="hint-expenses">Blank Farm rows are recorded as General Expense</div>
@@ -1405,7 +1445,7 @@ td{padding:8px 12px;border-top:1px solid var(--border);color:var(--sub);white-sp
                 </div>
 
                 <div class="drop-zone" id="drop-sales" ondragover="onDrag(event,'sales')" ondragleave="offDrag('sales')" ondrop="onDrop(event,'sales')">
-                    <input type="file" accept=".xlsx,.xls" onchange="onFile(this,'sales')">
+                    <input type="file" accept=".xlsx,.xlsm,.xltx,.xltm" onchange="onFile(this,'sales')">
                     <div class="drop-icon">🧾</div>
                     <div class="drop-text">Click or drag sales.xlsx here</div>
                     <div class="drop-hint" id="hint-sales">Rows with same Customer + Date become one invoice</div>
@@ -1462,7 +1502,7 @@ td{padding:8px 12px;border-top:1px solid var(--border);color:var(--sub);white-sp
                 </div>
 
                 <div class="drop-zone" id="drop-farm-intake" ondragover="onDrag(event,'farm-intake')" ondragleave="offDrag('farm-intake')" ondrop="onDrop(event,'farm-intake')">
-                    <input type="file" accept=".xlsx,.xls" onchange="onFile(this,'farm-intake')">
+                    <input type="file" accept=".xlsx,.xlsm,.xltx,.xltm" onchange="onFile(this,'farm-intake')">
                     <div class="drop-icon">&#127806;</div>
                     <div class="drop-text">Click or drag farm_intake.xlsx here</div>
                     <div class="drop-hint" id="hint-farm-intake">Grouped by Farm + Date into delivery records</div>
@@ -1534,7 +1574,7 @@ td{padding:8px 12px;border-top:1px solid var(--border);color:var(--sub);white-sp
                 </div>
 
                 <div class="drop-zone" id="drop-b2b-sales" ondragover="onDrag(event,'b2b-sales')" ondragleave="offDrag('b2b-sales')" ondrop="onDrop(event,'b2b-sales')">
-                    <input type="file" accept=".xlsx,.xls" onchange="onFile(this,'b2b-sales')">
+                    <input type="file" accept=".xlsx,.xlsm,.xltx,.xltm" onchange="onFile(this,'b2b-sales')">
                     <div class="drop-icon">🏭</div>
                     <div class="drop-text">Click or drag b2b_sales.xlsx here</div>
                     <div class="drop-hint" id="hint-b2b-sales">Rows grouped by Client + Date + Payment type</div>

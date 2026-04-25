@@ -332,6 +332,7 @@ class CopilotRequest(BaseModel):
     question: str
     dashboard_context: Optional[Dict[str, Any]] = None
 
+@router.post("/dashboard/assistant")
 @router.post("/dashboard/assistant/ask")
 async def dashboard_assistant_ask(
     payload: CopilotRequest,

@@ -119,9 +119,8 @@ def create_app() -> FastAPI:
             re.compile(r"^/auth/.*"),
             re.compile(r".*/api/.*"),
             re.compile(r"^/import/.*"),
-            re.compile(r"^/invoice.*"),
             re.compile(r"^/health.*"),
-            re.compile(r"^/dashboard/assistant/.*"),
+            re.compile(r"^/dashboard/assistant(?:/.*)?$"),
         ],
     )
     app.add_middleware(RequestLoggingMiddleware)

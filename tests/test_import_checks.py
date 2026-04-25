@@ -1,6 +1,8 @@
 import asyncio
 import io
 
+import pytest
+from fastapi import HTTPException
 from starlette.datastructures import UploadFile
 
 from app.models.customer import Customer
@@ -110,6 +112,33 @@ def test_preview_file_returns_headers_rows_and_total() -> None:
     assert payload["headers"] == ["SKU", "Item", "Sales price"]
     assert payload["rows"] == [["1001", "Olives", "15"], ["1002", "Cheese", "25"]]
     assert payload["total_rows"] == 2
+
+
+def test_preview_file_rejects_unsupported_extension() -> None:
+    upload = _upload_workbook(
+        "products.xls",
+        [
+            ["SKU", "Item"],
+            ["1001", "Olives"],
+        ],
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        asyncio.run(import_data.preview_file(upload))
+
+    assert exc_info.value.status_code == 400
+    assert "Unsupported file type" in exc_info.value.detail
+
+
+def test_preview_file_rejects_oversized_upload(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(import_data, "MAX_IMPORT_UPLOAD_BYTES", 8)
+    upload = UploadFile(filename="huge.xlsx", file=io.BytesIO(b"123456789"))
+
+    with pytest.raises(HTTPException) as exc_info:
+        asyncio.run(import_data.preview_file(upload))
+
+    assert exc_info.value.status_code == 413
+    assert "File too large" in exc_info.value.detail
 
 
 def test_import_products_creates_and_updates_records() -> None:

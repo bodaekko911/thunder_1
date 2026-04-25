@@ -13,3 +13,7 @@ erp.db
 app/static/uploads
 *.pyc
 *.pyo
+*.dump
+*.bak
+*.sql
+pytest-cache-files-*
