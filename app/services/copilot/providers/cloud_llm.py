@@ -1,6 +1,6 @@
 import json
 import httpx
-from sqlalchemy import select
+from sqlalchemy import select, or_, func
 from sqlalchemy.orm import joinedload
 from app.core.log import logger
 from app.core.config import settings
@@ -17,11 +17,56 @@ class CloudCopilotProvider:
         url = "https://api.groq.com/openai/v1/chat/completions"
         
         deep_context = {
+            "lifetime_sales": 0.0,
+            "lifetime_expenses": 0.0,
             "outstanding_debt": [],
             "low_stock_inventory": [],
-            "recent_expenses": []
+            "recent_expenses": [],
+            "matched_products": []
         }
         
+        try:
+            from app.models.invoice import Invoice
+            res = await db.execute(select(func.sum(Invoice.total)).where(Invoice.status == "paid"))
+            deep_context["lifetime_sales"] = float(res.scalar() or 0)
+        except Exception as e:
+            logger.error(f"Failed to fetch lifetime sales for AI context: {e}")
+            
+        try:
+            from app.models.expense import Expense
+            amount_col = getattr(Expense, "amount", getattr(Expense, "total", None))
+            if amount_col is not None:
+                res = await db.execute(select(func.sum(amount_col)))
+                deep_context["lifetime_expenses"] = float(res.scalar() or 0)
+        except Exception as e:
+            logger.error(f"Failed to fetch lifetime expenses for AI context: {e}")
+            
+        try:
+            stop_words = {"what", "show", "tell", "does", "have", "give", "some", "this", "that", "with", "from", "find", "search", "about", "there", "need", "know", "much"}
+            words = [w.strip("?.,!") for w in question.lower().split() if len(w.strip("?.,!")) > 3]
+            keywords = [w for w in words if w not in stop_words]
+            
+            if keywords:
+                from app.models.product import Product
+                conditions = [Product.name.ilike(f"%{kw}%") for kw in keywords]
+                stmt = select(Product).where(Product.is_active == True, or_(*conditions)).limit(5)
+                
+                if hasattr(Product, "category") and hasattr(getattr(Product, "category"), "property"):
+                    stmt = stmt.options(joinedload(Product.category))
+                    
+                res = await db.execute(stmt)
+                for p in res.scalars().all():
+                    cat = getattr(p, "category", None)
+                    cat_name = cat.name if hasattr(cat, "name") else str(cat) if cat else "Unknown"
+                    deep_context["matched_products"].append({
+                        "name": p.name,
+                        "stock": float(p.stock or 0),
+                        "price": float(p.price or 0),
+                        "category": cat_name
+                    })
+        except Exception as e:
+            logger.error(f"Failed to fetch dynamic product search for AI context: {e}")
+
         try:
             from app.models.b2b import B2BClient
             res = await db.execute(
@@ -71,8 +116,9 @@ class CloudCopilotProvider:
             logger.error(f"Failed to fetch recent expenses for AI context: {e}")
             
         system_prompt = (
-            "You are a business assistant. Use the provided Dashboard Summary and the Deep Business Context "
-            "to answer the user's questions accurately."
+            "You are a business assistant. You have the Dashboard Summary (which is limited to a specific date range), "
+            "as well as Global Lifetime Stats and Dynamic Product Search Results matching the user's question. "
+            "Use the provided context to answer the user's questions accurately."
         )
         
         if dashboard_context:
