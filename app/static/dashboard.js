@@ -5,14 +5,13 @@ let lastUpdatedAt = null;
 let elapsedTimer = null;
 let refreshTimer = null;
 let salesChart = null;
+let topProductsTab = "revenue";
+let activityFilter = "all";
 let dashboardData = null;
 let currentUser = null;
 let dashboardAbortController = null;
 let dashboardRequestId = 0;
 let dashboardHasLoaded = false;
-let assistantRequestInFlight = false;
-const AI_ASSISTANT_MAX_QUESTION_CHARS = 500;
-const AI_ASSISTANT_CONTEXT_LIST_LIMIT = 5;
 
 function escHtml(value) {
   return String(value || "").replace(/[&<>"']/g, (char) => (
@@ -81,7 +80,7 @@ function initTheme() {
 function refreshThemeUi() {
   const theme = window.__appTheme ? window.__appTheme.get() : (document.documentElement.dataset.theme || "dark");
   document.getElementById("mode-btn").innerHTML = theme === "light" ? "&#9728;&#65039;" : "&#127769;";
-  if (dashboardData) renderChart();
+  if (salesChart) salesChart.update("none");
 }
 
 function updateRangeButtons() {
@@ -159,118 +158,72 @@ function tooltipForCard(key) {
   return tips[key] || "";
 }
 
-function periodDescriptor() {
-  const range = dashboardData?.range || {};
-  if (range.days === 1) return "day";
-  if (range.days) return `${range.days} days`;
-  return "period";
+function cardSpec(key) {
+  const rangeLabel = dashboardData?.range?.label || "this period";
+  if (key === "sales") {
+    return {
+      label: dashboardData?.range?.label === "Today" ? "Sales today" : `Sales ${rangeLabel.toLowerCase()}`,
+      value: formatMoney(dashboardData?.numbers?.sales?.value || 0),
+      meta: numberDeltaText("sales", dashboardData?.numbers?.sales),
+      sparkline: dashboardData?.numbers?.sales?.sparkline || [],
+      tooltip: tooltipForCard("sales"),
+    };
+  }
+  if (key === "clients_owe" && !(dashboardData?.viewer?.can_view_b2b)) {
+    return {
+      label: "Sales today",
+      value: formatMoney(dashboardData?.viewer?.alt_sales_today?.value || 0),
+      meta: "Your shift total so far",
+      sparkline: [],
+      tooltip: tooltipForCard("sales_today"),
+    };
+  }
+  if (key === "clients_owe") {
+    return {
+      label: "Money clients owe you",
+      value: formatMoney(dashboardData?.numbers?.clients_owe?.value || 0),
+      meta: `${formatNumber(dashboardData?.numbers?.clients_owe?.overdue_count || 0)} overdue`,
+      sparkline: [],
+      tooltip: tooltipForCard("clients_owe"),
+    };
+  }
+  if (key === "spent") {
+    return {
+      label: dashboardData?.range?.label === "Today" ? "Money you've spent today" : `Money you've spent ${rangeLabel.toLowerCase()}`,
+      value: formatMoney(dashboardData?.numbers?.spent?.value || 0),
+      meta: numberDeltaText("spent", dashboardData?.numbers?.spent),
+      sparkline: dashboardData?.numbers?.spent?.sparkline || [],
+      tooltip: tooltipForCard("spent"),
+    };
+  }
+  return {
+    label: "Stock alerts",
+    value: `${formatNumber(dashboardData?.numbers?.stock_alerts?.value || 0)} items`,
+    meta: `${formatNumber(dashboardData?.numbers?.stock_alerts?.out_count || 0)} out · ${formatNumber(dashboardData?.numbers?.stock_alerts?.low_count || 0)} low`,
+    sparkline: [],
+    tooltip: tooltipForCard("stock_alerts"),
+  };
 }
 
-function currentThemeValue() {
-  return window.__appTheme ? window.__appTheme.get() : (document.documentElement.dataset.theme || "dark");
+function sparklineBars(values) {
+  if (!values?.length) return "";
+  const max = Math.max(...values, 1);
+  return values.map((value) => `<span style="height:${Math.max(6, Math.round((value / max) * 40))}px"></span>`).join("");
 }
 
-function chartLabels(buckets) {
-  const granularity = dashboardData?.range?.granularity || "day";
-  return buckets.map((bucket) => {
-    const date = new Date(`${bucket.date}T12:00:00`);
-    if (granularity === "month") return date.toLocaleDateString("en-GB", { month: "short", year: "numeric" });
-    if (granularity === "week") return date.toLocaleDateString("en-GB", { day: "numeric", month: "short" });
-    return date.toLocaleDateString("en-GB", { day: "numeric", month: "short" });
+function renderNumbers() {
+  ["sales", "clients_owe", "spent", "stock_alerts"].forEach((key) => {
+    const node = document.querySelector(`[data-card="${key}"]`);
+    const spec = cardSpec(key);
+    node.innerHTML = `
+      <div class="number-card-button" data-tooltip="${escHtml(spec.tooltip)}">
+        <span class="number-label">${escHtml(spec.label)}</span>
+        <strong class="number-value">${escHtml(spec.value)}</strong>
+        <span class="number-meta">${escHtml(spec.meta)}</span>
+        ${spec.sparkline.length ? `<div class="sparkline-bars">${sparklineBars(spec.sparkline)}</div>` : `<div class="number-breakdown">${escHtml(spec.meta)}</div>`}
+      </div>
+    `;
   });
-}
-
-function quarterTickIndexes(length) {
-  if (length <= 1) return new Set([0]);
-  const max = length - 1;
-  return new Set([
-    0,
-    Math.round(max * 0.25),
-    Math.round(max * 0.75),
-    max,
-  ]);
-}
-
-function getPaceInsight() {
-  return (dashboardData?.insights || []).find((item) => item.kind === "pace") || null;
-}
-
-function setEmptyState(isEmpty) {
-  const briefing = document.getElementById("briefing-container");
-  const trend = document.getElementById("trend-section");
-  const stats = document.getElementById("editorial-stats");
-  const bestsellers = document.getElementById("bestsellers-column");
-
-  briefing.style.display = isEmpty ? "block" : "none";
-  trend.style.display = isEmpty ? "none" : "block";
-  stats.style.display = isEmpty ? "none" : "grid";
-  bestsellers.style.display = isEmpty ? "none" : "block";
-}
-
-function renderHero() {
-  const rangeLabel = dashboardData?.range?.label || "This period";
-  const sales = dashboardData?.numbers?.sales || {};
-  const shiftOverride = dashboardData?.viewer?.can_view_b2b === false ? dashboardData?.viewer?.alt_sales_today : null;
-  const useShiftValue = shiftOverride && Number(shiftOverride.value || 0) > 0;
-  const heroValue = useShiftValue ? Number(shiftOverride.value || 0) : Number(sales.value || 0);
-  const prevValue = Number(sales.prev_value || 0);
-  const deltaPct = sales.delta_pct;
-  const emptySalesState = !useShiftValue && Number(sales.value || 0) <= 0;
-
-  document.getElementById("hero-eyebrow").textContent = useShiftValue
-    ? "YOUR SHIFT TODAY"
-    : `NET SALES · ${String(rangeLabel).toUpperCase()}`;
-  document.getElementById("hero-sales-value").textContent = formatMoney(heroValue);
-
-  const chip = document.getElementById("hero-sales-chip");
-  if (useShiftValue || deltaPct === null || deltaPct === undefined) {
-    chip.style.display = "none";
-  } else {
-    chip.style.display = "inline-flex";
-    chip.textContent = `${deltaPct >= 0 ? "↑" : "↓"} ${Math.abs(Number(deltaPct)).toFixed(1)}%`;
-    chip.className = `hero-chip ${deltaPct >= 0 ? "positive" : "negative"}`;
-  }
-
-  const narrative = document.getElementById("hero-narrative");
-  if (useShiftValue) {
-    narrative.textContent = "Your total sales recorded so far in this shift.";
-  } else if (emptySalesState || prevValue <= 0) {
-    narrative.textContent = "You haven't recorded any sales yet for this period.";
-  } else {
-    const diff = Math.abs(heroValue - prevValue);
-    const direction = heroValue >= prevValue ? "more" : "less";
-    const paceClause = getPaceInsight() ? " Momentum is stronger in the back half of the period." : "";
-    narrative.textContent = `That's ${formatMoney(diff)} ${direction} than the previous ${periodDescriptor()}.${paceClause}`;
-  }
-
-  setEmptyState(emptySalesState);
-}
-
-function renderEditorialStats() {
-  const owe = dashboardData?.numbers?.clients_owe || {};
-  const spent = dashboardData?.numbers?.spent || {};
-  const margin = dashboardData?.numbers?.margin || {};
-
-  document.getElementById("ed-owe-value").textContent = formatMoney(owe.value || 0);
-  document.getElementById("ed-owe-prose").textContent = `Across your B2B ledger. ${formatNumber(owe.overdue_count || 0)} invoices over 30 days old.`;
-
-  document.getElementById("ed-spent-value").textContent = formatMoney(spent.value || 0);
-  document.getElementById("ed-spent-prose").textContent = spent.delta_pct === null || spent.delta_pct === undefined
-    ? "No comparison available yet."
-    : `${spent.delta_pct >= 0 ? "Up" : "Down"} ${Math.abs(Number(spent.delta_pct)).toFixed(1)}% on the previous period.`;
-
-  const marginValue = document.getElementById("ed-margin-value");
-  const marginProse = document.getElementById("ed-margin-prose");
-  if (margin.value_pct === null || margin.value_pct === undefined) {
-    marginValue.textContent = "—";
-    marginProse.textContent = "No cost data on items yet.";
-    return;
-  }
-
-  marginValue.textContent = `${Number(margin.value_pct).toFixed(1)}%`;
-  marginProse.textContent = margin.delta_pts === null || margin.delta_pts === undefined
-    ? "No comparison available yet."
-    : `${Number(margin.delta_pts) >= 0 ? "Improved" : "Fell"} ${Math.abs(Number(margin.delta_pts)).toFixed(1)} points vs last period.`;
 }
 
 function renderBriefing() {
@@ -288,151 +241,109 @@ function renderBriefing() {
   )).join("");
 }
 
+function chartTitle() {
+  const label = dashboardData?.range?.label || "This period";
+  return `Sales over time — ${label}`;
+}
+
+function chartLabels(buckets) {
+  const granularity = dashboardData?.range?.granularity || "day";
+  return buckets.map((bucket) => {
+    const date = new Date(`${bucket.date}T12:00:00`);
+    if (granularity === "month") return date.toLocaleDateString("en-GB", { month: "short", year: "numeric" });
+    if (granularity === "week") return `Week of ${date.toLocaleDateString("en-GB", { day: "numeric", month: "short" })}`;
+    return date.toLocaleDateString("en-GB", { day: "numeric", month: "short" });
+  });
+}
+
 function renderChart() {
-  const chartSection = document.getElementById("trend-section");
-  if (chartSection.style.display === "none") {
-    if (salesChart) {
-      salesChart.destroy();
-      salesChart = null;
-    }
-    return;
-  }
-
   const buckets = dashboardData?.chart?.buckets || [];
-  const labels = chartLabels(buckets);
-  const data = buckets.map((bucket) => (
-    Number(bucket.pos || 0) + Number(bucket.b2b || 0) + Number(bucket.refunds || 0)
-  ));
-  const tickIndexes = quarterTickIndexes(labels.length);
-  const styles = getComputedStyle(document.documentElement);
-  const accent = styles.getPropertyValue("--accent").trim();
-  const fill = styles.getPropertyValue("--chart-fill").trim();
-  const textMuted = styles.getPropertyValue("--text-muted").trim();
-
+  document.getElementById("chart-title").textContent = chartTitle();
+  document.getElementById("chart-table").innerHTML = `
+    <tr><th>Date</th><th>POS</th><th>B2B</th><th>Refunds</th><th>Orders</th></tr>
+    ${buckets.map((bucket) => `<tr><td>${bucket.date}</td><td>${formatMoneyPrecise(bucket.pos)}</td><td>${formatMoneyPrecise(bucket.b2b)}</td><td>${formatMoneyPrecise(bucket.refunds)}</td><td>${bucket.orders}</td></tr>`).join("")}
+  `;
+  const chartData = {
+    labels: chartLabels(buckets),
+    datasets: [
+      { label: "POS", data: buckets.map((bucket) => bucket.pos), backgroundColor: getComputedStyle(document.documentElement).getPropertyValue("--accent").trim(), stack: "sales" },
+      { label: "B2B", data: buckets.map((bucket) => bucket.b2b), backgroundColor: "#3b5f8a", stack: "sales" },
+      { label: "Refunds", data: buckets.map((bucket) => bucket.refunds), backgroundColor: "#b54040", stack: "sales" },
+    ],
+  };
   if (!salesChart) {
     salesChart = new Chart(document.getElementById("sales-chart"), {
-      type: "line",
-      data: {
-        labels,
-        datasets: [{
-          data,
-          fill: true,
-          borderColor: accent,
-          backgroundColor: fill,
-          tension: 0.35,
-          borderWidth: 2,
-          pointRadius: 0,
-          pointHoverRadius: 4,
-          pointHitRadius: 18,
-        }],
-      },
+      type: "bar",
+      data: chartData,
       options: {
         responsive: true,
         maintainAspectRatio: false,
         animation: false,
         interaction: { mode: "index", intersect: false },
         plugins: {
-          legend: { display: false },
+          legend: { display: true, position: "top", align: "end" },
           tooltip: {
-            displayColors: false,
             callbacks: {
-              label(context) {
-                return formatMoneyPrecise(context.parsed.y || 0);
+              afterBody(items) {
+                const bucket = buckets[items[0]?.dataIndex || 0];
+                return [`Transactions: ${bucket?.orders || 0}`];
               },
             },
           },
         },
         scales: {
-          x: {
-            grid: { display: false, drawBorder: false },
-            border: { display: false },
-            ticks: {
-              color: textMuted,
-              maxRotation: 0,
-              autoSkip: false,
-              font: { family: "DM Sans", size: 11 },
-              callback(value, index) {
-                return tickIndexes.has(index) ? labels[index] : "";
-              },
-            },
-          },
-          y: {
-            display: false,
-            grid: { display: false, drawBorder: false },
-            border: { display: false },
-          },
+          x: { stacked: true, grid: { display: false } },
+          y: { stacked: true, grid: { display: false }, ticks: { display: false }, border: { display: false } },
         },
       },
     });
     return;
   }
-
-  salesChart.data.labels = labels;
-  salesChart.data.datasets[0].data = data;
-  salesChart.data.datasets[0].borderColor = accent;
-  salesChart.data.datasets[0].backgroundColor = fill;
-  salesChart.options.scales.x.ticks.color = textMuted;
-  salesChart.options.scales.x.ticks.callback = function(value, index) {
-    return tickIndexes.has(index) ? labels[index] : "";
+  salesChart.data.labels = chartData.labels;
+  salesChart.data.datasets.forEach((dataset, index) => {
+    dataset.data = chartData.datasets[index].data;
+    dataset.backgroundColor = chartData.datasets[index].backgroundColor;
+  });
+  salesChart.options.plugins.tooltip.callbacks.afterBody = (items) => {
+    const bucket = buckets[items[0]?.dataIndex || 0];
+    return [`Transactions: ${bucket?.orders || 0}`];
   };
   salesChart.update("none");
 }
 
+function topProductsTitle() {
+  const label = dashboardData?.range?.label || "This period";
+  return `Best-sellers ${label.toLowerCase()}`;
+}
+
 function renderTopProducts() {
-  const products = dashboardData?.panels?.top_products_by_revenue || [];
+  document.getElementById("top-products-title").textContent = topProductsTitle();
+  const key = topProductsTab === "revenue" ? "top_products_by_revenue" : "top_products_by_qty";
+  const products = dashboardData?.panels?.[key] || [];
+  const maxValue = Math.max(...products.map((product) => topProductsTab === "revenue" ? Number(product.revenue || 0) : Number(product.qty || 0)), 1);
   const container = document.getElementById("top-products-list");
-  document.getElementById("top-products-title").textContent = `Best-sellers · ${dashboardData?.range?.label || "This period"}`;
   if (!products.length) {
     container.innerHTML = `<div class="empty-state">No products sold in this range.</div>`;
     return;
   }
-
-  container.innerHTML = products.slice(0, 5).map((product) => `
-    <div class="list-row">
-      <div class="row-main">
-        <span class="row-title">${escHtml(product.name)}</span>
-        <span class="row-units">${formatNumber(product.qty || 0)} units</span>
+  container.innerHTML = products.map((product) => {
+    const value = topProductsTab === "revenue" ? Number(product.revenue || 0) : Number(product.qty || 0);
+    const label = topProductsTab === "revenue" ? formatMoney(value) : `${formatNumber(value)} units`;
+    const width = Math.max(8, Math.round((value / maxValue) * 100));
+    return `
+      <div class="list-row top-product-row">
+        <div class="row-main">
+          <span class="row-title">${escHtml(product.name)}</span>
+          <span class="row-value">${escHtml(label)}</span>
+        </div>
+        <span class="row-bar"><span style="width:${width}%"></span></span>
       </div>
-      <span class="row-value">${formatMoney(product.revenue || 0)}</span>
-    </div>
-  `).join("");
-}
-
-function highlightInsightText(kind, text) {
-  let html = escHtml(text);
-  if (kind === "overdue") {
-    html = html.replace(/^([^<]+?) hasn&#39;t paid/, "<strong class=\"accent\">$1</strong> hasn&#39;t paid");
-    html = html.replace(/invoice (#\S+)/, "invoice <strong>$1</strong>");
-  } else if (kind === "stockout") {
-    html = html.replace(/^(\d+ products)/, "<strong>$1</strong>");
-    html = html.replace(/recently\. ([^.]+?) has been/, "recently. <strong class=\"accent\">$1</strong> has been");
-  } else if (kind === "pace") {
-    html = html.replace(/last (\d+ days)/, "last <strong>$1</strong>");
-    html = html.replace(/(\d+(\.\d+)?%)/, "<strong class=\"accent\">$1</strong>");
-  } else if (kind === "margin") {
-    html = html.replace(/(\d+(\.\d+)? points)/, "<strong class=\"accent\">$1</strong>");
-  } else if (kind === "weekday") {
-    html = html.replace(/^([A-Za-z]+s)/, "<strong class=\"accent\">$1</strong>");
-    html = html.replace(/overtaking ([A-Za-z]+s)/, "overtaking <strong>$1</strong>");
-  }
-  return html;
-}
-
-function renderInsights() {
-  const insights = dashboardData?.insights || [];
-  const container = document.getElementById("insights-list");
-  if (!insights.length) {
-    container.innerHTML = `<p class="insight-text">Nothing notable to flag for this period.</p>`;
-    return;
-  }
-
-  container.innerHTML = insights.map((item) => (
-    `<p class="insight-text">${highlightInsightText(item.kind, item.text)}</p>`
-  )).join("");
+    `;
+  }).join("");
 }
 
 function renderRecentActivity() {
-  const rows = dashboardData?.panels?.recent_activity || [];
+  const rows = (dashboardData?.panels?.recent_activity || []).filter((item) => activityFilter === "all" ? true : item.type === activityFilter);
   const tbody = document.getElementById("recent-activity");
   if (!rows.length) {
     tbody.innerHTML = `<tr><td colspan="4" class="empty-cell">No activity in this range.</td></tr>`;
@@ -442,7 +353,7 @@ function renderRecentActivity() {
     <tr data-link="${escHtml(item.link || "#")}">
       <td class="mono">${escHtml(item.invoice_number || "-")}</td>
       <td>${escHtml(item.customer || "-")}</td>
-      <td class="${item.type === "refund" ? "negative" : "positive"}">${item.type === "refund" ? `−${escHtml(formatMoney(Math.abs(item.total || 0)))}` : escHtml(formatMoney(item.total || 0))}</td>
+      <td class="${item.type === "refund" ? "negative" : "positive"}">${escHtml(item.type === "refund" ? `-${formatMoney(Math.abs(item.total || 0))}` : formatMoney(item.total || 0))}</td>
       <td>${escHtml(item.time_relative || "-")}</td>
     </tr>
   `).join("");
@@ -481,11 +392,9 @@ async function loadDashboard() {
       dashboardHasLoaded = true;
     }
     renderBriefing();
-    renderHero();
-    renderEditorialStats();
+    renderNumbers();
     renderChart();
     renderTopProducts();
-    renderInsights();
     renderRecentActivity();
     markUpdated();
   } catch (error) {
@@ -553,123 +462,20 @@ function bindEvents() {
   document.getElementById("custom-range-modal").addEventListener("click", (event) => {
     if (event.target.id === "custom-range-modal") closeCustomRangePicker();
   });
-}
-
-function bindChatEvents() {
-  const trigger = document.getElementById("ai-chat-trigger");
-  const widget = document.getElementById("ai-chat-widget");
-  const closeBtn = document.getElementById("ai-chat-close");
-  const sendBtn = document.getElementById("ai-chat-send");
-  const input = document.getElementById("ai-chat-input");
-  const body = document.getElementById("ai-chat-body");
-
-  if (!trigger || !widget) return;
-
-  input.maxLength = AI_ASSISTANT_MAX_QUESTION_CHARS;
-
-  trigger.addEventListener("click", () => widget.classList.remove("hidden"));
-  closeBtn.addEventListener("click", () => widget.classList.add("hidden"));
-
-  function trimList(items, keys) {
-    if (!Array.isArray(items)) return [];
-    return items.slice(0, AI_ASSISTANT_CONTEXT_LIST_LIMIT).map((item) => {
-      const next = {};
-      if (!item || typeof item !== "object") return next;
-      keys.forEach((key) => {
-        if (Object.prototype.hasOwnProperty.call(item, key)) next[key] = item[key];
-      });
-      return next;
+  document.querySelectorAll("[data-top-tab]").forEach((button) => {
+    button.addEventListener("click", () => {
+      topProductsTab = button.dataset.topTab;
+      document.querySelectorAll("[data-top-tab]").forEach((item) => item.classList.toggle("active", item === button));
+      renderTopProducts();
     });
-  }
-
-  function buildAssistantContext() {
-    const context = {
-      range: currentRange,
-      start: currentRange === "custom" ? customStart : undefined,
-      end: currentRange === "custom" ? customEnd : undefined,
-    };
-    if (!dashboardData) return context;
-
-    if (dashboardData.range) {
-      context.range = dashboardData.range.key || dashboardData.range.label || currentRange;
-      context.start = dashboardData.range.date_from || context.start;
-      context.end = dashboardData.range.date_to || context.end;
-    }
-    if (dashboardData.numbers) {
-      context.numbers = {
-        sales: dashboardData.numbers.sales,
-        clients_owe: dashboardData.numbers.clients_owe,
-        spent: dashboardData.numbers.spent,
-        stock_alerts: dashboardData.numbers.stock_alerts,
-      };
-    }
-    if (dashboardData.panels) {
-      context.panels = {
-        top_products_by_revenue: trimList(dashboardData.panels.top_products_by_revenue, ["name", "qty", "revenue"]),
-        top_products_by_qty: trimList(dashboardData.panels.top_products_by_qty, ["name", "qty", "revenue"]),
-        recent_activity: trimList(dashboardData.panels.recent_activity, ["invoice_number", "customer", "total", "type", "time_relative"]),
-      };
-    }
-    if (dashboardData.briefing) {
-      context.briefing = {
-        lead: dashboardData.briefing.lead,
-        body: dashboardData.briefing.body,
-      };
-    }
-    return context;
-  }
-
-  const sendCopilotQuestion = async () => {
-    const text = input.value.trim();
-    if (!text || assistantRequestInFlight) return;
-    if (text.length > AI_ASSISTANT_MAX_QUESTION_CHARS) {
-      body.innerHTML += `<div class="chat-bubble ai error">Questions must be ${AI_ASSISTANT_MAX_QUESTION_CHARS} characters or fewer.</div>`;
-      body.scrollTop = body.scrollHeight;
-      return;
-    }
-    
-    input.value = "";
-    assistantRequestInFlight = true;
-    sendBtn.disabled = true;
-    input.disabled = true;
-    body.innerHTML += `<div class="chat-bubble user">${escHtml(text)}</div>`;
-    body.scrollTop = body.scrollHeight;
-    
-    const thinkingId = "thinking-" + Date.now();
-    body.innerHTML += `<div id="${thinkingId}" class="chat-bubble ai thinking">Thinking...</div>`;
-    body.scrollTop = body.scrollHeight;
-    
-    try {
-      const res = await fetch("/dashboard/assistant/ask", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ question: text, dashboard_context: buildAssistantContext() })
-      });
-      if (!res.ok) {
-        let errorMessage = "Failed to get response.";
-        try {
-          const errorPayload = await res.json();
-          errorMessage = errorPayload.detail || errorPayload.content || errorMessage;
-        } catch {}
-        throw new Error(errorMessage);
-      }
-      const data = await res.json();
-      document.getElementById(thinkingId).remove();
-      body.innerHTML += `<div class="chat-bubble ai">${escHtml(data.content)}</div>`;
-    } catch (err) {
-      document.getElementById(thinkingId).remove();
-      body.innerHTML += `<div class="chat-bubble ai error">${escHtml(err.message || "Failed to get response.")}</div>`;
-    } finally {
-      assistantRequestInFlight = false;
-      sendBtn.disabled = false;
-      input.disabled = false;
-      input.focus();
-    }
-    body.scrollTop = body.scrollHeight;
-  };
-
-  sendBtn.addEventListener("click", sendCopilotQuestion);
-  input.addEventListener("keypress", (e) => { if (e.key === "Enter") sendCopilotQuestion(); });
+  });
+  document.querySelectorAll("[data-activity-filter]").forEach((button) => {
+    button.addEventListener("click", () => {
+      activityFilter = button.dataset.activityFilter;
+      document.querySelectorAll("[data-activity-filter]").forEach((item) => item.classList.toggle("active", item === button));
+      renderRecentActivity();
+    });
+  });
 }
 
 function startAutoRefresh() {
@@ -685,7 +491,6 @@ async function initDashboard() {
   bindEvents();
   await initUser();
   await loadDashboard();
-  bindChatEvents();
   startAutoRefresh();
 }
 

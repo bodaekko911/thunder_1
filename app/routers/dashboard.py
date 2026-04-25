@@ -1,14 +1,8 @@
-from collections import defaultdict, deque
 from datetime import date, datetime, timedelta
-import asyncio
-import json
-import time
-from typing import Any, Dict, Optional
+from typing import Optional
 
-import redis.asyncio as aioredis
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import HTMLResponse
-from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
@@ -31,172 +25,7 @@ router = APIRouter(
     dependencies=[Depends(require_permission("page_dashboard"))],
 )
 
-_assistant_rate_limit_fallback: dict[str, deque[float]] = defaultdict(deque)
-_assistant_rate_limit_lock = asyncio.Lock()
-_assistant_redis_client = None
-
-
-def _get_assistant_redis_client():
-    global _assistant_redis_client
-    if _assistant_redis_client is None:
-        _assistant_redis_client = aioredis.from_url(
-            settings.REDIS_URL,
-            socket_connect_timeout=settings.REDIS_SOCKET_CONNECT_TIMEOUT,
-            socket_timeout=settings.REDIS_SOCKET_TIMEOUT,
-            decode_responses=True,
-        )
-    return _assistant_redis_client
-
-
-def _client_ip(request: Request) -> str:
-    forwarded_for = request.headers.get("x-forwarded-for", "")
-    if forwarded_for:
-        return forwarded_for.split(",", 1)[0].strip() or "unknown"
-    if request.client and request.client.host:
-        return request.client.host
-    return "unknown"
-
-
-def _assistant_rate_limit_key(request: Request, current_user: User) -> str:
-    user_id = getattr(current_user, "id", None)
-    if user_id is not None:
-        return f"user:{user_id}"
-    return f"ip:{_client_ip(request)}"
-
-
-async def _enforce_assistant_rate_limit(request: Request, current_user: User) -> None:
-    limit = max(1, int(settings.ASSISTANT_RATE_LIMIT_REQUESTS))
-    window = max(1, int(settings.ASSISTANT_RATE_LIMIT_WINDOW_SECONDS))
-    key = _assistant_rate_limit_key(request, current_user)
-    redis_key = f"assistant:rate_limit:{key}"
-
-    try:
-        redis_client = _get_assistant_redis_client()
-        current = await redis_client.incr(redis_key)
-        if current == 1:
-            await redis_client.expire(redis_key, window)
-        if current > limit:
-            raise HTTPException(
-                status_code=429,
-                detail=f"Assistant rate limit exceeded. Try again in about {window} seconds.",
-            )
-        return
-    except HTTPException:
-        raise
-    except Exception:
-        pass
-
-    now = time.monotonic()
-    async with _assistant_rate_limit_lock:
-        bucket = _assistant_rate_limit_fallback[key]
-        while bucket and now - bucket[0] >= window:
-            bucket.popleft()
-        if len(bucket) >= limit:
-            raise HTTPException(
-                status_code=429,
-                detail=f"Assistant rate limit exceeded. Try again in about {window} seconds.",
-            )
-        bucket.append(now)
-
-
-def _trim_text(value: Any, *, limit: int = 160) -> str:
-    text = str(value or "").strip()
-    return text[:limit]
-
-
-def _trim_list_of_dicts(items: Any, *, keys: tuple[str, ...]) -> list[dict[str, Any]]:
-    if not isinstance(items, list):
-        return []
-    trimmed: list[dict[str, Any]] = []
-    for item in items[: settings.ASSISTANT_CONTEXT_LIST_LIMIT]:
-        if not isinstance(item, dict):
-            continue
-        trimmed.append({key: item.get(key) for key in keys if key in item})
-    return trimmed
-
-
-def _trim_dashboard_context(dashboard_context: dict[str, Any] | None) -> dict[str, Any] | None:
-    if not dashboard_context:
-        return None
-
-    trimmed: dict[str, Any] = {}
-
-    range_key = dashboard_context.get("range")
-    if isinstance(range_key, dict):
-        trimmed["range"] = {
-            key: range_key.get(key)
-            for key in ("key", "label", "date_from", "date_to", "granularity")
-            if key in range_key
-        }
-    elif isinstance(range_key, str):
-        trimmed["range"] = range_key
-
-    for key in ("start", "end"):
-        value = dashboard_context.get(key)
-        if value:
-            trimmed[key] = str(value)
-
-    numbers = dashboard_context.get("numbers")
-    if isinstance(numbers, dict):
-        kept_numbers: dict[str, Any] = {}
-        for key in ("sales", "clients_owe", "spent", "stock_alerts"):
-            value = numbers.get(key)
-            if isinstance(value, dict):
-                kept_numbers[key] = {
-                    sub_key: value.get(sub_key)
-                    for sub_key in ("value", "delta_pct", "overdue_count", "out_count", "low_count")
-                    if sub_key in value
-                }
-        if kept_numbers:
-            trimmed["numbers"] = kept_numbers
-
-    panels = dashboard_context.get("panels")
-    if isinstance(panels, dict):
-        kept_panels: dict[str, Any] = {}
-        top_revenue = _trim_list_of_dicts(
-            panels.get("top_products_by_revenue"),
-            keys=("name", "qty", "revenue"),
-        )
-        if top_revenue:
-            kept_panels["top_products_by_revenue"] = top_revenue
-        top_qty = _trim_list_of_dicts(
-            panels.get("top_products_by_qty"),
-            keys=("name", "qty", "revenue"),
-        )
-        if top_qty:
-            kept_panels["top_products_by_qty"] = top_qty
-        recent_activity = _trim_list_of_dicts(
-            panels.get("recent_activity"),
-            keys=("invoice_number", "customer", "total", "type", "time_relative"),
-        )
-        if recent_activity:
-            kept_panels["recent_activity"] = recent_activity
-        if kept_panels:
-            trimmed["panels"] = kept_panels
-
-    briefing = dashboard_context.get("briefing")
-    if isinstance(briefing, dict):
-        kept_briefing = {
-            "lead": _trim_text(briefing.get("lead")),
-            "body": _trim_text(briefing.get("body"), limit=240),
-        }
-        trimmed["briefing"] = {key: value for key, value in kept_briefing.items() if value}
-
-    if trimmed:
-        serialized = json.dumps(trimmed, default=str, separators=(",", ":"))
-        if len(serialized) > settings.ASSISTANT_MAX_CONTEXT_CHARS:
-            raise HTTPException(
-                status_code=413,
-                detail="Assistant dashboard context is too large. Refresh the dashboard and try again.",
-            )
-
-    return trimmed or None
-
-
-def _reset_assistant_rate_limit_state() -> None:
-    _assistant_rate_limit_fallback.clear()
-
-# ── legacy data endpoint ───────────────────────────────────────────────
+# ── legacy data endpoint ─────────────────────────────────────────────
 
 @router.get("/dashboard/data")
 async def dashboard_data(db: AsyncSession = Depends(get_async_session)):
@@ -215,7 +44,7 @@ async def dashboard_data(db: AsyncSession = Depends(get_async_session)):
         month_s_u, month_e_u = utc_bounds(month_s, today)
         year_s_u,  year_e_u  = utc_bounds(year_s,  today)
 
-        # ── B2B revenue account (used by multiple sections) ─────────────
+        # ── B2B revenue account (used by multiple sections) ───────────
         rev_acc = None
         try:
             r = await db.execute(select(Account).where(Account.code == "4000"))
@@ -238,7 +67,7 @@ async def dashboard_data(db: AsyncSession = Depends(get_async_session)):
             )
             return float(r.scalar() or 0)
 
-        # ── POS SALES ──────────────────────────────────────────────────
+        # ── POS SALES ─────────────────────────────────────────────────
         pos_today = pos_month = pos_year = 0.0
         ref_today = ref_month = ref_year = 0.0
         ref_count_today = ref_count_month = 0
@@ -275,7 +104,7 @@ async def dashboard_data(db: AsyncSession = Depends(get_async_session)):
             logger.error("dashboard_data: pos_sales section failed", exc_info=True)
             _errors.append({"section": "pos_sales", "reason": "query failed"})
 
-        # ── B2B SALES ──────────────────────────────────────────────────
+        # ── B2B SALES ─────────────────────────────────────────────────
         b2b_today = b2b_month = b2b_year = 0.0
         b2b_outstanding = 0.0
         b2b_clients = 0
@@ -299,7 +128,7 @@ async def dashboard_data(db: AsyncSession = Depends(get_async_session)):
         total_month = pos_month + b2b_month
         total_year  = pos_year  + b2b_year
 
-        # ── EXPENSES ───────────────────────────────────────────────────
+        # ── EXPENSES ──────────────────────────────────────────────────
         expenses_month = expenses_last_month = 0.0
         try:
             expense_summary     = await get_expense_summary(db)
@@ -309,7 +138,7 @@ async def dashboard_data(db: AsyncSession = Depends(get_async_session)):
             logger.error("dashboard_data: expenses section failed", exc_info=True)
             _errors.append({"section": "expenses", "reason": "query failed"})
 
-        # ── CUSTOMERS ──────────────────────────────────────────────────
+        # ── CUSTOMERS ─────────────────────────────────────────────────
         total_customers = new_customers_month = 0
         try:
             r = await db.execute(select(func.count(Customer.id)))
@@ -323,7 +152,7 @@ async def dashboard_data(db: AsyncSession = Depends(get_async_session)):
             logger.error("dashboard_data: customers section failed", exc_info=True)
             _errors.append({"section": "customers", "reason": "query failed"})
 
-        # ── INVENTORY ──────────────────────────────────────────────────
+        # ── INVENTORY ─────────────────────────────────────────────────
         total_products = out_of_stock_count = low_stock_count = 0
         stock_value = 0.0
         out_of_stock: list = []
@@ -341,7 +170,7 @@ async def dashboard_data(db: AsyncSession = Depends(get_async_session)):
             logger.error("dashboard_data: inventory section failed", exc_info=True)
             _errors.append({"section": "inventory", "reason": "query failed"})
 
-        # ── FARM / SPOILAGE / PRODUCTION ───────────────────────────────
+        # ── FARM / SPOILAGE / PRODUCTION ──────────────────────────────
         farm_month = batches_month = 0
         spoilage_month = 0.0
         try:
@@ -355,7 +184,7 @@ async def dashboard_data(db: AsyncSession = Depends(get_async_session)):
             logger.error("dashboard_data: farm_spoilage_production section failed", exc_info=True)
             _errors.append({"section": "farm_spoilage_production", "reason": "query failed"})
 
-        # ── LAST 7 DAYS (POS + B2B) ────────────────────────────────────
+        # ── LAST 7 DAYS (POS + B2B) ───────────────────────────────────
         last7: list = []
         try:
             for i in range(6, -1, -1):
@@ -372,7 +201,7 @@ async def dashboard_data(db: AsyncSession = Depends(get_async_session)):
             logger.error("dashboard_data: chart_last7 section failed", exc_info=True)
             _errors.append({"section": "chart_last7", "reason": "query failed"})
 
-        # ── TOP PRODUCTS ───────────────────────────────────────────────
+        # ── TOP PRODUCTS ──────────────────────────────────────────────
         top_products: list = []
         try:
             top_result = await db.execute(
@@ -390,7 +219,7 @@ async def dashboard_data(db: AsyncSession = Depends(get_async_session)):
             logger.error("dashboard_data: top_products section failed", exc_info=True)
             _errors.append({"section": "top_products", "reason": "query failed"})
 
-        # ── PAYMENT METHODS ────────────────────────────────────────────
+        # ── PAYMENT METHODS ───────────────────────────────────────────
         pay_methods: list = []
         try:
             pay_result = await db.execute(
@@ -405,7 +234,7 @@ async def dashboard_data(db: AsyncSession = Depends(get_async_session)):
             logger.error("dashboard_data: pay_methods section failed", exc_info=True)
             _errors.append({"section": "pay_methods", "reason": "query failed"})
 
-        # ── RECENT TRANSACTIONS ────────────────────────────────────────
+        # ── RECENT TRANSACTIONS ───────────────────────────────────────
         recent_sales: list = []
         try:
             inv_result = await db.execute(
@@ -485,7 +314,7 @@ async def dashboard_data(db: AsyncSession = Depends(get_async_session)):
         }
 
     except Exception:
-        logger.exception("dashboard_data endpoint failed — unhandled exception")
+        logger.exception("dashboard_data endpoint failed – unhandled exception")
         raise HTTPException(
             status_code=500,
             detail={
@@ -495,46 +324,7 @@ async def dashboard_data(db: AsyncSession = Depends(get_async_session)):
             },
         )
 
-
-# ── assistant endpoint ─────────────────────────────────────────────────
-
-class CopilotRequest(BaseModel):
-    question: str = Field(min_length=1, max_length=settings.ASSISTANT_MAX_QUESTION_CHARS)
-    dashboard_context: Optional[Dict[str, Any]] = None
-
-    @field_validator("question", mode="before")
-    @classmethod
-    def _normalize_question(cls, value: Any) -> str:
-        normalized = str(value or "").strip()
-        if not normalized:
-            raise ValueError("Question cannot be empty.")
-        return normalized
-
-@router.post("/dashboard/assistant/ask")
-async def dashboard_assistant_ask(
-    request: Request,
-    payload: CopilotRequest,
-    db: AsyncSession = Depends(get_async_session),
-    current_user: User = Depends(get_current_user),
-):
-    from app.services.copilot.engine import answer_question
-
-    await _enforce_assistant_rate_limit(request, current_user)
-    trimmed_context = _trim_dashboard_context(payload.dashboard_context)
-
-    try:
-        return await answer_question(
-            db,
-            question=payload.question,
-            current_user=current_user,
-            dashboard_context=trimmed_context,
-        )
-    except HTTPException:
-        raise
-    except Exception as e:
-        return {"type": "text", "content": "An error occurred while processing your request."}
-
-# ── new: /dashboard/summary ────────────────────────────────────────────
+# ── new: /dashboard/summary ───────────────────────────────────────────
 
 @router.get("/dashboard/summary")
 async def dashboard_summary(
@@ -587,7 +377,7 @@ async def dashboard_summary(
     return data
 
 
-# ── new: /dashboard/insights ───────────────────────────────────────────
+# ── new: /dashboard/insights ──────────────────────────────────────────
 
 @router.get("/dashboard/insights")
 async def dashboard_insights(db: AsyncSession = Depends(get_async_session)):
@@ -596,11 +386,11 @@ async def dashboard_insights(db: AsyncSession = Depends(get_async_session)):
     try:
         return await get_insights(db)
     except Exception:
-        logger.exception("dashboard_insights endpoint failed — unhandled exception")
+        logger.exception("dashboard_insights endpoint failed – unhandled exception")
         return {"cards": [], "suggested_chips": [], "_errors": [{"rule": "all", "reason": "internal error"}]}
 
 
-# ── UI ─────────────────────────────────────────────────────────────────
+# ── UI ────────────────────────────────────────────────────────────────
 
 @router.get("/dashboard", response_class=HTMLResponse)
 def dashboard_ui():
@@ -611,7 +401,7 @@ def dashboard_ui():
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <script src="/static/theme.js"></script>
-<title>Dashboard — Thunder ERP</title>
+<title>Dashboard – Thunder ERP</title>
 <link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,300;0,400;0,600;1,300;1,400&family=DM+Sans:wght@300;400;500;600&family=DM+Mono:wght@400;500&family=Outfit:wght@400;500;600;700;800;900&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="/static/dashboard.css">
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
@@ -660,8 +450,7 @@ def dashboard_ui():
 </nav>
 <main class="page-shell">
   <header class="header-strip">
-    <div class="header-copy">
-      <p class="header-eyebrow">Morning briefing</p>
+    <div>
       <h1 class="greeting" id="greeting">Good morning</h1>
       <p class="date-display" id="date-display"></p>
     </div>
@@ -678,66 +467,54 @@ def dashboard_ui():
     </div>
   </header>
 
-  <section class="briefing-section" aria-label="Briefing" style="display: none;" id="briefing-container">
-    <p class="briefing-lead" id="briefing-lead">Loading today's briefing…</p>
+  <article class="card briefing-card" aria-label="Today's briefing">
+    <p class="briefing-lead" id="briefing-lead">Loading today’s briefing…</p>
     <p class="briefing-body" id="briefing-body"></p>
     <div class="briefing-actions" id="briefing-actions"></div>
+  </article>
+
+  <section class="numbers-grid" aria-label="Key numbers">
+    <article class="card number-card" data-card="sales" aria-live="polite"></article>
+    <article class="card number-card" data-card="clients_owe" aria-live="polite"></article>
+    <article class="card number-card" data-card="spent" aria-live="polite"></article>
+    <article class="card number-card" data-card="stock_alerts" aria-live="polite"></article>
   </section>
 
-  <section class="hero-section" id="hero-section" aria-label="Key numbers">
-    <div class="hero-eyebrow" id="hero-eyebrow">NET SALES · THIS PERIOD</div>
-    <div class="hero-value-wrap">
-      <div class="hero-value" id="hero-sales-value">EGP 0</div>
-      <div class="hero-chip" id="hero-sales-chip">↑ 0%</div>
-    </div>
-    <p class="hero-narrative" id="hero-narrative">Loading...</p>
+  <section class="card chart-card" aria-label="Sales over time">
+    <div class="panel-head"><h2 id="chart-title">Sales over time</h2></div>
+    <div class="chart-wrap"><canvas id="sales-chart" aria-label="Sales over time chart"></canvas></div>
+    <table class="sr-only" id="chart-table" aria-label="Sales over time table"></table>
   </section>
 
-  <section class="trend-section" id="trend-section" aria-label="Sales over time">
-    <div class="chart-wrap">
-      <canvas id="sales-chart" aria-label="Sales over time chart"></canvas>
-    </div>
-  </section>
+  <div class="panel-grid">
+    <section class="card panel-card" aria-label="Best sellers">
+      <div class="panel-head">
+        <h2 id="top-products-title">Best-sellers</h2>
+        <div class="panel-tabs" role="tablist" aria-label="Best seller mode">
+          <button type="button" class="tab-btn active" data-top-tab="revenue">By revenue</button>
+          <button type="button" class="tab-btn" data-top-tab="qty">By quantity</button>
+        </div>
+      </div>
+      <div id="top-products-list" class="panel-body"></div>
+    </section>
 
-  <section class="editorial-stats" id="editorial-stats" aria-label="Stats">
-    <div class="ed-stat">
-      <div class="ed-eyebrow">Money owed</div>
-      <div class="ed-value" id="ed-owe-value">0</div>
-      <div class="ed-prose" id="ed-owe-prose"></div>
-    </div>
-    <div class="ed-stat">
-      <div class="ed-eyebrow">Spent</div>
-      <div class="ed-value" id="ed-spent-value">0</div>
-      <div class="ed-prose" id="ed-spent-prose"></div>
-    </div>
-    <div class="ed-stat">
-      <div class="ed-eyebrow">Margin</div>
-      <div class="ed-value" id="ed-margin-value">—</div>
-      <div class="ed-prose" id="ed-margin-prose"></div>
-    </div>
-  </section>
-
-  <section class="two-col-section" id="narrative-section">
-    <div class="col-bestsellers" id="bestsellers-column">
-      <h2 class="col-title" id="top-products-title">Best-sellers</h2>
-      <div id="top-products-list" class="bestsellers-list"></div>
-    </div>
-    <div class="col-insights">
-      <h2 class="col-title">Worth knowing</h2>
-      <div id="insights-list" class="insights-list"></div>
-    </div>
-  </section>
-
-  <section class="recent-transactions-section">
-    <div class="recent-header">
-      <h2>Recent transactions</h2>
-      <a href="/reports/" class="view-all-link">View all →</a>
-    </div>
-    <table class="activity-table">
-      <thead><tr><th>Invoice</th><th>Customer</th><th>Amount</th><th>Time</th></tr></thead>
-      <tbody id="recent-activity"></tbody>
-    </table>
-  </section>
+    <section class="card panel-card" aria-label="Recent transactions">
+      <div class="panel-head">
+        <h2>Recent transactions</h2>
+        <div class="panel-tabs" role="tablist" aria-label="Recent activity filter">
+          <button type="button" class="tab-btn active" data-activity-filter="all">All</button>
+          <button type="button" class="tab-btn" data-activity-filter="sale">Sales</button>
+          <button type="button" class="tab-btn" data-activity-filter="refund">Refunds</button>
+        </div>
+      </div>
+      <div class="panel-body">
+        <table class="activity-table">
+          <thead><tr><th>Invoice</th><th>Customer</th><th>Amount</th><th>Time</th></tr></thead>
+          <tbody id="recent-activity"></tbody>
+        </table>
+      </div>
+    </section>
+  </div>
 </main>
 
 <div id="custom-range-modal" class="range-modal hidden" role="dialog" aria-modal="true" aria-labelledby="crm-title">
@@ -757,21 +534,6 @@ def dashboard_ui():
     </div>
   </div>
 </div>
-
-<div id="ai-chat-widget" class="ai-chat-widget hidden">
-  <div class="ai-chat-header">
-    <h3>AI Assistant</h3>
-    <button id="ai-chat-close" aria-label="Close chat">&#215;</button>
-  </div>
-  <div class="ai-chat-body" id="ai-chat-body">
-    <div class="chat-bubble ai">Hello! I'm your ERP Assistant. How can I help you today?</div>
-  </div>
-  <div class="ai-chat-input-area">
-    <input type="text" id="ai-chat-input" placeholder="Ask a question..." />
-    <button id="ai-chat-send" aria-label="Send">📤</button>
-  </div>
-</div>
-<button id="ai-chat-trigger" class="ai-chat-trigger" aria-label="Open AI Assistant">✨</button>
 
 <script src="/static/dashboard.js"></script>
 </body>
