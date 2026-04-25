@@ -78,7 +78,7 @@ function initTheme() {
 function refreshThemeUi() {
   const theme = window.__appTheme ? window.__appTheme.get() : (document.documentElement.dataset.theme || "dark");
   document.getElementById("mode-btn").innerHTML = theme === "light" ? "&#9728;&#65039;" : "&#127769;";
-  if (salesChart) salesChart.update("none");
+  if (dashboardData) renderChart();
 }
 
 function updateRangeButtons() {
@@ -156,90 +156,118 @@ function tooltipForCard(key) {
   return tips[key] || "";
 }
 
+function periodDescriptor() {
+  const range = dashboardData?.range || {};
+  if (range.days === 1) return "day";
+  if (range.days) return `${range.days} days`;
+  return "period";
+}
+
+function currentThemeValue() {
+  return window.__appTheme ? window.__appTheme.get() : (document.documentElement.dataset.theme || "dark");
+}
+
+function chartLabels(buckets) {
+  const granularity = dashboardData?.range?.granularity || "day";
+  return buckets.map((bucket) => {
+    const date = new Date(`${bucket.date}T12:00:00`);
+    if (granularity === "month") return date.toLocaleDateString("en-GB", { month: "short", year: "numeric" });
+    if (granularity === "week") return date.toLocaleDateString("en-GB", { day: "numeric", month: "short" });
+    return date.toLocaleDateString("en-GB", { day: "numeric", month: "short" });
+  });
+}
+
+function quarterTickIndexes(length) {
+  if (length <= 1) return new Set([0]);
+  const max = length - 1;
+  return new Set([
+    0,
+    Math.round(max * 0.25),
+    Math.round(max * 0.75),
+    max,
+  ]);
+}
+
+function getPaceInsight() {
+  return (dashboardData?.insights || []).find((item) => item.kind === "pace") || null;
+}
+
+function setEmptyState(isEmpty) {
+  const briefing = document.getElementById("briefing-container");
+  const trend = document.getElementById("trend-section");
+  const stats = document.getElementById("editorial-stats");
+  const bestsellers = document.getElementById("bestsellers-column");
+
+  briefing.style.display = isEmpty ? "block" : "none";
+  trend.style.display = isEmpty ? "none" : "block";
+  stats.style.display = isEmpty ? "none" : "grid";
+  bestsellers.style.display = isEmpty ? "none" : "block";
+}
+
 function renderHero() {
   const rangeLabel = dashboardData?.range?.label || "This period";
-  const isAlt = dashboardData?.viewer?.can_view_b2b === false && dashboardData?.viewer?.alt_sales_today;
-  
-  let value = 0;
-  if (isAlt) {
-      value = dashboardData?.viewer?.alt_sales_today?.value || 0;
-      document.getElementById("hero-eyebrow").textContent = "YOUR SHIFT TODAY";
-  } else {
-      value = dashboardData?.numbers?.sales?.value || 0;
-      document.getElementById("hero-eyebrow").textContent = `NET SALES · ${rangeLabel.toUpperCase()}`;
-  }
-  
-  document.getElementById("hero-sales-value").textContent = formatMoney(value);
-  
-  const prevValue = dashboardData?.numbers?.sales?.prev_value || 0;
-  const deltaPct = dashboardData?.numbers?.sales?.delta_pct;
+  const sales = dashboardData?.numbers?.sales || {};
+  const shiftOverride = dashboardData?.viewer?.can_view_b2b === false ? dashboardData?.viewer?.alt_sales_today : null;
+  const useShiftValue = shiftOverride && Number(shiftOverride.value || 0) > 0;
+  const heroValue = useShiftValue ? Number(shiftOverride.value || 0) : Number(sales.value || 0);
+  const prevValue = Number(sales.prev_value || 0);
+  const deltaPct = sales.delta_pct;
+  const emptySalesState = !useShiftValue && Number(sales.value || 0) <= 0;
+
+  document.getElementById("hero-eyebrow").textContent = useShiftValue
+    ? "YOUR SHIFT TODAY"
+    : `NET SALES · ${String(rangeLabel).toUpperCase()}`;
+  document.getElementById("hero-sales-value").textContent = formatMoney(heroValue);
+
   const chip = document.getElementById("hero-sales-chip");
-  
-  if (isAlt || deltaPct === null || deltaPct === undefined) {
-      chip.style.display = "none";
+  if (useShiftValue || deltaPct === null || deltaPct === undefined) {
+    chip.style.display = "none";
   } else {
-      chip.style.display = "inline-flex";
-      chip.textContent = `${deltaPct >= 0 ? "↑" : "↓"} ${Math.abs(deltaPct).toFixed(1)}%`;
-      chip.className = `hero-chip ${deltaPct >= 0 ? "positive" : "negative"}`;
+    chip.style.display = "inline-flex";
+    chip.textContent = `${deltaPct >= 0 ? "↑" : "↓"} ${Math.abs(Number(deltaPct)).toFixed(1)}%`;
+    chip.className = `hero-chip ${deltaPct >= 0 ? "positive" : "negative"}`;
   }
-  
+
   const narrative = document.getElementById("hero-narrative");
-  if (isAlt) {
-      narrative.textContent = "Your total sales recorded so far in this shift.";
-  } else if (value === 0 || prevValue === 0) {
-      narrative.textContent = "You haven't recorded any sales yet for this period.";
+  if (useShiftValue) {
+    narrative.textContent = "Your total sales recorded so far in this shift.";
+  } else if (emptySalesState || prevValue <= 0) {
+    narrative.textContent = "You haven't recorded any sales yet for this period.";
   } else {
-      const diff = Math.abs(value - prevValue);
-      const direction = value >= prevValue ? "more" : "less";
-      let paceText = "";
-      const paceInsight = (dashboardData?.insights || []).find(i => i.kind === "pace");
-      if (paceInsight) {
-          paceText = ` ${paceInsight.text}`;
-      }
-      narrative.innerHTML = `That's ${formatMoney(diff)} ${direction} than the previous period.${paceText}`;
+    const diff = Math.abs(heroValue - prevValue);
+    const direction = heroValue >= prevValue ? "more" : "less";
+    const paceClause = getPaceInsight() ? " Momentum is stronger in the back half of the period." : "";
+    narrative.textContent = `That's ${formatMoney(diff)} ${direction} than the previous ${periodDescriptor()}.${paceClause}`;
   }
-  
-  if (value === 0 && !isAlt) {
-      document.getElementById("trend-section").style.display = "none";
-      document.getElementById("editorial-stats").style.display = "none";
-      document.getElementById("briefing-container").style.display = "block";
-  } else {
-      document.getElementById("trend-section").style.display = "block";
-      document.getElementById("editorial-stats").style.display = "flex";
-      document.getElementById("briefing-container").style.display = "none";
-  }
+
+  setEmptyState(emptySalesState);
 }
 
 function renderEditorialStats() {
   const owe = dashboardData?.numbers?.clients_owe || {};
   const spent = dashboardData?.numbers?.spent || {};
   const margin = dashboardData?.numbers?.margin || {};
-  
+
   document.getElementById("ed-owe-value").textContent = formatMoney(owe.value || 0);
-  document.getElementById("ed-owe-prose").textContent = `${formatNumber(owe.overdue_count || 0)} invoices over 30 days old.`;
-  
+  document.getElementById("ed-owe-prose").textContent = `Across your B2B ledger. ${formatNumber(owe.overdue_count || 0)} invoices over 30 days old.`;
+
   document.getElementById("ed-spent-value").textContent = formatMoney(spent.value || 0);
-  let spentDelta = "";
-  if (spent.delta_pct !== null && spent.delta_pct !== undefined) {
-      spentDelta = `${spent.delta_pct >= 0 ? "Up" : "Down"} ${Math.abs(spent.delta_pct).toFixed(1)}% on the previous period.`;
-  } else {
-      spentDelta = "No comparison available.";
-  }
-  document.getElementById("ed-spent-prose").textContent = spentDelta;
-  
+  document.getElementById("ed-spent-prose").textContent = spent.delta_pct === null || spent.delta_pct === undefined
+    ? "No comparison available yet."
+    : `${spent.delta_pct >= 0 ? "Up" : "Down"} ${Math.abs(Number(spent.delta_pct)).toFixed(1)}% on the previous period.`;
+
   const marginValue = document.getElementById("ed-margin-value");
   const marginProse = document.getElementById("ed-margin-prose");
   if (margin.value_pct === null || margin.value_pct === undefined) {
-      marginValue.textContent = "—";
-      marginProse.textContent = "No cost data on items yet.";
-  } else {
-      marginValue.textContent = `${margin.value_pct.toFixed(1)}%`;
-      if (margin.delta_pts !== null && margin.delta_pts !== undefined) {
-          marginProse.textContent = `${margin.delta_pts >= 0 ? "Improved" : "Fell"} ${Math.abs(margin.delta_pts).toFixed(1)} points vs last period.`;
-      } else {
-          marginProse.textContent = "No comparison available.";
-      }
+    marginValue.textContent = "—";
+    marginProse.textContent = "No cost data on items yet.";
+    return;
   }
+
+  marginValue.textContent = `${Number(margin.value_pct).toFixed(1)}%`;
+  marginProse.textContent = margin.delta_pts === null || margin.delta_pts === undefined
+    ? "No comparison available yet."
+    : `${Number(margin.delta_pts) >= 0 ? "Improved" : "Fell"} ${Math.abs(Number(margin.delta_pts)).toFixed(1)} points vs last period.`;
 }
 
 function renderBriefing() {
@@ -257,104 +285,151 @@ function renderBriefing() {
   )).join("");
 }
 
-function chartLabels(buckets) {
-  const granularity = dashboardData?.range?.granularity || "day";
-  return buckets.map((bucket) => {
-    const date = new Date(`${bucket.date}T12:00:00`);
-    if (granularity === "month") return date.toLocaleDateString("en-GB", { month: "short", year: "numeric" });
-    if (granularity === "week") return `Week of ${date.toLocaleDateString("en-GB", { day: "numeric", month: "short" })}`;
-    return date.toLocaleDateString("en-GB", { day: "numeric", month: "short" });
-  });
-}
-
 function renderChart() {
+  const chartSection = document.getElementById("trend-section");
+  if (chartSection.style.display === "none") {
+    if (salesChart) {
+      salesChart.destroy();
+      salesChart = null;
+    }
+    return;
+  }
+
   const buckets = dashboardData?.chart?.buckets || [];
   const labels = chartLabels(buckets);
-  const data = buckets.map((bucket) => (Number(bucket.pos || 0) + Number(bucket.b2b || 0) + Number(bucket.refunds || 0)));
-  
+  const data = buckets.map((bucket) => (
+    Number(bucket.pos || 0) + Number(bucket.b2b || 0) + Number(bucket.refunds || 0)
+  ));
+  const tickIndexes = quarterTickIndexes(labels.length);
+  const styles = getComputedStyle(document.documentElement);
+  const accent = styles.getPropertyValue("--accent").trim();
+  const fill = styles.getPropertyValue("--chart-fill").trim();
+  const textMuted = styles.getPropertyValue("--text-muted").trim();
+
   if (!salesChart) {
     salesChart = new Chart(document.getElementById("sales-chart"), {
       type: "line",
       data: {
-        labels: labels,
+        labels,
         datasets: [{
-          data: data,
+          data,
           fill: true,
-          borderColor: getComputedStyle(document.documentElement).getPropertyValue("--accent").trim(),
-          backgroundColor: getComputedStyle(document.documentElement).getPropertyValue("--accent-soft").trim(),
+          borderColor: accent,
+          backgroundColor: fill,
           tension: 0.35,
+          borderWidth: 2,
           pointRadius: 0,
-          pointHoverRadius: 4
-        }]
+          pointHoverRadius: 4,
+          pointHitRadius: 18,
+        }],
       },
       options: {
         responsive: true,
         maintainAspectRatio: false,
         animation: false,
         interaction: { mode: "index", intersect: false },
-        plugins: { legend: { display: false } },
+        plugins: {
+          legend: { display: false },
+          tooltip: {
+            displayColors: false,
+            callbacks: {
+              label(context) {
+                return formatMoneyPrecise(context.parsed.y || 0);
+              },
+            },
+          },
+        },
         scales: {
           x: {
             grid: { display: false, drawBorder: false },
+            border: { display: false },
             ticks: {
-              callback: function(value, index, values) {
-                if (index === 0 || index === values.length - 1 || index === Math.floor(values.length / 2)) {
-                  return this.getLabelForValue(value);
-                }
-                return null;
-              },
+              color: textMuted,
               maxRotation: 0,
-              color: getComputedStyle(document.documentElement).getPropertyValue("--text-muted").trim(),
-              font: { family: "DM Sans", size: 11 }
-            }
+              autoSkip: false,
+              font: { family: "DM Sans", size: 11 },
+              callback(value, index) {
+                return tickIndexes.has(index) ? labels[index] : "";
+              },
+            },
           },
-          y: { display: false }
-        }
+          y: {
+            display: false,
+            grid: { display: false, drawBorder: false },
+            border: { display: false },
+          },
+        },
       },
     });
     return;
   }
+
   salesChart.data.labels = labels;
   salesChart.data.datasets[0].data = data;
-  salesChart.data.datasets[0].borderColor = getComputedStyle(document.documentElement).getPropertyValue("--accent").trim();
-  salesChart.data.datasets[0].backgroundColor = getComputedStyle(document.documentElement).getPropertyValue("--accent-soft").trim();
+  salesChart.data.datasets[0].borderColor = accent;
+  salesChart.data.datasets[0].backgroundColor = fill;
+  salesChart.options.scales.x.ticks.color = textMuted;
+  salesChart.options.scales.x.ticks.callback = function(value, index) {
+    return tickIndexes.has(index) ? labels[index] : "";
+  };
   salesChart.update("none");
 }
 
 function renderTopProducts() {
   const products = dashboardData?.panels?.top_products_by_revenue || [];
   const container = document.getElementById("top-products-list");
+  document.getElementById("top-products-title").textContent = `Best-sellers · ${dashboardData?.range?.label || "This period"}`;
   if (!products.length) {
     container.innerHTML = `<div class="empty-state">No products sold in this range.</div>`;
     return;
   }
-  container.innerHTML = products.slice(0, 5).map((product) => {
-    return `
-      <div class="list-row top-product-row">
-        <div class="row-main">
-          <span class="row-title">${escHtml(product.name)}</span>
-          <span class="row-units">${formatNumber(product.qty || 0)} units</span>
-        </div>
-        <span class="row-value">${formatMoney(product.revenue || 0)}</span>
+
+  container.innerHTML = products.slice(0, 5).map((product) => `
+    <div class="list-row">
+      <div class="row-main">
+        <span class="row-title">${escHtml(product.name)}</span>
+        <span class="row-units">${formatNumber(product.qty || 0)} units</span>
       </div>
-    `;
-  }).join("");
+      <span class="row-value">${formatMoney(product.revenue || 0)}</span>
+    </div>
+  `).join("");
+}
+
+function highlightInsightText(kind, text) {
+  let html = escHtml(text);
+  if (kind === "overdue") {
+    html = html.replace(/^([^<]+?) hasn&#39;t paid/, "<strong class=\"accent\">$1</strong> hasn&#39;t paid");
+    html = html.replace(/invoice (#\S+)/, "invoice <strong>$1</strong>");
+  } else if (kind === "stockout") {
+    html = html.replace(/^(\d+ products)/, "<strong>$1</strong>");
+    html = html.replace(/recently\. ([^.]+?) has been/, "recently. <strong class=\"accent\">$1</strong> has been");
+  } else if (kind === "pace") {
+    html = html.replace(/last (\d+ days)/, "last <strong>$1</strong>");
+    html = html.replace(/(\d+(\.\d+)?%)/, "<strong class=\"accent\">$1</strong>");
+  } else if (kind === "margin") {
+    html = html.replace(/(\d+(\.\d+)? points)/, "<strong class=\"accent\">$1</strong>");
+  } else if (kind === "weekday") {
+    html = html.replace(/^([A-Za-z]+s)/, "<strong class=\"accent\">$1</strong>");
+    html = html.replace(/overtaking ([A-Za-z]+s)/, "overtaking <strong>$1</strong>");
+  }
+  return html;
 }
 
 function renderInsights() {
-  const insights = (dashboardData?.insights || []).filter(i => i.kind !== "pace");
+  const insights = dashboardData?.insights || [];
   const container = document.getElementById("insights-list");
   if (!insights.length) {
-      container.innerHTML = `<p class="insight-text">Nothing notable to flag for this period.</p>`;
-      return;
+    container.innerHTML = `<p class="insight-text">Nothing notable to flag for this period.</p>`;
+    return;
   }
-  container.innerHTML = insights.map(i => {
-      return `<p class="insight-text">${i.text}</p>`;
-  }).join("");
+
+  container.innerHTML = insights.map((item) => (
+    `<p class="insight-text">${highlightInsightText(item.kind, item.text)}</p>`
+  )).join("");
 }
 
 function renderRecentActivity() {
-  const rows = (dashboardData?.panels?.recent_activity || []);
+  const rows = dashboardData?.panels?.recent_activity || [];
   const tbody = document.getElementById("recent-activity");
   if (!rows.length) {
     tbody.innerHTML = `<tr><td colspan="4" class="empty-cell">No activity in this range.</td></tr>`;
@@ -364,7 +439,7 @@ function renderRecentActivity() {
     <tr data-link="${escHtml(item.link || "#")}">
       <td class="mono">${escHtml(item.invoice_number || "-")}</td>
       <td>${escHtml(item.customer || "-")}</td>
-      <td class="${item.type === "refund" ? "negative" : "positive"}">${escHtml(item.type === "refund" ? `−${formatMoney(Math.abs(item.total || 0))}` : formatMoney(item.total || 0))}</td>
+      <td class="${item.type === "refund" ? "negative" : "positive"}">${item.type === "refund" ? `−${escHtml(formatMoney(Math.abs(item.total || 0)))}` : escHtml(formatMoney(item.total || 0))}</td>
       <td>${escHtml(item.time_relative || "-")}</td>
     </tr>
   `).join("");

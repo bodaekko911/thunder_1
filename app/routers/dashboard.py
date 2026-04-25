@@ -450,7 +450,8 @@ def dashboard_ui():
 </nav>
 <main class="page-shell">
   <header class="header-strip">
-    <div>
+    <div class="header-copy">
+      <p class="header-eyebrow">Morning briefing</p>
       <h1 class="greeting" id="greeting">Good morning</h1>
       <p class="date-display" id="date-display"></p>
     </div>
@@ -467,68 +468,66 @@ def dashboard_ui():
     </div>
   </header>
 
-  <article class="briefing-card" aria-label="Today's briefing" style="display: none;" id="briefing-container">
+  <section class="briefing-section" aria-label="Briefing" style="display: none;" id="briefing-container">
     <p class="briefing-lead" id="briefing-lead">Loading today's briefing…</p>
     <p class="briefing-body" id="briefing-body"></p>
     <div class="briefing-actions" id="briefing-actions"></div>
-  </article>
+  </section>
 
-  <!-- Section 2: HERO -->
   <section class="hero-section" id="hero-section" aria-label="Key numbers">
-     <div class="hero-eyebrow" id="hero-eyebrow">NET SALES · THIS PERIOD</div>
-     <div class="hero-value-wrap">
-         <div class="hero-value" id="hero-sales-value">EGP 0</div>
-         <div class="hero-chip" id="hero-sales-chip">↑ 0%</div>
-     </div>
-     <div class="hero-narrative" id="hero-narrative">Loading...</div>
+    <div class="hero-eyebrow" id="hero-eyebrow">NET SALES · THIS PERIOD</div>
+    <div class="hero-value-wrap">
+      <div class="hero-value" id="hero-sales-value">EGP 0</div>
+      <div class="hero-chip" id="hero-sales-chip">↑ 0%</div>
+    </div>
+    <p class="hero-narrative" id="hero-narrative">Loading...</p>
   </section>
 
-  <!-- Section 3: Trend strip -->
   <section class="trend-section" id="trend-section" aria-label="Sales over time">
-     <div class="chart-wrap"><canvas id="sales-chart" aria-label="Sales over time chart"></canvas></div>
+    <div class="chart-wrap">
+      <canvas id="sales-chart" aria-label="Sales over time chart"></canvas>
+    </div>
   </section>
 
-  <!-- Section 4: Editorial stats -->
   <section class="editorial-stats" id="editorial-stats" aria-label="Stats">
-     <div class="ed-stat">
-         <div class="ed-eyebrow">Money owed</div>
-         <div class="ed-value" id="ed-owe-value">0</div>
-         <div class="ed-prose" id="ed-owe-prose"></div>
-     </div>
-     <div class="ed-stat">
-         <div class="ed-eyebrow">Spent</div>
-         <div class="ed-value" id="ed-spent-value">0</div>
-         <div class="ed-prose" id="ed-spent-prose"></div>
-     </div>
-     <div class="ed-stat">
-         <div class="ed-eyebrow">Margin</div>
-         <div class="ed-value" id="ed-margin-value">0</div>
-         <div class="ed-prose" id="ed-margin-prose"></div>
-     </div>
+    <div class="ed-stat">
+      <div class="ed-eyebrow">Money owed</div>
+      <div class="ed-value" id="ed-owe-value">0</div>
+      <div class="ed-prose" id="ed-owe-prose"></div>
+    </div>
+    <div class="ed-stat">
+      <div class="ed-eyebrow">Spent</div>
+      <div class="ed-value" id="ed-spent-value">0</div>
+      <div class="ed-prose" id="ed-spent-prose"></div>
+    </div>
+    <div class="ed-stat">
+      <div class="ed-eyebrow">Margin</div>
+      <div class="ed-value" id="ed-margin-value">—</div>
+      <div class="ed-prose" id="ed-margin-prose"></div>
+    </div>
   </section>
 
-  <!-- Section 5: Best-sellers and Insights -->
-  <section class="two-col-section">
-      <div class="col-bestsellers">
-          <h2 class="col-title" id="top-products-title">Best-sellers</h2>
-          <div id="top-products-list" class="bestsellers-list"></div>
-      </div>
-      <div class="col-insights">
-          <h2 class="col-title">Worth knowing</h2>
-          <div id="insights-list" class="insights-list"></div>
-      </div>
+  <section class="two-col-section" id="narrative-section">
+    <div class="col-bestsellers" id="bestsellers-column">
+      <h2 class="col-title" id="top-products-title">Best-sellers</h2>
+      <div id="top-products-list" class="bestsellers-list"></div>
+    </div>
+    <div class="col-insights">
+      <h2 class="col-title">Worth knowing</h2>
+      <div id="insights-list" class="insights-list"></div>
+    </div>
   </section>
 
-  <!-- Section 6: Recent transactions -->
   <section class="recent-transactions-section">
-      <div class="recent-header">
-        <h2>Recent transactions</h2>
-        <a href="/reports/" class="view-all-link">View all →</a>
-      </div>
-        <table class="activity-table">
-          <thead><tr><th>Invoice</th><th>Customer</th><th>Amount</th><th>Time</th></tr></thead>
-          <tbody id="recent-activity"></tbody>
-        </table>
+    <div class="recent-header">
+      <h2>Recent transactions</h2>
+      <a href="/reports/" class="view-all-link">View all →</a>
+    </div>
+    <table class="activity-table">
+      <thead><tr><th>Invoice</th><th>Customer</th><th>Amount</th><th>Time</th></tr></thead>
+      <tbody id="recent-activity"></tbody>
+    </table>
+  </section>
 </main>
 
 <div id="custom-range-modal" class="range-modal hidden" role="dialog" aria-modal="true" aria-labelledby="crm-title">

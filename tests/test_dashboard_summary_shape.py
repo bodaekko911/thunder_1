@@ -61,16 +61,27 @@ def test_summary_endpoint_has_required_top_level_keys(monkeypatch: pytest.Monkey
     async def fake_summary(_db, _range, _start, _end, _user):
         return {
             "range": {"label": "Today", "start": "2026-04-20", "end": "2026-04-20", "days": 1, "granularity": "day"},
-            "briefing": {"lead": "Lead", "actions": []},
+            "briefing": {"lead": "Lead", "body": "", "actions": []},
             "numbers": {
-                "sales": {"value": 0, "delta_pct": None, "direction": "flat", "sparkline": []},
+                "sales": {"value": 0, "prev_value": 0.0, "delta_pct": None, "direction": "flat", "sparkline": []},
                 "clients_owe": {"value": 0, "overdue_count": 0},
                 "spent": {"value": 0, "delta_pct": None, "direction": "flat", "sparkline": []},
                 "stock_alerts": {"value": 0, "out_count": 0, "low_count": 0},
+                "margin": {"value_pct": None, "delta_pts": None, "gross_profit": None},
             },
             "chart": {"buckets": []},
             "panels": {"top_products_by_revenue": [], "top_products_by_qty": [], "recent_activity": []},
+            "insights": [],
+            "viewer": {
+                "role": "admin",
+                "can_view_b2b": True,
+                "can_view_expenses": True,
+                "can_view_inventory": True,
+                "can_view_pos": True,
+                "alt_sales_today": {"value": 0.0},
+            },
             "generated_at": "2026-04-20T12:00:00+02:00",
+            "timezone": "Africa/Cairo",
         }
 
     monkeypatch.setattr("app.services.dashboard_summary_service.get_summary", fake_summary)
@@ -95,13 +106,16 @@ def test_summary_endpoint_has_required_top_level_keys(monkeypatch: pytest.Monkey
       response = client.get("/dashboard/summary?range=today")
       data = response.json()
       assert response.status_code == 200
-      assert {"range", "briefing", "numbers", "chart", "panels", "generated_at"} <= set(data.keys())
+      assert {"range", "briefing", "numbers", "chart", "panels", "insights", "generated_at", "viewer", "timezone"} <= set(data.keys())
 
 
-def test_numbers_contains_exactly_four_entries(monkeypatch: pytest.MonkeyPatch):
+def test_numbers_contains_expected_additive_entries(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr("app.services.dashboard_briefing_service.build_briefing", lambda *args, **kwargs: asyncio.sleep(0, result={"lead": "Lead", "actions": []}))
     result = run(summary_service.get_summary(FakeDB(), "today", None, None, fake_user()))
-    assert set(result["numbers"].keys()) == {"sales", "clients_owe", "spent", "stock_alerts"}
+    assert set(result["numbers"].keys()) == {"sales", "clients_owe", "spent", "stock_alerts", "margin"}
+    assert isinstance(result["numbers"]["sales"]["prev_value"], float)
+    assert set(result["numbers"]["margin"].keys()) == {"value_pct", "delta_pts", "gross_profit"}
+    assert isinstance(result["insights"], list)
 
 
 @pytest.mark.parametrize(
