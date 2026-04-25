@@ -22,7 +22,7 @@ from sqlalchemy.sql.sqltypes import Date as SQLDate
 
 from app.core.config import settings
 from app.core.permissions import has_permission
-from app.core.time_utils import now_local
+from app.core.time_utils import now_local, utc_bounds
 from app.models.b2b import B2BInvoice
 from app.models.customer import Customer
 from app.models.expense import Expense
@@ -184,6 +184,60 @@ def _delta_direction(delta_pct: float | None, *, higher_is_better: bool) -> str:
         return "up" if higher_is_better else "down"
     return "down" if higher_is_better else "up"
 
+async def _calculate_margin(db: AsyncSession, utc_s: datetime, utc_e: datetime) -> float | None:
+    try:
+        from app.models.b2b import B2BInvoiceItem
+        
+        cost_col = getattr(InvoiceItem, "cost", getattr(InvoiceItem, "unit_cost", getattr(InvoiceItem, "cogs", None)))
+        if cost_col is not None:
+            stmt = select(func.sum(InvoiceItem.qty * (InvoiceItem.unit_price - cost_col))).join(Invoice).where(
+                Invoice.created_at >= utc_s, Invoice.created_at <= utc_e, Invoice.status == "paid"
+            )
+        else:
+            stmt = select(func.sum(InvoiceItem.qty * (InvoiceItem.unit_price - Product.cost))).join(Invoice).join(Product, InvoiceItem.product_id == Product.id).where(
+                Invoice.created_at >= utc_s, Invoice.created_at <= utc_e, Invoice.status == "paid"
+            )
+        pos_gp = await db.execute(stmt)
+        pos_gp_val = _safe_float(pos_gp.scalar())
+        
+        b2b_cost_col = getattr(B2BInvoiceItem, "cost", getattr(B2BInvoiceItem, "unit_cost", getattr(B2BInvoiceItem, "cogs", None)))
+        if b2b_cost_col is not None:
+            stmt_b2b = select(func.sum(B2BInvoiceItem.qty * (B2BInvoiceItem.unit_price - b2b_cost_col))).join(B2BInvoice).where(
+                B2BInvoice.created_at >= utc_s, B2BInvoice.created_at <= utc_e, B2BInvoice.status == "paid"
+            )
+        else:
+            stmt_b2b = select(func.sum(B2BInvoiceItem.qty * (B2BInvoiceItem.unit_price - Product.cost))).join(B2BInvoice).join(Product, B2BInvoiceItem.product_id == Product.id).where(
+                B2BInvoice.created_at >= utc_s, B2BInvoice.created_at <= utc_e, B2BInvoice.status == "paid"
+            )
+        b2b_gp = await db.execute(stmt_b2b)
+        b2b_gp_val = _safe_float(b2b_gp.scalar())
+        
+        ref_gp_val = 0.0
+        try:
+            from app.models.refund import RetailRefundItem, RetailRefund
+            stmt_ref = select(func.sum(RetailRefundItem.qty * (RetailRefundItem.unit_price - Product.cost))).join(RetailRefund).join(Product, RetailRefundItem.product_id == Product.id).where(
+                RetailRefund.created_at >= utc_s, RetailRefund.created_at <= utc_e
+            )
+            ref_gp = await db.execute(stmt_ref)
+            ref_gp_val += _safe_float(ref_gp.scalar())
+        except Exception:
+            pass
+            
+        try:
+            from app.models.b2b import B2BRefund, B2BRefundItem
+            stmt_b2b_ref = select(func.sum(B2BRefundItem.qty * (B2BRefundItem.unit_price - Product.cost))).join(B2BRefund).join(Product, B2BRefundItem.product_id == Product.id).where(
+                B2BRefund.created_at >= utc_s, B2BRefund.created_at <= utc_e
+            )
+            b2b_ref_gp = await db.execute(stmt_b2b_ref)
+            ref_gp_val += _safe_float(b2b_ref_gp.scalar())
+        except Exception:
+            pass
+
+        return pos_gp_val + b2b_gp_val - ref_gp_val
+    except Exception:
+        from app.core.log import logger
+        logger.error("_calculate_margin failed", exc_info=True)
+        return None
 
 async def _sales_total(db: AsyncSession, utc_s: datetime, utc_e: datetime) -> float:
     pos_result = await db.execute(
@@ -382,9 +436,27 @@ async def _build_numbers(db: AsyncSession, rng: dict[str, Any], user: User) -> d
         )
         sales_today_value = _safe_float(user_sales.scalar())
 
+    margin_block = {"value_pct": None, "delta_pts": None, "gross_profit": None}
+    try:
+        current_gp = await _calculate_margin(db, rng["utc_start"], rng["utc_end"])
+        prior_gp = await _calculate_margin(db, rng["prior_utc_start"], rng["prior_utc_end"])
+        
+        if current_gp is not None:
+            margin_block["gross_profit"] = round(current_gp, 2)
+            cur_pct = (current_gp / max(sales_value, 1)) * 100
+            margin_block["value_pct"] = round(cur_pct, 1)
+            
+            if prior_gp is not None:
+                pri_pct = (prior_gp / max(sales_prior, 1)) * 100
+                margin_block["delta_pts"] = round(cur_pct - pri_pct, 1)
+    except Exception:
+        from app.core.log import logger
+        logger.error("_build_numbers margin failed", exc_info=True)
+
     return {
         "sales": {
             "value": round(sales_value, 2),
+            "prev_value": round(sales_prior, 2),
             "delta_pct": _delta_pct(sales_value, sales_prior),
             "direction": _delta_direction(_delta_pct(sales_value, sales_prior), higher_is_better=True),
             "sparkline": await _sparkline_sales(db, rng),
@@ -404,6 +476,7 @@ async def _build_numbers(db: AsyncSession, rng: dict[str, Any], user: User) -> d
             "out_count": out_count,
             "low_count": low_count,
         },
+        "margin": margin_block,
         "alt_sales_today": {"value": round(sales_today_value, 2)},
     }
 
@@ -541,6 +614,103 @@ async def _build_panels(db: AsyncSession, rng: dict[str, Any]) -> dict[str, Any]
         "recent_activity": await _recent_activity(db, rng),
     }
 
+async def _insight_overdue(db: AsyncSession, numbers: dict[str, Any]) -> dict[str, str] | None:
+    try:
+        if numbers.get("clients_owe", {}).get("overdue_count", 0) > 0:
+            overdue_cutoff = now_local().astimezone(ZoneInfo("UTC")) - timedelta(days=30)
+            from app.models.b2b import B2BClient
+            stmt = select(B2BInvoice, B2BClient).join(B2BClient).where(
+                B2BInvoice.status.in_(["unpaid", "partial"]),
+                B2BInvoice.created_at <= overdue_cutoff
+            ).order_by((B2BInvoice.total - func.coalesce(B2BInvoice.amount_paid, 0)).desc()).limit(1)
+            row = (await db.execute(stmt)).first()
+            if row:
+                inv, client = row
+                days = (now_local().astimezone(ZoneInfo("UTC")) - inv.created_at).days
+                return {"kind": "overdue", "text": f"{client.name} hasn't paid invoice <strong>#{inv.invoice_number}</strong> for <strong>{days} days</strong> — your largest overdue receivable."}
+    except Exception:
+        from app.core.log import logger
+        logger.error("_insight_overdue failed", exc_info=True)
+    return None
+
+async def _insight_stockout(db: AsyncSession, numbers: dict[str, Any]) -> dict[str, str] | None:
+    try:
+        out_count = numbers.get("stock_alerts", {}).get("out_count", 0)
+        if out_count > 0:
+            utc_cutoff = now_local().astimezone(ZoneInfo("UTC")) - timedelta(days=30)
+            stmt = select(Product.name, func.sum(InvoiceItem.qty).label("qty_sold")).join(
+                InvoiceItem, Product.id == InvoiceItem.product_id
+            ).join(Invoice, InvoiceItem.invoice_id == Invoice.id).where(
+                Product.stock <= 0, Product.is_active == True,
+                Invoice.created_at >= utc_cutoff, Invoice.status == "paid"
+            ).group_by(Product.name).order_by(func.sum(InvoiceItem.qty).desc()).limit(1)
+            row = (await db.execute(stmt)).first()
+            if row:
+                return {"kind": "stockout", "text": f"<strong>{out_count}</strong> products ran out of stock recently. <strong>{row.name}</strong> has been a top seller — restocking it should be the priority."}
+    except Exception:
+        from app.core.log import logger
+        logger.error("_insight_stockout failed", exc_info=True)
+    return None
+
+async def _insight_pace(db: AsyncSession, rng: dict[str, Any]) -> dict[str, str] | None:
+    try:
+        days = rng.get("days", 0)
+        if days >= 14:
+            half = days // 2
+            re = date.fromisoformat(rng["end"])
+            last_start = re - timedelta(days=half-1)
+            first_end = last_start - timedelta(days=1)
+            first_start = first_end - timedelta(days=half-1)
+            
+            utc_first_s, utc_first_e = _utc_range(first_start, first_end)
+            utc_last_s, utc_last_e = _utc_range(last_start, re)
+            
+            first_sales = await _sales_total(db, utc_first_s, utc_first_e)
+            last_sales = await _sales_total(db, utc_last_s, utc_last_e)
+            
+            if first_sales > 0:
+                pct = ((last_sales - first_sales) / first_sales) * 100
+                if pct > 5:
+                    return {"kind": "pace", "text": f"Your last <strong>{half} days</strong> are pacing <strong>{pct:.1f}%</strong> ahead of the first half of this period."}
+    except Exception:
+        from app.core.log import logger
+        logger.error("_insight_pace failed", exc_info=True)
+    return None
+
+async def _insight_margin(margin_data: dict[str, Any]) -> dict[str, str] | None:
+    try:
+        delta = margin_data.get("delta_pts")
+        if delta is not None and delta >= 1.0:
+            return {"kind": "margin", "text": f"Margin improved <strong>{delta:.1f} points</strong> versus the previous period."}
+    except Exception:
+        pass
+    return None
+
+async def _insight_weekday(db: AsyncSession, rng: dict[str, Any]) -> dict[str, str] | None:
+    try:
+        if rng.get("days", 0) >= 28:
+            daily_current = await _daily_sales_rows(db, rng["utc_start"], rng["utc_end"])
+            daily_prior = await _daily_sales_rows(db, rng["prior_utc_start"], rng["prior_utc_end"])
+            
+            def busiest_day(daily_rows):
+                sums = {i: 0.0 for i in range(7)}
+                for row in daily_rows:
+                    dt = date.fromisoformat(row["date"])
+                    sums[dt.weekday()] += (float(row["pos"]) + float(row["b2b"]) - float(row["refunds"]))
+                if sum(sums.values()) == 0:
+                    return None
+                busiest_idx = max(sums.items(), key=lambda x: x[1])[0]
+                weekdays = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+                return weekdays[busiest_idx]
+                
+            cur_day = busiest_day(daily_current)
+            pri_day = busiest_day(daily_prior)
+            if cur_day and pri_day and cur_day != pri_day:
+                return {"kind": "weekday", "text": f"<strong>{cur_day}s</strong> are now your busiest day, overtaking <strong>{pri_day}s</strong>."}
+    except Exception:
+        from app.core.log import logger
+        logger.error("_insight_weekday failed", exc_info=True)
+    return None
 
 async def get_summary(
     db: AsyncSession,
@@ -579,7 +749,7 @@ async def get_summary(
     }
     try:
         number_payload = await _build_numbers(db, rng, user)
-        numbers = {key: number_payload[key] for key in ("sales", "clients_owe", "spent", "stock_alerts")}
+        numbers = {key: number_payload[key] for key in ("sales", "clients_owe", "spent", "stock_alerts", "margin")}
         alt_sales_today = number_payload.get("alt_sales_today", {"value": 0})
     except Exception:
         logger.error("dashboard_summary: numbers section failed", exc_info=True)
@@ -611,6 +781,35 @@ async def get_summary(
         except Exception:
             pass
         _errors.append({"section": "top_products", "reason": "query failed"})
+        
+    insights = []
+    try:
+        overdue_insight = await _insight_overdue(db, numbers)
+        if overdue_insight: insights.append(overdue_insight)
+        
+        if len(insights) < 3:
+            stockout_insight = await _insight_stockout(db, numbers)
+            if stockout_insight: insights.append(stockout_insight)
+            
+        if len(insights) < 3:
+            pace_insight = await _insight_pace(db, rng)
+            if pace_insight: insights.append(pace_insight)
+            
+        if len(insights) < 3:
+            margin_insight = await _insight_margin(numbers.get("margin", {}))
+            if margin_insight: insights.append(margin_insight)
+            
+        if len(insights) < 3:
+            weekday_insight = await _insight_weekday(db, rng)
+            if weekday_insight: insights.append(weekday_insight)
+            
+    except Exception:
+        logger.error("dashboard_summary: insights section failed", exc_info=True)
+        try:
+            await db.rollback()
+        except Exception:
+            pass
+        _errors.append({"section": "insights", "reason": "query failed"})
 
     generated_at = now_local().isoformat()
 
@@ -626,6 +825,7 @@ async def get_summary(
         "numbers": numbers,
         "chart": chart,
         "panels": panels,
+        "insights": insights,
         "generated_at": generated_at,
         "viewer": {
             "role": user_role,

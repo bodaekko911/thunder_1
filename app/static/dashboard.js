@@ -5,8 +5,6 @@ let lastUpdatedAt = null;
 let elapsedTimer = null;
 let refreshTimer = null;
 let salesChart = null;
-let topProductsTab = "revenue";
-let activityFilter = "all";
 let dashboardData = null;
 let currentUser = null;
 let dashboardAbortController = null;
@@ -158,72 +156,90 @@ function tooltipForCard(key) {
   return tips[key] || "";
 }
 
-function cardSpec(key) {
-  const rangeLabel = dashboardData?.range?.label || "this period";
-  if (key === "sales") {
-    return {
-      label: dashboardData?.range?.label === "Today" ? "Sales today" : `Sales ${rangeLabel.toLowerCase()}`,
-      value: formatMoney(dashboardData?.numbers?.sales?.value || 0),
-      meta: numberDeltaText("sales", dashboardData?.numbers?.sales),
-      sparkline: dashboardData?.numbers?.sales?.sparkline || [],
-      tooltip: tooltipForCard("sales"),
-    };
+function renderHero() {
+  const rangeLabel = dashboardData?.range?.label || "This period";
+  const isAlt = dashboardData?.viewer?.can_view_b2b === false && dashboardData?.viewer?.alt_sales_today;
+  
+  let value = 0;
+  if (isAlt) {
+      value = dashboardData?.viewer?.alt_sales_today?.value || 0;
+      document.getElementById("hero-eyebrow").textContent = "YOUR SHIFT TODAY";
+  } else {
+      value = dashboardData?.numbers?.sales?.value || 0;
+      document.getElementById("hero-eyebrow").textContent = `NET SALES · ${rangeLabel.toUpperCase()}`;
   }
-  if (key === "clients_owe" && !(dashboardData?.viewer?.can_view_b2b)) {
-    return {
-      label: "Sales today",
-      value: formatMoney(dashboardData?.viewer?.alt_sales_today?.value || 0),
-      meta: "Your shift total so far",
-      sparkline: [],
-      tooltip: tooltipForCard("sales_today"),
-    };
+  
+  document.getElementById("hero-sales-value").textContent = formatMoney(value);
+  
+  const prevValue = dashboardData?.numbers?.sales?.prev_value || 0;
+  const deltaPct = dashboardData?.numbers?.sales?.delta_pct;
+  const chip = document.getElementById("hero-sales-chip");
+  
+  if (isAlt || deltaPct === null || deltaPct === undefined) {
+      chip.style.display = "none";
+  } else {
+      chip.style.display = "inline-flex";
+      chip.textContent = `${deltaPct >= 0 ? "↑" : "↓"} ${Math.abs(deltaPct).toFixed(1)}%`;
+      chip.className = `hero-chip ${deltaPct >= 0 ? "positive" : "negative"}`;
   }
-  if (key === "clients_owe") {
-    return {
-      label: "Money clients owe you",
-      value: formatMoney(dashboardData?.numbers?.clients_owe?.value || 0),
-      meta: `${formatNumber(dashboardData?.numbers?.clients_owe?.overdue_count || 0)} overdue`,
-      sparkline: [],
-      tooltip: tooltipForCard("clients_owe"),
-    };
+  
+  const narrative = document.getElementById("hero-narrative");
+  if (isAlt) {
+      narrative.textContent = "Your total sales recorded so far in this shift.";
+  } else if (value === 0 || prevValue === 0) {
+      narrative.textContent = "You haven't recorded any sales yet for this period.";
+  } else {
+      const diff = Math.abs(value - prevValue);
+      const direction = value >= prevValue ? "more" : "less";
+      let paceText = "";
+      const paceInsight = (dashboardData?.insights || []).find(i => i.kind === "pace");
+      if (paceInsight) {
+          paceText = ` ${paceInsight.text}`;
+      }
+      narrative.innerHTML = `That's ${formatMoney(diff)} ${direction} than the previous period.${paceText}`;
   }
-  if (key === "spent") {
-    return {
-      label: dashboardData?.range?.label === "Today" ? "Money you've spent today" : `Money you've spent ${rangeLabel.toLowerCase()}`,
-      value: formatMoney(dashboardData?.numbers?.spent?.value || 0),
-      meta: numberDeltaText("spent", dashboardData?.numbers?.spent),
-      sparkline: dashboardData?.numbers?.spent?.sparkline || [],
-      tooltip: tooltipForCard("spent"),
-    };
+  
+  if (value === 0 && !isAlt) {
+      document.getElementById("trend-section").style.display = "none";
+      document.getElementById("editorial-stats").style.display = "none";
+      document.getElementById("briefing-container").style.display = "block";
+  } else {
+      document.getElementById("trend-section").style.display = "block";
+      document.getElementById("editorial-stats").style.display = "flex";
+      document.getElementById("briefing-container").style.display = "none";
   }
-  return {
-    label: "Stock alerts",
-    value: `${formatNumber(dashboardData?.numbers?.stock_alerts?.value || 0)} items`,
-    meta: `${formatNumber(dashboardData?.numbers?.stock_alerts?.out_count || 0)} out · ${formatNumber(dashboardData?.numbers?.stock_alerts?.low_count || 0)} low`,
-    sparkline: [],
-    tooltip: tooltipForCard("stock_alerts"),
-  };
 }
 
-function sparklineBars(values) {
-  if (!values?.length) return "";
-  const max = Math.max(...values, 1);
-  return values.map((value) => `<span style="height:${Math.max(6, Math.round((value / max) * 40))}px"></span>`).join("");
-}
-
-function renderNumbers() {
-  ["sales", "clients_owe", "spent", "stock_alerts"].forEach((key) => {
-    const node = document.querySelector(`[data-card="${key}"]`);
-    const spec = cardSpec(key);
-    node.innerHTML = `
-      <div class="number-card-button" data-tooltip="${escHtml(spec.tooltip)}">
-        <span class="number-label">${escHtml(spec.label)}</span>
-        <strong class="number-value">${escHtml(spec.value)}</strong>
-        <span class="number-meta">${escHtml(spec.meta)}</span>
-        ${spec.sparkline.length ? `<div class="sparkline-bars">${sparklineBars(spec.sparkline)}</div>` : `<div class="number-breakdown">${escHtml(spec.meta)}</div>`}
-      </div>
-    `;
-  });
+function renderEditorialStats() {
+  const owe = dashboardData?.numbers?.clients_owe || {};
+  const spent = dashboardData?.numbers?.spent || {};
+  const margin = dashboardData?.numbers?.margin || {};
+  
+  document.getElementById("ed-owe-value").textContent = formatMoney(owe.value || 0);
+  document.getElementById("ed-owe-prose").textContent = `${formatNumber(owe.overdue_count || 0)} invoices over 30 days old.`;
+  
+  document.getElementById("ed-spent-value").textContent = formatMoney(spent.value || 0);
+  let spentDelta = "";
+  if (spent.delta_pct !== null && spent.delta_pct !== undefined) {
+      spentDelta = `${spent.delta_pct >= 0 ? "Up" : "Down"} ${Math.abs(spent.delta_pct).toFixed(1)}% on the previous period.`;
+  } else {
+      spentDelta = "No comparison available.";
+  }
+  document.getElementById("ed-spent-prose").textContent = spentDelta;
+  
+  const marginValue = document.getElementById("ed-margin-value");
+  const marginProse = document.getElementById("ed-margin-prose");
+  if (margin.value_pct === null || margin.value_pct === undefined) {
+      marginValue.textContent = "—";
+      marginProse.textContent = "No cost data on items yet.";
+  } else {
+      marginValue.textContent = `${margin.value_pct.toFixed(1)}%`;
+      if (margin.delta_pts !== null && margin.delta_pts !== undefined) {
+          marginProse.textContent = `${margin.delta_pts >= 0 ? "Improved" : "Fell"} ${Math.abs(margin.delta_pts).toFixed(1)} points vs last period.`;
+      } else {
+          marginProse.textContent = "No comparison available.";
+      }
+  }
 }
 
 function renderBriefing() {
@@ -241,11 +257,6 @@ function renderBriefing() {
   )).join("");
 }
 
-function chartTitle() {
-  const label = dashboardData?.range?.label || "This period";
-  return `Sales over time — ${label}`;
-}
-
 function chartLabels(buckets) {
   const granularity = dashboardData?.range?.granularity || "day";
   return buckets.map((bucket) => {
@@ -258,92 +269,94 @@ function chartLabels(buckets) {
 
 function renderChart() {
   const buckets = dashboardData?.chart?.buckets || [];
-  document.getElementById("chart-title").textContent = chartTitle();
-  document.getElementById("chart-table").innerHTML = `
-    <tr><th>Date</th><th>POS</th><th>B2B</th><th>Refunds</th><th>Orders</th></tr>
-    ${buckets.map((bucket) => `<tr><td>${bucket.date}</td><td>${formatMoneyPrecise(bucket.pos)}</td><td>${formatMoneyPrecise(bucket.b2b)}</td><td>${formatMoneyPrecise(bucket.refunds)}</td><td>${bucket.orders}</td></tr>`).join("")}
-  `;
-  const chartData = {
-    labels: chartLabels(buckets),
-    datasets: [
-      { label: "POS", data: buckets.map((bucket) => bucket.pos), backgroundColor: getComputedStyle(document.documentElement).getPropertyValue("--accent").trim(), stack: "sales" },
-      { label: "B2B", data: buckets.map((bucket) => bucket.b2b), backgroundColor: "#3b5f8a", stack: "sales" },
-      { label: "Refunds", data: buckets.map((bucket) => bucket.refunds), backgroundColor: "#b54040", stack: "sales" },
-    ],
-  };
+  const labels = chartLabels(buckets);
+  const data = buckets.map((bucket) => (Number(bucket.pos || 0) + Number(bucket.b2b || 0) + Number(bucket.refunds || 0)));
+  
   if (!salesChart) {
     salesChart = new Chart(document.getElementById("sales-chart"), {
-      type: "bar",
-      data: chartData,
+      type: "line",
+      data: {
+        labels: labels,
+        datasets: [{
+          data: data,
+          fill: true,
+          borderColor: getComputedStyle(document.documentElement).getPropertyValue("--accent").trim(),
+          backgroundColor: getComputedStyle(document.documentElement).getPropertyValue("--accent-soft").trim(),
+          tension: 0.35,
+          pointRadius: 0,
+          pointHoverRadius: 4
+        }]
+      },
       options: {
         responsive: true,
         maintainAspectRatio: false,
         animation: false,
         interaction: { mode: "index", intersect: false },
-        plugins: {
-          legend: { display: true, position: "top", align: "end" },
-          tooltip: {
-            callbacks: {
-              afterBody(items) {
-                const bucket = buckets[items[0]?.dataIndex || 0];
-                return [`Transactions: ${bucket?.orders || 0}`];
-              },
-            },
-          },
-        },
+        plugins: { legend: { display: false } },
         scales: {
-          x: { stacked: true, grid: { display: false } },
-          y: { stacked: true, grid: { display: false }, ticks: { display: false }, border: { display: false } },
-        },
+          x: {
+            grid: { display: false, drawBorder: false },
+            ticks: {
+              callback: function(value, index, values) {
+                if (index === 0 || index === values.length - 1 || index === Math.floor(values.length / 2)) {
+                  return this.getLabelForValue(value);
+                }
+                return null;
+              },
+              maxRotation: 0,
+              color: getComputedStyle(document.documentElement).getPropertyValue("--text-muted").trim(),
+              font: { family: "DM Sans", size: 11 }
+            }
+          },
+          y: { display: false }
+        }
       },
     });
     return;
   }
-  salesChart.data.labels = chartData.labels;
-  salesChart.data.datasets.forEach((dataset, index) => {
-    dataset.data = chartData.datasets[index].data;
-    dataset.backgroundColor = chartData.datasets[index].backgroundColor;
-  });
-  salesChart.options.plugins.tooltip.callbacks.afterBody = (items) => {
-    const bucket = buckets[items[0]?.dataIndex || 0];
-    return [`Transactions: ${bucket?.orders || 0}`];
-  };
+  salesChart.data.labels = labels;
+  salesChart.data.datasets[0].data = data;
+  salesChart.data.datasets[0].borderColor = getComputedStyle(document.documentElement).getPropertyValue("--accent").trim();
+  salesChart.data.datasets[0].backgroundColor = getComputedStyle(document.documentElement).getPropertyValue("--accent-soft").trim();
   salesChart.update("none");
 }
 
-function topProductsTitle() {
-  const label = dashboardData?.range?.label || "This period";
-  return `Best-sellers ${label.toLowerCase()}`;
-}
-
 function renderTopProducts() {
-  document.getElementById("top-products-title").textContent = topProductsTitle();
-  const key = topProductsTab === "revenue" ? "top_products_by_revenue" : "top_products_by_qty";
-  const products = dashboardData?.panels?.[key] || [];
-  const maxValue = Math.max(...products.map((product) => topProductsTab === "revenue" ? Number(product.revenue || 0) : Number(product.qty || 0)), 1);
+  const products = dashboardData?.panels?.top_products_by_revenue || [];
   const container = document.getElementById("top-products-list");
+  const rangeLabel = dashboardData?.range?.label || "This period";
+  document.getElementById("top-products-title").textContent = `Best-sellers · ${rangeLabel}`;
   if (!products.length) {
     container.innerHTML = `<div class="empty-state">No products sold in this range.</div>`;
     return;
   }
-  container.innerHTML = products.map((product) => {
-    const value = topProductsTab === "revenue" ? Number(product.revenue || 0) : Number(product.qty || 0);
-    const label = topProductsTab === "revenue" ? formatMoney(value) : `${formatNumber(value)} units`;
-    const width = Math.max(8, Math.round((value / maxValue) * 100));
+  container.innerHTML = products.slice(0, 5).map((product) => {
     return `
       <div class="list-row top-product-row">
         <div class="row-main">
           <span class="row-title">${escHtml(product.name)}</span>
-          <span class="row-value">${escHtml(label)}</span>
+          <span class="row-units">${formatNumber(product.qty || 0)} units</span>
         </div>
-        <span class="row-bar"><span style="width:${width}%"></span></span>
+        <span class="row-value">${formatMoney(product.revenue || 0)}</span>
       </div>
     `;
   }).join("");
 }
 
+function renderInsights() {
+  const insights = (dashboardData?.insights || []).filter(i => i.kind !== "pace");
+  const container = document.getElementById("insights-list");
+  if (!insights.length) {
+      container.innerHTML = `<p class="insight-text">Nothing notable to flag for this period.</p>`;
+      return;
+  }
+  container.innerHTML = insights.map(i => {
+      return `<p class="insight-text">${i.text}</p>`;
+  }).join("");
+}
+
 function renderRecentActivity() {
-  const rows = (dashboardData?.panels?.recent_activity || []).filter((item) => activityFilter === "all" ? true : item.type === activityFilter);
+  const rows = (dashboardData?.panels?.recent_activity || []);
   const tbody = document.getElementById("recent-activity");
   if (!rows.length) {
     tbody.innerHTML = `<tr><td colspan="4" class="empty-cell">No activity in this range.</td></tr>`;
@@ -392,9 +405,11 @@ async function loadDashboard() {
       dashboardHasLoaded = true;
     }
     renderBriefing();
-    renderNumbers();
+    renderHero();
+    renderEditorialStats();
     renderChart();
     renderTopProducts();
+    renderInsights();
     renderRecentActivity();
     markUpdated();
   } catch (error) {
@@ -461,20 +476,6 @@ function bindEvents() {
   document.getElementById("range-apply").addEventListener("click", applyCustomRange);
   document.getElementById("custom-range-modal").addEventListener("click", (event) => {
     if (event.target.id === "custom-range-modal") closeCustomRangePicker();
-  });
-  document.querySelectorAll("[data-top-tab]").forEach((button) => {
-    button.addEventListener("click", () => {
-      topProductsTab = button.dataset.topTab;
-      document.querySelectorAll("[data-top-tab]").forEach((item) => item.classList.toggle("active", item === button));
-      renderTopProducts();
-    });
-  });
-  document.querySelectorAll("[data-activity-filter]").forEach((button) => {
-    button.addEventListener("click", () => {
-      activityFilter = button.dataset.activityFilter;
-      document.querySelectorAll("[data-activity-filter]").forEach((item) => item.classList.toggle("active", item === button));
-      renderRecentActivity();
-    });
   });
 }
 

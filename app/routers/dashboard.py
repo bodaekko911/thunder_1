@@ -467,54 +467,68 @@ def dashboard_ui():
     </div>
   </header>
 
-  <article class="card briefing-card" aria-label="Today's briefing">
+  <article class="briefing-card" aria-label="Today's briefing" style="display: none;" id="briefing-container">
     <p class="briefing-lead" id="briefing-lead">Loading today's briefing…</p>
     <p class="briefing-body" id="briefing-body"></p>
     <div class="briefing-actions" id="briefing-actions"></div>
   </article>
 
-  <section class="numbers-grid" aria-label="Key numbers">
-    <article class="card number-card" data-card="sales" aria-live="polite"></article>
-    <article class="card number-card" data-card="clients_owe" aria-live="polite"></article>
-    <article class="card number-card" data-card="spent" aria-live="polite"></article>
-    <article class="card number-card" data-card="stock_alerts" aria-live="polite"></article>
+  <!-- Section 2: HERO -->
+  <section class="hero-section" id="hero-section" aria-label="Key numbers">
+     <div class="hero-eyebrow" id="hero-eyebrow">NET SALES · THIS PERIOD</div>
+     <div class="hero-value-wrap">
+         <div class="hero-value" id="hero-sales-value">EGP 0</div>
+         <div class="hero-chip" id="hero-sales-chip">↑ 0%</div>
+     </div>
+     <div class="hero-narrative" id="hero-narrative">Loading...</div>
   </section>
 
-  <section class="card chart-card" aria-label="Sales over time">
-    <div class="panel-head"><h2 id="chart-title">Sales over time</h2></div>
-    <div class="chart-wrap"><canvas id="sales-chart" aria-label="Sales over time chart"></canvas></div>
-    <table class="sr-only" id="chart-table" aria-label="Sales over time table"></table>
+  <!-- Section 3: Trend strip -->
+  <section class="trend-section" id="trend-section" aria-label="Sales over time">
+     <div class="chart-wrap"><canvas id="sales-chart" aria-label="Sales over time chart"></canvas></div>
   </section>
 
-  <div class="panel-grid">
-    <section class="card panel-card" aria-label="Best sellers">
-      <div class="panel-head">
-        <h2 id="top-products-title">Best-sellers</h2>
-        <div class="panel-tabs" role="tablist" aria-label="Best seller mode">
-          <button type="button" class="tab-btn active" data-top-tab="revenue">By revenue</button>
-          <button type="button" class="tab-btn" data-top-tab="qty">By quantity</button>
-        </div>
+  <!-- Section 4: Editorial stats -->
+  <section class="editorial-stats" id="editorial-stats" aria-label="Stats">
+     <div class="ed-stat">
+         <div class="ed-eyebrow">Money owed</div>
+         <div class="ed-value" id="ed-owe-value">0</div>
+         <div class="ed-prose" id="ed-owe-prose"></div>
+     </div>
+     <div class="ed-stat">
+         <div class="ed-eyebrow">Spent</div>
+         <div class="ed-value" id="ed-spent-value">0</div>
+         <div class="ed-prose" id="ed-spent-prose"></div>
+     </div>
+     <div class="ed-stat">
+         <div class="ed-eyebrow">Margin</div>
+         <div class="ed-value" id="ed-margin-value">0</div>
+         <div class="ed-prose" id="ed-margin-prose"></div>
+     </div>
+  </section>
+
+  <!-- Section 5: Best-sellers and Insights -->
+  <section class="two-col-section">
+      <div class="col-bestsellers">
+          <h2 class="col-title" id="top-products-title">Best-sellers</h2>
+          <div id="top-products-list" class="bestsellers-list"></div>
       </div>
-      <div id="top-products-list" class="panel-body"></div>
-    </section>
+      <div class="col-insights">
+          <h2 class="col-title">Worth knowing</h2>
+          <div id="insights-list" class="insights-list"></div>
+      </div>
+  </section>
 
-    <section class="card panel-card" aria-label="Recent transactions">
-      <div class="panel-head">
+  <!-- Section 6: Recent transactions -->
+  <section class="recent-transactions-section">
+      <div class="recent-header">
         <h2>Recent transactions</h2>
-        <div class="panel-tabs" role="tablist" aria-label="Recent activity filter">
-          <button type="button" class="tab-btn active" data-activity-filter="all">All</button>
-          <button type="button" class="tab-btn" data-activity-filter="sale">Sales</button>
-          <button type="button" class="tab-btn" data-activity-filter="refund">Refunds</button>
-        </div>
+        <a href="/reports/" class="view-all-link">View all →</a>
       </div>
-      <div class="panel-body">
         <table class="activity-table">
           <thead><tr><th>Invoice</th><th>Customer</th><th>Amount</th><th>Time</th></tr></thead>
           <tbody id="recent-activity"></tbody>
         </table>
-      </div>
-    </section>
-  </div>
 </main>
 
 <div id="custom-range-modal" class="range-modal hidden" role="dialog" aria-modal="true" aria-labelledby="crm-title">
