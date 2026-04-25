@@ -1243,6 +1243,110 @@ async def print_refund(
         },
     )
 
+# â”€â”€ CLIENT STATEMENT â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+async def _build_client_statement_payload(
+    client_id: int,
+    db: AsyncSession,
+    *,
+    as_of: Optional[date] = None,
+):
+    _r = await db.execute(select(B2BClient).where(B2BClient.id == client_id))
+    client = _r.scalar_one_or_none()
+    if not client:
+        raise HTTPException(status_code=404, detail="Client not found")
+
+    invoice_stmt = (
+        select(B2BInvoice)
+        .where(B2BInvoice.client_id == client_id)
+        .order_by(B2BInvoice.created_at)
+    )
+    refund_stmt = (
+        select(B2BRefund)
+        .where(B2BRefund.client_id == client_id)
+        .order_by(B2BRefund.created_at)
+    )
+    if as_of:
+        cutoff = datetime.combine(as_of + timedelta(days=1), time.min, tzinfo=timezone.utc)
+        invoice_stmt = invoice_stmt.where(B2BInvoice.created_at < cutoff)
+        refund_stmt = refund_stmt.where(B2BRefund.created_at < cutoff)
+
+    invoices = (await db.execute(invoice_stmt)).scalars().all()
+    refunds = (await db.execute(refund_stmt)).scalars().all()
+    payments = await _load_client_payment_activity(db, client_id=client_id, as_of=as_of)
+
+    txns = []
+    for inv in invoices:
+        txns.append({
+            "date": inv.created_at,
+            "ref": inv.invoice_number,
+            "type": "invoice",
+            "desc": f"{(inv.invoice_type or 'b2b').replace('_', ' ').title()} Invoice",
+            "debit": float(inv.total or 0),
+            "credit": float(inv.amount_paid or 0),
+            "status": inv.status,
+        })
+    for rfnd in refunds:
+        txns.append({
+            "date": rfnd.created_at,
+            "ref": rfnd.refund_number,
+            "type": "refund",
+            "desc": "Credit / Refund",
+            "debit": 0.0,
+            "credit": float(rfnd.total or 0),
+            "status": "refund",
+        })
+
+    txns.sort(key=lambda x: x["date"] or datetime.min.replace(tzinfo=timezone.utc))
+
+    running = 0.0
+    rows = []
+    for t in txns:
+        running += t["debit"] - t["credit"]
+        rows.append({
+            "date": t["date"].strftime("%d-%b-%Y") if t["date"] else "-",
+            "ref": t["ref"],
+            "type": t["type"],
+            "desc": t["desc"],
+            "debit": round(float(t["debit"] or 0), 2),
+            "credit": round(float(t["credit"] or 0), 2),
+            "balance": round(running, 2),
+            "status": t["status"],
+        })
+
+    statement_date = as_of or date.today()
+    return {
+        "client": {
+            "id": client.id,
+            "code": f"C{str(client.id).zfill(4)}",
+            "name": client.name,
+            "contact_person": client.contact_person or "",
+            "phone": client.phone or "",
+            "email": client.email or "",
+            "address": client.address or "",
+            "payment_terms": client.payment_terms or "",
+            "credit_limit": float(client.credit_limit or 0),
+            "outstanding": round(running, 2),
+        },
+        "statement_date": statement_date.strftime("%d-%b-%Y"),
+        "statement_period_label": f"As of {statement_date.strftime('%d-%b-%Y')}",
+        "transactions": rows,
+        "payment_activity": payments,
+        "total_invoiced": round(sum(t["debit"] for t in rows), 2),
+        "total_paid": round(sum(t["credit"] for t in rows), 2),
+        "balance_due": round(running, 2),
+        "as_of": as_of.isoformat() if as_of else None,
+    }
+
+
+@router.get("/api/clients/{client_id}/statement")
+async def client_statement_data(
+    client_id: int,
+    as_of: Optional[date] = None,
+    db: AsyncSession = Depends(get_async_session),
+):
+    return await _build_client_statement_payload(client_id, db, as_of=as_of)
+
+
 @router.get("/client/{client_id}/statement", response_class=HTMLResponse)
 async def client_statement_print(
     client_id: int,
