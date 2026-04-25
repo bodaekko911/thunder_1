@@ -31,14 +31,8 @@ pip-wheel-metadata/
 *.db
 *.sqlite
 *.sqlite3
-*.dump
-*.bak
-*.sql
 *.log
 logs/
-pytest-cache-files-*/
-test_out.txt
-test_output.txt
 
 app/static/uploads/*
 !app/static/uploads/.gitkeep

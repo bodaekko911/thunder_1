@@ -1,9 +1,7 @@
-import os
-
 from app.core.config import settings
 
 
-bind = f"{settings.API_HOST}:{int(os.getenv('PORT', settings.API_PORT))}"
+bind = f"{settings.API_HOST}:{settings.API_PORT}"
 workers = settings.WORKERS
 worker_class = "uvicorn.workers.UvicornWorker"
 accesslog = "-"
