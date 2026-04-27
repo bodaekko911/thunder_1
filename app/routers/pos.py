@@ -266,6 +266,7 @@ async def view_invoice(invoice_id: int, db: AsyncSession = Depends(get_async_ses
     return f"""<!DOCTYPE html>
 <html>
 <head>
+<script src="/static/theme-init.js"></script>
 <title>Receipt {inv.invoice_number}</title>
 <style>
 * {{ box-sizing:border-box; margin:0; padding:0; }}
@@ -359,6 +360,7 @@ def pos_ui(current_user: User = Depends(require_permission("page_pos"))):
     return """<!DOCTYPE html>
 <html>
 <head>
+<script src="/static/theme-init.js"></script>
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>POS — Thunder ERP</title>
 <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
@@ -774,12 +776,6 @@ body.light .toast{background:var(--card);}
 </div>
 
 <script>
-  // Auth guard: redirect to login if the readable session cookie is absent
-  function _hasAuthCookie() {
-      return document.cookie.split(";").some(c => c.trim().startsWith("logged_in="));
-  }
-  if (!_hasAuthCookie()) { _redirectToLogin(); }
-
   function setModeButton(isLight){
       const btn = document.getElementById("mode-btn");
       if(btn) btn.innerText = isLight ? "☀️" : "🌙";
@@ -963,7 +959,6 @@ window.addEventListener("offline",()=>{
 
 /* ── INIT ── */
 async function load(){
-    if(!_hasAuthCookie()){ _redirectToLogin(); return; }
     if(!navigator.onLine){
         const ind = document.getElementById("offline-indicator");
         if(ind) ind.style.display = "flex";
@@ -1354,8 +1349,6 @@ function hideToast(){ document.getElementById("toast").classList.remove("show");
 async function checkout(settleLater=false){
     if(!cart.length){ showToast("Cart is empty"); return; }
     if(settleLater && !selectedCustomer){ showToast("Select a customer to settle later"); return; }
-    if(!_hasAuthCookie()){ _redirectToLogin(); return; }
-
     let btn=document.getElementById(settleLater?"settle_btn":"checkout_btn");
     btn.disabled=true; btn.innerText="Processing…";
 

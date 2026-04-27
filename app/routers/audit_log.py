@@ -93,6 +93,7 @@ def audit_log_ui():
     return """<!DOCTYPE html>
 <html lang="en">
 <head>
+<script src="/static/theme-init.js"></script>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Audit Log — Thunder ERP</title>
@@ -329,12 +330,6 @@ tbody td{padding:12px 14px;font-size:13px;vertical-align:top}
 <div class="pagination" id="pagination"></div>
 
 <script>
-// Auth guard: redirect to login if the readable session cookie is absent
-function _hasAuthCookie() {
-    return document.cookie.split(";").some(c => c.trim().startsWith("logged_in="));
-}
-if (!_hasAuthCookie()) { _redirectToLogin(); }
-
 // ── colour mode ──
 if (localStorage.getItem("colorMode") === "light") {
     document.body.classList.add("light");

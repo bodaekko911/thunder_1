@@ -398,20 +398,9 @@ def dashboard_ui():
     return f"""<!DOCTYPE html>
 <html lang="en" dir="{locale_dir}">
 <head>
+<script src="/static/theme-init.js"></script>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<script>
-  (function () {{
-    try {{
-      var stored = localStorage.getItem("colorMode");
-      var theme = stored === "light" ? "light" : "dark";
-      document.documentElement.setAttribute("data-theme", theme);
-      if (theme === "light") document.documentElement.classList.add("light");
-    }} catch (_) {{
-      document.documentElement.setAttribute("data-theme", "dark");
-    }}
-  }})();
-</script>
 <script src="/static/theme.js"></script>
 <title>Dashboard – Thunder ERP</title>
 <link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,300;0,400;0,600;1,300;1,400&family=DM+Sans:wght@300;400;500;600&family=DM+Mono:wght@400;500&family=Outfit:wght@400;500;600;700;800;900&display=swap" rel="stylesheet">

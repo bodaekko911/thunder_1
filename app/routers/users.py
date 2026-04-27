@@ -268,6 +268,7 @@ def password_ui(_=Depends(get_current_user)):
     return """<!DOCTYPE html>
 <html>
 <head>
+<script src="/static/theme-init.js"></script>
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Change Password — Thunder ERP</title>
 <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
@@ -390,11 +391,6 @@ function initializeColorMode(){
     document.body.classList.toggle("light", isLight);
     setModeButton(isLight);
 }
-function _hasAuthCookie() {
-    return document.cookie.split(";").some(c => c.trim().startsWith("logged_in="));
-}
-if (!_hasAuthCookie()) { _redirectToLogin(); }
-
 let toastTimer = null;
 
 function showToast(msg){
@@ -506,6 +502,7 @@ def users_ui(current_user: User = Depends(core_require_admin)):
     return """<!DOCTYPE html>
 <html>
 <head>
+<script src="/static/theme-init.js"></script>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Users — Thunder ERP</title>
@@ -839,12 +836,6 @@ function initializeColorMode(){
     document.body.classList.toggle("light", isLight);
     setModeButton(isLight);
 }
-// Auth guard: redirect to login if the readable session cookie is absent
-function _hasAuthCookie() {
-    return document.cookie.split(";").some(c => c.trim().startsWith("logged_in="));
-}
-if (!_hasAuthCookie()) { _redirectToLogin(); }
-
 async function initUser() {
     try {
         const r = await fetch("/auth/me");

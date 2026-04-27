@@ -585,6 +585,7 @@ def expenses_ui(current_user: User = Depends(require_permission("page_expenses")
     return """<!DOCTYPE html>
 <html>
 <head>
+<script src="/static/theme-init.js"></script>
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <script src="/static/theme.js"></script>
 <title>Expenses — Thunder ERP</title>
@@ -1021,12 +1022,6 @@ nav {
 
 <script>
 // ── State ─────────────────────────────────────────────
-// Auth guard: redirect to login if the readable session cookie is absent
-function _hasAuthCookie() {
-    return document.cookie.split(";").some(c => c.trim().startsWith("logged_in="));
-}
-if (!_hasAuthCookie()) { _redirectToLogin(); }
-
 let categories    = [];
 let activeCatId   = null;
 let editingId     = null;

@@ -52,6 +52,7 @@ def login_page():
 <!DOCTYPE html>
 <html>
 <head>
+<script src="/static/theme-init.js"></script>
     <meta charset="UTF-8">
     <title>ERP Login</title>
     <style>

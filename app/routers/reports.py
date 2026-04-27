@@ -1953,6 +1953,7 @@ def reports_ui(current_user: User = Depends(require_permission("page_reports")))
     return """<!DOCTYPE html>
 <html>
 <head>
+<script src="/static/theme-init.js"></script>
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Reports — Thunder ERP</title>
 <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
@@ -2425,12 +2426,6 @@ td.mono{font-family:var(--mono);}
 <div class="toast" id="toast"></div>
 
 <script>
-  // Auth guard: redirect to login if the readable session cookie is absent
-  function _hasAuthCookie() {
-      return document.cookie.split(";").some(c => c.trim().startsWith("logged_in="));
-  }
-  if (!_hasAuthCookie()) { _redirectToLogin(); }
-
   let __currentUser = null;
 
   function setModeButton(isLight){

@@ -11,6 +11,7 @@ def home_ui(_=Depends(get_current_user)):
 <!DOCTYPE html>
 <html>
 <head>
+<script src="/static/theme-init.js"></script>
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Habiba Organic Farm — ERP</title>
 <link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,300;0,400;0,600;1,300;1,400&family=DM+Sans:wght@300;400;500;600&family=DM+Mono:wght@400;500&family=Outfit:wght@400;500;600;700;800;900&display=swap" rel="stylesheet">
@@ -625,12 +626,6 @@ body {
 </div>
 
 <script>
-// Auth guard: redirect to login if the readable session cookie is absent
-function _hasAuthCookie() {
-    return document.cookie.split(";").some(c => c.trim().startsWith("logged_in="));
-}
-if (!_hasAuthCookie()) { _redirectToLogin(); }
-
 async function initUser() {
     try {
         const r = await fetch("/auth/me");

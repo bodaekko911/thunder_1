@@ -188,6 +188,7 @@ def receive_ui(current_user: User = Depends(require_permission("page_receive_pro
     return """<!DOCTYPE html>
 <html>
 <head>
+<script src="/static/theme-init.js"></script>
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Receive Products</title>
 <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
@@ -586,10 +587,6 @@ body.light table.hist tr:hover td{background:rgba(0,0,0,.03)}
 <div class="toast" id="toast"></div>
 
 <script>
-// ── Auth guard ──────────────────────────────────────────────────────────────
-if (!document.cookie.split(';').some(c => c.trim().startsWith('logged_in='))) {
-  _redirectToLogin();
-}
 
 // ── State ───────────────────────────────────────────────────────────────────
 let _products  = [];   // [{id, sku, name, unit, cost, stock}, …]

@@ -331,6 +331,7 @@ async def print_refund(refund_id: int, db: AsyncSession = Depends(get_async_sess
     return f"""<!DOCTYPE html>
 <html>
 <head>
+<script src="/static/theme-init.js"></script>
 <title>{refund.refund_number}</title>
 <style>
 * {{ box-sizing:border-box; margin:0; padding:0; }}
@@ -381,6 +382,7 @@ def refunds_ui():
     return """<!DOCTYPE html>
 <html>
 <head>
+<script src="/static/theme-init.js"></script>
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <script src="/static/theme.js"></script>
 <title>Retail Refunds — Thunder ERP</title>
@@ -903,12 +905,6 @@ nav {
 
 <script>
 // ── Init ─────────────────────────────────────────────────────
-// Auth guard: redirect to login if the readable session cookie is absent
-function _hasAuthCookie() {
-    return document.cookie.split(";").some(c => c.trim().startsWith("logged_in="));
-}
-if (!_hasAuthCookie()) { _redirectToLogin(); }
-
 let selectedInvoiceId = null;
 let selectedInvoice   = null;
 let searchTimer       = null;
