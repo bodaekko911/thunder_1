@@ -1,10 +1,13 @@
 from slowapi import Limiter
-from slowapi.util import get_remote_address
 
-from app.core.config import settings
+from app.core.middleware import get_trusted_client_ip
+
+
+def get_rate_limit_key(request):
+    return get_trusted_client_ip(request)
 
 
 limiter = Limiter(
-    key_func=get_remote_address,
+    key_func=get_rate_limit_key,
     default_limits=[],
 )

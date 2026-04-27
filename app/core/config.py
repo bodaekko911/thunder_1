@@ -70,6 +70,8 @@ class BaseAppSettings(BaseSettings):
     PASSWORD_RATE_LIMIT: str = "5/minute"
 
     COOKIE_SECURE: bool = False
+    # Enable behind a known L7 proxy: Railway, Heroku, Fly, Cloudflare, or nginx ingress.
+    TRUST_PROXY: bool = False
 
     POOL_SIZE: int = 10
     POOL_MAX_OVERFLOW: int = 20
@@ -172,6 +174,7 @@ class BaseAppSettings(BaseSettings):
         "SENTRY_SEND_DEFAULT_PII",
         "MIGRATION_CHECK_ON_STARTUP",
         "MIGRATION_CHECK_STRICT",
+        "TRUST_PROXY",
         mode="before",
     )
     @classmethod

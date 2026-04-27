@@ -1,3 +1,4 @@
+import ipaddress
 import time
 from uuid import uuid4
 
@@ -5,10 +6,33 @@ from fastapi import Request
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.types import ASGIApp
 
+from app.core.config import settings
 from app.core.log import bind_log_context, logger, reset_log_context
 
 
 TRUSTED_PROXY_CIDRS: list[str] = []  # populated from settings if needed
+TRUSTED_PROXY_RANGES = (
+    ipaddress.ip_network("127.0.0.0/8"),
+    ipaddress.ip_network("10.0.0.0/8"),
+    ipaddress.ip_network("172.16.0.0/12"),
+    ipaddress.ip_network("192.168.0.0/16"),
+)
+
+
+def _first_forwarded_for(request: Request) -> str | None:
+    forwarded_for = request.headers.get("x-forwarded-for", "")
+    if not forwarded_for:
+        return None
+    first = forwarded_for.split(",", 1)[0].strip()
+    return first or None
+
+
+def _is_trusted_proxy(ip: str) -> bool:
+    try:
+        addr = ipaddress.ip_address(ip)
+        return any(addr in net for net in TRUSTED_PROXY_RANGES)
+    except ValueError:
+        return False
 
 
 def get_trusted_client_ip(request: Request) -> str:
@@ -16,38 +40,26 @@ def get_trusted_client_ip(request: Request) -> str:
     Return the real client IP, only trusting X-Forwarded-For
     if the direct connection comes from a known private/loopback range.
     """
-    import ipaddress
     direct_ip = request.client.host if request.client else None
+    forwarded_for = _first_forwarded_for(request)
 
-    trusted_ranges = [
-        ipaddress.ip_network("127.0.0.0/8"),
-        ipaddress.ip_network("10.0.0.0/8"),
-        ipaddress.ip_network("172.16.0.0/12"),
-        ipaddress.ip_network("192.168.0.0/16"),
-    ]
-
-    def _is_trusted(ip: str) -> bool:
-        try:
-            addr = ipaddress.ip_address(ip)
-            return any(addr in net for net in trusted_ranges)
-        except ValueError:
-            return False
-
-    if direct_ip and _is_trusted(direct_ip):
-        forwarded_for = request.headers.get("x-forwarded-for", "")
-        if forwarded_for:
-            return forwarded_for.split(",")[0].strip()
+    if settings.TRUST_PROXY and forwarded_for:
+        return forwarded_for
+    if direct_ip and _is_trusted_proxy(direct_ip) and forwarded_for:
+        return forwarded_for
 
     return direct_ip or "unknown"
 
 
 def _client_host(request: Request) -> str | None:
-    forwarded_for = request.headers.get("x-forwarded-for")
-    if forwarded_for:
-        return forwarded_for.split(",")[0].strip()
-    if request.client:
-        return request.client.host
-    return None
+    direct_ip = request.client.host if request.client else None
+    forwarded_for = _first_forwarded_for(request)
+
+    if settings.TRUST_PROXY and forwarded_for:
+        return forwarded_for
+    if direct_ip and _is_trusted_proxy(direct_ip) and forwarded_for:
+        return forwarded_for
+    return direct_ip
 
 
 class RequestLoggingMiddleware(BaseHTTPMiddleware):
