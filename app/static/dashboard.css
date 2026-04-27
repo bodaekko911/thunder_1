@@ -422,6 +422,10 @@ a { color: inherit; text-decoration: none; }
   font-weight: 600;
 }
 
+.updated-pill.last-updated-error {
+  color: var(--negative);
+}
+
 .card {
   background: var(--surface);
   border: 1px solid var(--border-strong);

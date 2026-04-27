@@ -131,6 +131,7 @@ function markUpdated() {
   clearInterval(elapsedTimer);
   lastUpdatedAt = Date.now();
   const node = document.getElementById("last-updated");
+  if (node) node.classList.remove("last-updated-error");
   const tick = () => {
     if (!node) return;
     const seconds = Math.max(0, Math.round((Date.now() - lastUpdatedAt) / 1000));
@@ -366,6 +367,14 @@ function renderRecentActivity() {
 }
 
 function showErrorState(message) {
+  if (dashboardHasLoaded) {
+    const node = document.getElementById("last-updated");
+    if (node) {
+      node.textContent = "Refresh failed — retrying";
+      node.classList.add("last-updated-error");
+    }
+    return;
+  }
   document.getElementById("loading").classList.remove("hidden");
   document.getElementById("loading").innerHTML = `<div class="load-error">${escHtml(message)}</div>`;
 }
