@@ -320,6 +320,7 @@ async def login(
         samesite="lax",
         secure=settings.COOKIE_SECURE,
         path="/",
+        max_age=settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60,
     )
     response.set_cookie(
         key="logged_in",
