@@ -1,7 +1,11 @@
+import os
+
 from app.core.config import settings
 
 
-bind = f"{settings.API_HOST}:{settings.API_PORT}"
+# Railway injects PORT at runtime; local runs fall back to API_PORT.
+_port = os.environ.get("PORT") or str(settings.API_PORT)
+bind = f"{settings.API_HOST}:{_port}"
 workers = settings.WORKERS
 worker_class = "uvicorn.workers.UvicornWorker"
 accesslog = "-"
