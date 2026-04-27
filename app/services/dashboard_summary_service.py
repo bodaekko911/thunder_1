@@ -235,11 +235,12 @@ async def _sales_count(db: AsyncSession, utc_s: datetime, utc_e: datetime) -> in
     return _safe_int(pos_count.scalar()) + _safe_int(b2b_count.scalar())
 
 
-async def _expense_total(db: AsyncSession, utc_s: datetime, utc_e: datetime) -> float:
+async def _expense_total(db: AsyncSession, local_start: date, local_end: date) -> float:
     result = await db.execute(
         select(func.coalesce(func.sum(Expense.amount), 0)).where(
-            Expense.created_at >= utc_s,
-            Expense.created_at <= utc_e,
+            # Trace: expense_date="2026-01-15" appears for January 2026, not April 2026.
+            Expense.expense_date >= local_start,
+            Expense.expense_date <= local_end,
         )
     )
     return round(_safe_float(result.scalar()), 2)
@@ -317,14 +318,14 @@ async def _sparkline_sales(db: AsyncSession, rng: dict[str, Any]) -> list[float]
 async def _sparkline_expenses(db: AsyncSession, rng: dict[str, Any]) -> list[float]:
     local_end = date.fromisoformat(rng["end"])
     start = local_end - timedelta(days=13)
-    utc_s, utc_e = _utc_range(start, local_end)
-    bucket_expr = _local_bucket_expr(Expense.created_at, "day")
+    # expense_date is already a local Date, so it is the day bucket.
+    bucket_expr = Expense.expense_date
     rows = await db.execute(
         select(
             bucket_expr.label("bucket_date"),
             func.coalesce(func.sum(Expense.amount), 0).label("amount"),
         )
-        .where(Expense.created_at >= utc_s, Expense.created_at <= utc_e)
+        .where(Expense.expense_date >= start, Expense.expense_date <= local_end)
         .group_by(bucket_expr)
         .order_by(bucket_expr)
     )
@@ -440,8 +441,8 @@ async def _build_numbers(db: AsyncSession, rng: dict[str, Any], user: User, erro
 
     sales_value = await _sales_total(db, rng["utc_start"], rng["utc_end"])
     sales_prior = await _sales_total(db, rng["prior_utc_start"], rng["prior_utc_end"])
-    spent_value = await _expense_total(db, rng["utc_start"], rng["utc_end"])
-    spent_prior = await _expense_total(db, rng["prior_utc_start"], rng["prior_utc_end"])
+    spent_value = await _expense_total(db, date.fromisoformat(rng["start"]), date.fromisoformat(rng["end"]))
+    spent_prior = await _expense_total(db, date.fromisoformat(rng["prior_start"]), date.fromisoformat(rng["prior_end"]))
 
     clients_owe_result = await db.execute(
         select(func.coalesce(func.sum(B2BInvoice.total - func.coalesce(B2BInvoice.amount_paid, 0)), 0)).where(
