@@ -83,27 +83,12 @@ class BaseAppSettings(BaseSettings):
     APP_TIMEZONE: str = "Africa/Cairo"
     APP_LOCALE_DIR: str = "ltr"
 
-    ASSISTANT_MEMORY_CHANNEL: str = "dashboard"
-    ASSISTANT_MAX_QUESTION_CHARS: int = 500
-    ASSISTANT_MAX_CONTEXT_CHARS: int = 12000
-    ASSISTANT_CONTEXT_LIST_LIMIT: int = 5
-    ASSISTANT_PRODUCT_MATCH_LIMIT: int = 5
-    ASSISTANT_PRODUCT_KEYWORD_LIMIT: int = 4
-    ASSISTANT_LOW_STOCK_LIMIT: int = 5
-    ASSISTANT_RATE_LIMIT_REQUESTS: int = 12
-    ASSISTANT_RATE_LIMIT_WINDOW_SECONDS: int = 60
-    ASSISTANT_LLM_TIMEOUT_SECONDS: float = 12.0
-    ASSISTANT_STATIC_CONTEXT_TTL_SECONDS: int = 3600
-
     SENTRY_DSN: str | None = None
     SENTRY_ENVIRONMENT: str | None = None
     SENTRY_TRACES_SAMPLE_RATE: float = 0.0
     SENTRY_SEND_DEFAULT_PII: bool = False
     MIGRATION_CHECK_ON_STARTUP: bool = True
     MIGRATION_CHECK_STRICT: bool = False
-
-    OLLAMA_BASE_URL: str = Field(default="http://localhost:11434")
-    AI_API_KEY: str | None = None
 
     model_config = CONFIG_MODEL
 
@@ -216,7 +201,6 @@ class DevelopmentSettings(BaseAppSettings):
     COOKIE_SECURE: bool = False
     ALLOWED_HOSTS: Annotated[list[str], NoDecode] = ["localhost", "127.0.0.1", "testserver"]
     CORS_ALLOW_ORIGINS: Annotated[list[str], NoDecode] = ["http://localhost:3000", "http://localhost:8000"]
-    OLLAMA_BASE_URL: str = "http://localhost:11434"
 
 
 class ProductionSettings(BaseAppSettings):
@@ -227,7 +211,6 @@ class ProductionSettings(BaseAppSettings):
     COOKIE_SECURE: bool = True
     ALLOWED_HOSTS: Annotated[list[str], NoDecode] = []
     CORS_ALLOW_ORIGINS: Annotated[list[str], NoDecode] = []
-    OLLAMA_BASE_URL: str = "http://ollama:11434"
 
 
 @lru_cache

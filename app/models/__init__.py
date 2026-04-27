@@ -1,5 +1,4 @@
 from app.core.log import ActivityLog
-from app.models.assistant import AssistantFeedback, AssistantMessage, AssistantSession
 from app.models.accounting import Account, Journal, JournalEntry
 from app.models.receipt import ProductReceipt
 from app.models.b2b import (
@@ -36,9 +35,6 @@ from app.models.user import User
 __all__ = [
     "Account",
     "ActivityLog",
-    "AssistantFeedback",
-    "AssistantMessage",
-    "AssistantSession",
     "Attendance",
     "B2BClient",
     "B2BClientPrice",

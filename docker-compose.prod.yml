@@ -23,18 +23,6 @@ services:
       timeout: 5s
       retries: 5
 
-  ollama:
-    image: ollama/ollama:latest
-    entrypoint: ["/bin/sh", "-c", "ollama serve & sleep 5 && ollama pull llama3 && wait"]
-    restart: unless-stopped
-    volumes:
-      - ollama_data:/root/.ollama
-    healthcheck:
-      test: ["CMD", "ollama", "list"]
-      interval: 15s
-      timeout: 5s
-      retries: 5
-
   app:
     build:
       context: .
@@ -44,8 +32,6 @@ services:
       postgres:
         condition: service_healthy
       redis:
-        condition: service_healthy
-      ollama:
         condition: service_healthy
     environment:
       APP_ENV: production
@@ -76,7 +62,6 @@ services:
       POOL_SIZE: ${POOL_SIZE:-20}
       POOL_MAX_OVERFLOW: ${POOL_MAX_OVERFLOW:-40}
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
-      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://ollama:11434}
     ports:
       - "${API_PORT:-8000}:8000"
     volumes:
@@ -91,4 +76,3 @@ services:
 
 volumes:
   postgres_data:
-  ollama_data:
