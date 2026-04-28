@@ -669,7 +669,7 @@ async def delete_b2b_import_batch(
     """
     from sqlalchemy.orm import selectinload
     from app.models.accounting import Journal, JournalEntry
-    from app.models.b2b import B2BClient, B2BInvoiceItem, ConsignmentItem
+    from app.models.b2b import B2BClient
 
     _r = await db.execute(
         select(B2BInvoiceModel)

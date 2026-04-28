@@ -15,13 +15,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
 from app.models.accounting import Account, Journal, JournalEntry
 from app.models.b2b import B2BClient, B2BInvoice, Consignment
-from app.models.customer import Customer
 from app.models.expense import Expense, ExpenseCategory
 from app.models.invoice import Invoice, InvoiceItem
 from app.models.product import Product
 from app.models.refund import RetailRefund
 from app.models.spoilage import SpoilageRecord
-from app.models.user import User
 
 _B2B_REF_TYPES = ("b2b", "b2b_invoice", "consignment_payment", "consignment")
 
@@ -65,7 +63,6 @@ async def _daily_pos_b2b(
     acc_id: int | None,
 ) -> list[float]:
     tz_name = settings.APP_TIMEZONE
-    from zoneinfo import ZoneInfo
     tz = _tz()
 
     pos_r = await db.execute(
@@ -504,7 +501,6 @@ async def _suggested_chips(db: AsyncSession, today: date, acc_id: int | None) ->
 
 async def get_insights(db: AsyncSession) -> dict:
     from app.core.log import logger
-    from app.models.accounting import Account
 
     r = await db.execute(select(Account.id).where(Account.code == "4000"))
     acc_id = r.scalar_one_or_none()

@@ -12,10 +12,8 @@ from app.core.permissions import get_current_user, require_permission
 from app.core.log import record
 from app.core.navigation import render_app_header
 from app.models.accounting import Account, Journal, JournalEntry
-from app.models.b2b import B2BClient, B2BInvoice, B2BInvoiceItem, Consignment
+from app.models.b2b import B2BClient, B2BInvoice, B2BInvoiceItem
 from app.models.expense import Expense
-from app.models.product import Product
-from app.models.inventory import StockMove
 from app.models.user import User
 from app.schemas.invoice import B2BPaymentRequest
 from decimal import Decimal

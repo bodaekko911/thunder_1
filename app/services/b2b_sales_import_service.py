@@ -24,7 +24,7 @@ existing invoice with notes LIKE 'Imported from %'.  Override with force=True.
 import io
 import uuid
 from collections import Counter
-from datetime import date, datetime, timezone
+from datetime import date, datetime
 from decimal import Decimal
 from typing import Optional
 

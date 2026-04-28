@@ -9,12 +9,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.core.log import record
-from app.core.permissions import get_current_user, require_action, require_permission
+from app.core.permissions import get_current_user, require_action
 from app.database import get_async_session
 from app.models.accounting import Account, Journal, JournalEntry
 from app.models.customer import Customer
 from app.models.inventory import StockMove
-from app.models.invoice import Invoice, InvoiceItem
+from app.models.invoice import Invoice
 from app.models.product import Product
 from app.models.refund import RetailRefund, RetailRefundItem
 from app.models.user import User

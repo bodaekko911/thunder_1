@@ -13,9 +13,7 @@ from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.log import ActivityLog, record
-from app.models.inventory import StockMove
 from app.models.product import Product
-from app.models.receipt import ProductReceipt
 from app.models.user import User
 from app.services.receive_service import (
     PRODUCT_TYPE_PACKAGING,

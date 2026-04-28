@@ -12,13 +12,11 @@ from app.core.middleware import get_trusted_client_ip
 from app.core.permission_catalog import get_permission_catalog
 from app.core.permissions import (
     get_effective_permissions,
-    normalize_permissions,
     require_admin,
     serialize_permissions,
 )
 from app.core.security import (
     create_access_token,
-    decode_token,
     get_current_user,
     hash_password,
     password_needs_rehash,

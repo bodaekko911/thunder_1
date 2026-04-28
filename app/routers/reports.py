@@ -13,7 +13,7 @@ from app.core.permissions import require_permission
 from app.database import get_async_session
 from app.core.navigation import render_app_header
 from app.models.product import Product
-from app.models.invoice import Invoice, InvoiceItem
+from app.models.invoice import Invoice
 from app.models.b2b import B2BClient, B2BInvoice, B2BInvoiceItem, B2BRefund
 from app.models.inventory import StockMove
 from app.models.farm import Farm, FarmDelivery, FarmDeliveryItem
@@ -1717,9 +1717,7 @@ async def transactions_report(
 ):
     d_from, d_to = parse_dates(date_from, date_to)
     return await _build_transactions_report(db, d_from=d_from, d_to=d_to, source=source)
-    from app.models.customer import Customer
     from app.models.refund import RetailRefundItem
-    from app.models.user import User
     receipt_expense_ids_res = await db.execute(
         select(ProductReceipt.expense_id).where(ProductReceipt.expense_id.is_not(None))
     )

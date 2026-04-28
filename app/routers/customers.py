@@ -5,14 +5,12 @@ from fastapi.responses import HTMLResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 from sqlalchemy import func, select
-from typing import Optional
-from pydantic import BaseModel
 
 from app.database import get_async_session
 from app.core.permissions import get_current_user, require_permission
 from app.models.customer import Customer
 from app.models.user import User
-from app.models.invoice import Invoice, InvoiceItem
+from app.models.invoice import Invoice
 from app.models.refund import RetailRefund
 from app.core.log import record
 from app.core.navigation import render_app_header

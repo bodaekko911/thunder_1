@@ -4,8 +4,6 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import HTMLResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import func, or_, select
-from typing import Optional, List
-from pydantic import BaseModel
 
 from app.database import get_async_session
 from app.core.permissions import get_current_user, require_permission

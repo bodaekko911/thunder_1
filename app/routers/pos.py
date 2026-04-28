@@ -4,7 +4,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 from sqlalchemy import select, or_
 from decimal import Decimal
-from datetime import datetime
 
 from app.database import get_async_session
 from app.core.log import logger

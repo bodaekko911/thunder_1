@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
@@ -56,7 +56,6 @@ async def _extract_user(authorization: str, db: AsyncSession):
     if not authorization:
         return None
     try:
-        from jose import JWTError
         token = authorization.strip().split(" ")[-1]
         # decode_token raises HTTPException on bad token — catch it
         try:

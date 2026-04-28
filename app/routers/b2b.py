@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import HTMLResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
-from sqlalchemy import func, or_, select
+from sqlalchemy import func, select
 from typing import Optional, List
 from pydantic import BaseModel
 from decimal import Decimal
@@ -17,7 +17,7 @@ from app.core.templates import templates
 from app.models.b2b import B2BClient, B2BInvoice, B2BInvoiceItem, Consignment, ConsignmentItem, B2BRefund, B2BRefundItem, B2BClientPrice
 from app.models.product import Product
 from app.models.inventory import StockMove
-from app.models.accounting import Account, Journal, JournalEntry
+from app.models.accounting import Journal, JournalEntry
 from app.models.user import User
 
 router = APIRouter(

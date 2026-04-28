@@ -5,7 +5,6 @@ import asyncio
 import json
 import re
 from dataclasses import asdict, dataclass
-from pathlib import Path
 
 from alembic.config import Config
 from alembic.script import ScriptDirectory
@@ -14,7 +13,6 @@ from sqlalchemy import inspect, text
 from app.core.config import BASE_DIR, settings
 from app.db.base import Base
 from app.db.session import engine
-import app.models  # noqa: F401
 
 
 CREATE_TABLE_PATTERN = re.compile(r'op\.create_table\(\s*["\']([^"\']+)["\']')
