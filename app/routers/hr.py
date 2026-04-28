@@ -410,13 +410,13 @@ async def update_payroll(payroll_id: int, data: PayrollUpdate, db: AsyncSession 
 
 @router.patch("/api/payroll/{payroll_id}/pay", dependencies=[Depends(require_permission("action_hr_mark_paid"))])
 async def mark_paid(payroll_id: int, db: AsyncSession = Depends(get_async_session), current_user: User = Depends(get_current_user)):
-    from datetime import datetime
+    from datetime import datetime, timezone
     _r = await db.execute(select(Payroll).where(Payroll.id == payroll_id))
     p = _r.scalar_one_or_none()
     if not p:
         raise HTTPException(status_code=404, detail="Payroll record not found")
     p.paid    = True
-    p.paid_at = datetime.utcnow()
+    p.paid_at = datetime.now(timezone.utc)
     record(db, "HR", "mark_payroll_paid",
            f"Marked payroll #{payroll_id} as paid — net: {float(p.net_salary):.2f}",
            ref_type="payroll", ref_id=payroll_id)

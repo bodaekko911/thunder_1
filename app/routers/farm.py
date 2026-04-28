@@ -271,8 +271,8 @@ async def delete_delivery(delivery_id: int, db: AsyncSession = Depends(get_async
 # ── STATS API ──────────────────────────────────────────
 @router.get("/api/stats")
 async def get_stats(db: AsyncSession = Depends(get_async_session)):
-    from datetime import datetime
-    now         = datetime.utcnow()
+    from datetime import datetime, timezone
+    now         = datetime.now(timezone.utc)
     month_start = date(now.year, now.month, 1)
     r1 = await db.execute(select(func.count(Farm.id)).where(Farm.is_active == 1))
     r2 = await db.execute(select(func.count(FarmDelivery.id)))

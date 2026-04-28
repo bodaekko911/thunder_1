@@ -254,8 +254,8 @@ async def list_expenses(
 @router.get("/api/summary")
 async def expense_summary(db: AsyncSession = Depends(get_async_session)):
     """Monthly totals + category breakdown for the current month."""
-    from datetime import datetime
-    now = datetime.utcnow()
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc)
     _r = await db.execute(
         select(func.coalesce(func.sum(Expense.amount), 0)).where(
             func.extract("year",  Expense.expense_date) == now.year,

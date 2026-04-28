@@ -806,7 +806,7 @@ async def settle_consignment(cons_id: int, data: ConsignmentSettle, db: AsyncSes
     )
     cons.status = "closed" if all_done else "active"
     if all_done:
-        cons.settled_at = datetime.utcnow()
+        cons.settled_at = datetime.now(timezone.utc)
 
     await db.commit()
     return {"ok": True, "total_revenue": round(total_revenue, 2), "status": cons.status}

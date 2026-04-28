@@ -1,5 +1,5 @@
 from datetime import date as date_type
-from datetime import datetime
+from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Optional
 
@@ -250,7 +250,7 @@ async def list_expenses(
 
 
 async def get_summary(db: AsyncSession) -> dict:
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     this_month_result = await db.execute(
         select(func.coalesce(func.sum(Expense.amount), 0)).where(
             func.extract("year", Expense.expense_date) == now.year,
