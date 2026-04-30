@@ -1,8 +1,10 @@
-from app.routers.pos import pos_ui
+def test_pos_ui_redirects_unauthenticated_to_login(client) -> None:
+    response = client.get(
+        "/pos",
+        follow_redirects=False,
+        headers={"accept": "text/html"},
+    )
 
-
-def test_pos_ui_uses_cookie_auth_guard_without_stale_token_checks() -> None:
-    html = pos_ui()
-
-    assert "_hasAuthCookie()" in html
-    assert "if(!token)" not in html
+    assert response.status_code in (302, 307)
+    assert "/?next=" in response.headers["location"]
+    assert "reason=expired" in response.headers["location"]
