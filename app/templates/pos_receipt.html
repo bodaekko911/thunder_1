@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html>
+<head>
+<script src="/static/theme-init.js"></script>
+<title>Receipt {{ invoice.invoice_number }}</title>
+<style>
+* { box-sizing:border-box; margin:0; padding:0; }
+body { font-family: monospace; background:#060810; color:white; }
+.r { width:320px; margin:30px auto; background:#0f1424; border-radius:16px; padding:20px; }
+.center { text-align:center; margin-bottom:12px; }
+.center h3 { color:#00ff9d; font-size:18px; }
+.row { display:flex; justify-content:space-between; font-size:13px; margin:6px 0; }
+.line { border-top:1px dashed #445066; margin:10px 0; }
+.total { font-size:20px; color:#00ff9d; font-weight:bold; }
+.btn { width:100%; padding:14px; margin-top:10px; background:linear-gradient(135deg,#00ff9d,#00d4ff); border:none; border-radius:10px; color:#021a10; font-size:15px; font-weight:800; cursor:pointer; }
+.btn-back { background:#151c30; color:#8899bb; margin-top:6px; }
+@media print {
+    .btn { display:none; }
+    body { background:white; color:black; }
+    .r { background:white; color:black; border:none; }
+    .center h3 { color:#000; }
+    .total { color:#000; }
+}
+</style>
+    <script src="/static/auth-guard.js"></script>
+</head>
+<body>
+<div class="r">
+    <div class="center">
+        <img src="{{ BRAND.logo_path }}" alt="Habiba" style="height:120px;object-fit:contain;margin-bottom:6px;display:block;margin-left:auto;margin-right:auto">
+        <div style="font-size:15px;font-weight:900;color:#2a7a2a;margin-bottom:2px">{{ BRAND.company_name }}</div>
+        <div style="color:#445066;font-size:12px">{{ invoice.invoice_number }}</div>
+    </div>
+    <div class="line"></div>
+    {% if invoice.status == "unpaid" %}
+    <div style="background:rgba(255,181,71,.15);border:1px solid rgba(255,181,71,.3);color:#ffb547;border-radius:8px;padding:8px 12px;text-align:center;font-weight:700;margin-bottom:10px;">&#9203; UNPAID &#8212; Settle Later</div>
+    {% endif %}
+    <div class="row"><span>Customer</span><span>{% if customer %}{{ customer.name }}{% else %}-{% endif %}</span></div>
+    <div class="row"><span>Date</span><span>{{ invoice.created_at.strftime("%Y-%m-%d %H:%M") if invoice.created_at else "" }}</span></div>
+    <div class="row"><span>Payment</span><span>{{ invoice.payment_method }}</span></div>
+    <div class="line"></div>
+    {% for item in items %}
+    <div class="row">
+        <span>{{ item.name }}</span>
+        <span>{{ "%.0f" | format(item.qty | float) }} x {{ item.unit_price | egp }}</span>
+        <span>{{ item.total | egp }}</span>
+    </div>
+    {% endfor %}
+    <div class="line"></div>
+    <div class="row"><span>Subtotal</span><span>{{ invoice.subtotal | egp }}</span></div>
+    <div class="row"><span>Discount</span><span>{{ invoice.discount | egp }}</span></div>
+    <div class="row total"><span>Total</span><span>{{ invoice.total | egp }}</span></div>
+    <button class="btn" onclick="window.print()">&#128424; Print Receipt</button>
+    <button class="btn btn-back" onclick="window.location.href='/pos'">&#8592; Back to POS</button>
+</div>
+</body>
+</html>
