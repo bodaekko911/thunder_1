@@ -1,3 +1,10 @@
+/* Prevent invisible text while Google Fonts loads over the network */
+@font-face {
+  font-family: "DM Sans";
+  font-display: swap;
+  src: local("Arial");
+}
+
 :root {
   --bg: #08090c;
   --surface: #0d1008;

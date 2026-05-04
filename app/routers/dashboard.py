@@ -398,15 +398,17 @@ def dashboard_ui():
     return f"""<!DOCTYPE html>
 <html lang="en" dir="{locale_dir}">
 <head>
-<script src="/static/theme-init.js"></script>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<script src="/static/theme.js"></script>
 <title>Dashboard – Thunder ERP</title>
+<script src="/static/theme-init.js"></script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,300;0,400;0,600;1,300;1,400&family=DM+Sans:wght@300;400;500;600&family=DM+Mono:wght@400;500&family=Outfit:wght@400;500;600;700;800;900&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="/static/dashboard.css">
-<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
-<script src="/static/auth-guard.js"></script>
+<script src="/static/theme.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js" defer></script>
+<script src="/static/auth-guard.js" defer></script>
 </head>
 <body>
 <div class="bg-layer">

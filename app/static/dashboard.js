@@ -216,14 +216,32 @@ function renderNumbers() {
   ["sales", "clients_owe", "spent", "stock_alerts"].forEach((key) => {
     const node = document.querySelector(`[data-card="${key}"]`);
     const spec = cardSpec(key);
-    node.innerHTML = `
-      <div class="number-card-button" data-tooltip="${escHtml(spec.tooltip)}">
-        <span class="number-label">${escHtml(spec.label)}</span>
-        <strong class="number-value">${escHtml(spec.value)}</strong>
-        <span class="number-meta">${escHtml(spec.meta)}</span>
-        ${spec.sparkline.length ? `<div class="sparkline-bars">${sparklineBars(spec.sparkline)}</div>` : `<div class="number-breakdown">${escHtml(spec.meta)}</div>`}
-      </div>
-    `;
+    // On first render, build the structure once
+    let btn = node.querySelector(".number-card-button");
+    if (!btn) {
+      node.innerHTML = `
+        <div class="number-card-button">
+          <span class="number-label"></span>
+          <strong class="number-value"></strong>
+          <span class="number-meta"></span>
+          <div class="number-sparkline-or-breakdown"></div>
+        </div>
+      `;
+      btn = node.querySelector(".number-card-button");
+    }
+    // Update text in-place — no DOM teardown, no flicker
+    btn.dataset.tooltip = spec.tooltip;
+    btn.querySelector(".number-label").textContent = spec.label;
+    btn.querySelector(".number-value").textContent = spec.value;
+    btn.querySelector(".number-meta").textContent = spec.meta;
+    const extra = btn.querySelector(".number-sparkline-or-breakdown");
+    if (spec.sparkline.length) {
+      extra.className = "sparkline-bars";
+      extra.innerHTML = sparklineBars(spec.sparkline);
+    } else {
+      extra.className = "number-breakdown";
+      extra.textContent = spec.meta;
+    }
   });
 }
 
