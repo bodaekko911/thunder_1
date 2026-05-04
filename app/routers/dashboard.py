@@ -108,6 +108,7 @@ async def dashboard_data(db: AsyncSession = Depends(get_async_session)):
         b2b_today = b2b_month = b2b_year = 0.0
         b2b_outstanding = 0.0
         b2b_clients = 0
+        b2b_cash_today = b2b_cash_month = b2b_cash_year = 0.0
         try:
             b2b_today = await _jrev(today_s, today_e)
             b2b_month = await _jrev(month_s_u, month_e_u)
@@ -120,6 +121,26 @@ async def dashboard_data(db: AsyncSession = Depends(get_async_session)):
             b2b_outstanding = float(r.scalar() or 0)
             r = await db.execute(select(func.count(B2BClient.id)).where(B2BClient.is_active == True))
             b2b_clients = int(r.scalar() or 0)
+
+            # Cash actually collected from B2B payments
+            r = await db.execute(
+                select(func.sum(B2BInvoice.amount_paid))
+                .where(B2BInvoice.created_at >= today_s, B2BInvoice.created_at <= today_e,
+                       B2BInvoice.amount_paid > 0)
+            )
+            b2b_cash_today = float(r.scalar() or 0)
+            r = await db.execute(
+                select(func.sum(B2BInvoice.amount_paid))
+                .where(B2BInvoice.created_at >= month_s_u, B2BInvoice.created_at <= month_e_u,
+                       B2BInvoice.amount_paid > 0)
+            )
+            b2b_cash_month = float(r.scalar() or 0)
+            r = await db.execute(
+                select(func.sum(B2BInvoice.amount_paid))
+                .where(B2BInvoice.created_at >= year_s_u, B2BInvoice.created_at <= year_e_u,
+                       B2BInvoice.amount_paid > 0)
+            )
+            b2b_cash_year = float(r.scalar() or 0)
         except Exception:
             logger.error("dashboard_data: b2b_sales section failed", exc_info=True)
             _errors.append({"section": "b2b_sales", "reason": "query failed"})
@@ -289,6 +310,9 @@ async def dashboard_data(db: AsyncSession = Depends(get_async_session)):
             "expenses_month":      round(expenses_month, 2),
             "expenses_last_month": round(expenses_last_month, 2),
             "b2b_outstanding": round(b2b_outstanding, 2),
+            "b2b_cash_today":  round(b2b_cash_today, 2),
+            "b2b_cash_month":  round(b2b_cash_month, 2),
+            "b2b_cash_year":   round(b2b_cash_year, 2),
             "ref_today":   round(ref_today, 2),
             "ref_month":   round(ref_month, 2),
             "ref_count_today": ref_count_today,
@@ -479,6 +503,7 @@ def dashboard_ui():
   <section class="numbers-grid" aria-label="Key numbers">
     <article class="card number-card" data-card="sales" aria-live="polite"></article>
     <article class="card number-card" data-card="clients_owe" aria-live="polite"></article>
+    <article class="card number-card" data-card="b2b_cash" aria-live="polite"></article>
     <article class="card number-card" data-card="spent" aria-live="polite"></article>
     <article class="card number-card" data-card="stock_alerts" aria-live="polite"></article>
   </section>

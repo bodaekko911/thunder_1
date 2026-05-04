@@ -197,6 +197,21 @@ function cardSpec(key) {
       tooltip: tooltipForCard("spent"),
     };
   }
+  if (key === "b2b_cash") {
+    const val = dashboardData?.range?.label === "Today"
+      ? dashboardData?.numbers?.b2b_cash_today
+      : dashboardData?.range?.label?.startsWith("This year")
+      ? dashboardData?.numbers?.b2b_cash_year
+      : dashboardData?.numbers?.b2b_cash_month;
+    return {
+      label: dashboardData?.range?.label === "Today" ? "B2B cash collected today" : `B2B cash collected ${rangeLabel.toLowerCase()}`,
+      value: formatMoney(val || 0),
+      meta: "Payments received from B2B clients",
+      sparkline: [],
+      tooltip: "Total cash actually collected from B2B clients (amount paid on invoices).",
+    };
+  }
+  // stock_alerts fallback
   return {
     label: "Stock alerts",
     value: `${formatNumber(dashboardData?.numbers?.stock_alerts?.value || 0)} items`,
@@ -213,7 +228,7 @@ function sparklineBars(values) {
 }
 
 function renderNumbers() {
-  ["sales", "clients_owe", "spent", "stock_alerts"].forEach((key) => {
+  ["sales", "clients_owe", "b2b_cash", "spent", "stock_alerts"].forEach((key) => {
     const node = document.querySelector(`[data-card="${key}"]`);
     const spec = cardSpec(key);
     // On first render, build the structure once
