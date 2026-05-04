@@ -1951,10 +1951,14 @@ def reports_ui(current_user: User = Depends(require_permission("page_reports")))
     return """<!DOCTYPE html>
 <html>
 <head>
-<script src="/static/theme-init.js"></script>
+<meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Reports — Thunder ERP</title>
+<script src="/static/theme-init.js"></script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+<script src="/static/theme.js"></script>
 <style>
 :root{
     --bg:#060810;--card:#0f1424;--card2:#151c30;
@@ -1973,25 +1977,7 @@ body.light{
 body.light nav{background:rgba(244,245,239,.92);}
 body.light .nav-link:hover{background:rgba(0,0,0,.05);}
 body.light tr:hover td{background:rgba(0,0,0,.03);}
-.mode-btn{display:flex;align-items:center;justify-content:center;width:36px;height:36px;border-radius:10px;border:1px solid var(--border);background:var(--card);color:var(--sub);font-size:16px;cursor:pointer;transition:all .2s;font-family:var(--sans);}
-.mode-btn:hover{border-color:var(--border2);transform:scale(1.06);}
 .topbar-right{display:flex;align-items:center;gap:12px;}
-.account-menu{position:relative;}
-.user-pill{display:flex;align-items:center;gap:10px;background:var(--card);border:1px solid var(--border);border-radius:40px;padding:7px 16px 7px 10px;cursor:pointer;transition:all .2s;}
-.user-pill:hover,.user-pill.open{border-color:var(--border2);}
-.user-avatar{width:28px;height:28px;background:linear-gradient(135deg,#7ecb6f,#d4a256);border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;color:#0a0c08;}
-.user-name{font-size:13px;font-weight:500;color:var(--sub);}
-.menu-caret{font-size:11px;color:var(--muted);}
-.account-dropdown{position:absolute;right:0;top:calc(100% + 10px);min-width:220px;background:var(--card);border:1px solid var(--border2);border-radius:14px;padding:8px;box-shadow:0 24px 50px rgba(0,0,0,.35);display:none;z-index:500;}
-.account-dropdown.open{display:block;}
-.account-head{padding:10px 12px 8px;border-bottom:1px solid var(--border);margin-bottom:6px;}
-.account-label{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:1px;}
-.account-email{font-size:12px;color:var(--sub);margin-top:4px;word-break:break-word;}
-.account-item{width:100%;display:flex;align-items:center;gap:10px;padding:10px 12px;border:none;background:transparent;border-radius:10px;color:var(--sub);font-family:var(--sans);font-size:13px;text-decoration:none;cursor:pointer;text-align:left;}
-.account-item:hover{background:var(--card2);color:var(--text);}
-.account-item.danger:hover{color:#c97a7a;}
-.logout-btn{background:transparent;border:1px solid var(--border);color:var(--muted);font-family:var(--sans);font-size:12px;font-weight:500;padding:8px 16px;border-radius:8px;cursor:pointer;transition:all .2s;letter-spacing:.3px;}
-.logout-btn:hover{border-color:#c97a7a;color:#c97a7a;}
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0;}
 body{font-family:var(--sans);background:var(--bg);color:var(--text);min-height:100vh;font-size:14px;}
 nav{position:sticky;top:0;z-index:100;display:flex;align-items:center;gap:8px;padding:0 24px;height:58px;background:rgba(10,13,24,.92);backdrop-filter:blur(20px);border-bottom:1px solid var(--border);}
@@ -2426,56 +2412,13 @@ td.mono{font-family:var(--mono);}
 <script>
   let __currentUser = null;
 
-  function setModeButton(isLight){
-    const btn = document.getElementById("mode-btn");
-    if(btn) btn.innerText = isLight ? "☀️" : "🌙";
-}
-function toggleMode(){
-    const isLight = document.body.classList.toggle("light");
-    localStorage.setItem("colorMode", isLight ? "light" : "dark");
-    setModeButton(isLight);
-}
-function initializeColorMode(){
-    const isLight = localStorage.getItem("colorMode") === "light";
-    document.body.classList.toggle("light", isLight);
-    setModeButton(isLight);
-}
-async function initUser() {
-    try {
-        const r = await fetch("/auth/me");
-        if (!r.ok) { _redirectToLogin(); return; }
-        const u = await r.json();
-        __currentUser = u;
-        const nameEl = document.getElementById("user-name");
-        const avatarEl = document.getElementById("user-avatar");
-        const emailEl = document.getElementById("user-email");
-        if (nameEl) nameEl.innerText = u.name;
-        if (avatarEl) avatarEl.innerText = u.name.charAt(0).toUpperCase();
-        if (emailEl) emailEl.innerText = u.email;
-        return u;
-    } catch(e) { _redirectToLogin(); }
-}
-function toggleAccountMenu(event){
-    event.stopPropagation();
-    const trigger = document.getElementById("account-trigger");
-    const dropdown = document.getElementById("account-dropdown");
-    const open = dropdown.classList.toggle("open");
-    trigger.classList.toggle("open", open);
-    trigger.setAttribute("aria-expanded", open ? "true" : "false");
-}
-document.addEventListener("click", e => {
-    const menu = document.getElementById("account-dropdown");
-    const trigger = document.getElementById("account-trigger");
-    if(!menu || !trigger) return;
-    if(menu.contains(e.target) || trigger.contains(e.target)) return;
-    menu.classList.remove("open");
-    trigger.classList.remove("open");
-    trigger.setAttribute("aria-expanded", "false");
-});
-async function logout(){
-    await fetch("/auth/logout", { method: "POST" });
-    window.location.href = "/";
-}
+  // Theme and account menu are handled by window.__appNav (navigation.py / theme.js).
+  // toggleMode is kept as a named alias so window.__appNav.toggleTheme() can call it,
+  // but it now delegates entirely to the shared theme system.
+  function toggleMode(){
+    if(window.__appTheme) window.__appTheme.toggle();
+  }
+
   function hasPermission(permission){
       const role = __currentUser ? (__currentUser.role || "") : "";
       let permsArray = [];
@@ -2506,7 +2449,6 @@ async function logout(){
           document.querySelectorAll(".btn-excel").forEach(btn => btn.style.display = "none");
       }
   }
-  initializeColorMode();
   let currentTab = "sales";
 let toastTimer = null;
 initUser().then(u => {
