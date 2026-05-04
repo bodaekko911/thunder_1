@@ -2412,12 +2412,21 @@ td.mono{font-family:var(--mono);}
 <script>
   let __currentUser = null;
 
-  // Theme and account menu are handled by window.__appNav (navigation.py / theme.js).
-  // toggleMode is kept as a named alias so window.__appNav.toggleTheme() can call it,
-  // but it now delegates entirely to the shared theme system.
+  // Theme is handled by window.__appTheme (theme.js / theme-init.js).
+  // toggleMode is kept as a named alias so window.__appNav.toggleTheme() can find it.
   function toggleMode(){
     if(window.__appTheme) window.__appTheme.toggle();
   }
+
+async function initUser() {
+    try {
+        const r = await fetch("/auth/me");
+        if (!r.ok) { _redirectToLogin(); return; }
+        const u = await r.json();
+        __currentUser = u;
+        return u;
+    } catch(e) { _redirectToLogin(); }
+}
 
   function hasPermission(permission){
       const role = __currentUser ? (__currentUser.role || "") : "";
