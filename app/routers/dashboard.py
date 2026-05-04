@@ -122,25 +122,27 @@ async def dashboard_data(db: AsyncSession = Depends(get_async_session)):
             r = await db.execute(select(func.count(B2BClient.id)).where(B2BClient.is_active == True))
             b2b_clients = int(r.scalar() or 0)
 
-            # Cash actually collected from B2B payments
-            r = await db.execute(
-                select(func.sum(B2BInvoice.amount_paid))
-                .where(B2BInvoice.created_at >= today_s, B2BInvoice.created_at <= today_e,
-                       B2BInvoice.amount_paid > 0)
-            )
-            b2b_cash_today = float(r.scalar() or 0)
-            r = await db.execute(
-                select(func.sum(B2BInvoice.amount_paid))
-                .where(B2BInvoice.created_at >= month_s_u, B2BInvoice.created_at <= month_e_u,
-                       B2BInvoice.amount_paid > 0)
-            )
-            b2b_cash_month = float(r.scalar() or 0)
-            r = await db.execute(
-                select(func.sum(B2BInvoice.amount_paid))
-                .where(B2BInvoice.created_at >= year_s_u, B2BInvoice.created_at <= year_e_u,
-                       B2BInvoice.amount_paid > 0)
-            )
-            b2b_cash_year = float(r.scalar() or 0)
+            # Cash actually collected: debit on account 1000 for b2b payment journals
+            async def _jcash(utc_s, utc_e) -> float:
+                cash_acc = await db.execute(select(Account).where(Account.code == "1000"))
+                ca = cash_acc.scalar_one_or_none()
+                if not ca:
+                    return 0.0
+                r = await db.execute(
+                    select(func.sum(JournalEntry.debit))
+                    .join(Journal, JournalEntry.journal_id == Journal.id)
+                    .where(
+                        JournalEntry.account_id == ca.id,
+                        Journal.created_at >= utc_s,
+                        Journal.created_at <= utc_e,
+                        Journal.ref_type.in_(["b2b_payment", "consignment_payment", "consignment_client_payment", "b2b_collection"]),
+                    )
+                )
+                return float(r.scalar() or 0)
+
+            b2b_cash_today = await _jcash(today_s, today_e)
+            b2b_cash_month = await _jcash(month_s_u, month_e_u)
+            b2b_cash_year  = await _jcash(year_s_u, year_e_u)
         except Exception:
             logger.error("dashboard_data: b2b_sales section failed", exc_info=True)
             _errors.append({"section": "b2b_sales", "reason": "query failed"})
