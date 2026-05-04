@@ -198,17 +198,18 @@ function cardSpec(key) {
     };
   }
   if (key === "b2b_cash") {
-    const val = dashboardData?.range?.label === "Today"
+    const val = currentRange === "today"
       ? dashboardData?.numbers?.b2b_cash_today
-      : dashboardData?.range?.label?.startsWith("This year")
+      : currentRange === "year" || currentRange === "ytd"
       ? dashboardData?.numbers?.b2b_cash_year
       : dashboardData?.numbers?.b2b_cash_month;
+    const periodLabel = currentRange === "today" ? "today" : rangeLabel.toLowerCase();
     return {
-      label: dashboardData?.range?.label === "Today" ? "B2B cash collected today" : `B2B cash collected ${rangeLabel.toLowerCase()}`,
+      label: `B2B cash collected ${periodLabel}`,
       value: formatMoney(val || 0),
-      meta: "Payments received from B2B clients",
+      meta: "",
       sparkline: [],
-      tooltip: "Total cash actually collected from B2B clients (amount paid on invoices).",
+      tooltip: "Total cash actually collected from B2B clients (payments received on invoices).",
     };
   }
   // stock_alerts fallback
@@ -253,9 +254,12 @@ function renderNumbers() {
     if (spec.sparkline.length) {
       extra.className = "sparkline-bars";
       extra.innerHTML = sparklineBars(spec.sparkline);
-    } else {
+    } else if (spec.meta) {
       extra.className = "number-breakdown";
       extra.textContent = spec.meta;
+    } else {
+      extra.className = "number-breakdown";
+      extra.textContent = "";
     }
   });
 }
