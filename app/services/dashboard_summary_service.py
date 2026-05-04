@@ -25,6 +25,7 @@ from app.core.log import logger
 from app.core.permissions import has_permission
 from app.core.time_utils import now_local
 from app.models.b2b import B2BClient, B2BInvoice, B2BInvoiceItem, B2BRefund, B2BRefundItem
+from app.models.accounting import Account, Journal, JournalEntry
 from app.models.customer import Customer
 from app.models.expense import Expense
 from app.models.invoice import Invoice, InvoiceItem
@@ -484,6 +485,31 @@ async def _build_numbers(db: AsyncSession, rng: dict[str, Any], user: User, erro
 
     margin = await _build_margin_block(db, rng, sales_value, sales_prior, errors)
 
+    # B2B cash collected — debit on account 1000 for payment journals in range
+    b2b_cash_value = 0.0
+    try:
+        cash_acc_r = await db.execute(select(Account).where(Account.code == "1000"))
+        cash_acc = cash_acc_r.scalar_one_or_none()
+        if cash_acc:
+            utc_s = rng["utc_start"]
+            utc_e = rng["utc_end"]
+            cash_r = await db.execute(
+                select(func.coalesce(func.sum(JournalEntry.debit), 0))
+                .join(Journal, JournalEntry.journal_id == Journal.id)
+                .where(
+                    JournalEntry.account_id == cash_acc.id,
+                    Journal.created_at >= utc_s,
+                    Journal.created_at <= utc_e,
+                    Journal.ref_type.in_([
+                        "b2b_payment", "b2b_collection",
+                        "consignment_payment", "consignment_client_payment",
+                    ]),
+                )
+            )
+            b2b_cash_value = _safe_float(cash_r.scalar())
+    except Exception:
+        _append_error(errors, "numbers.b2b_cash")
+
     sales_delta = _delta_pct(sales_value, sales_prior)
     spent_delta = _delta_pct(spent_value, spent_prior)
     return {
@@ -511,6 +537,7 @@ async def _build_numbers(db: AsyncSession, rng: dict[str, Any], user: User, erro
         },
         "margin": margin,
         "alt_sales_today": {"value": round(sales_today_value, 2)},
+        "b2b_cash": {"value": round(b2b_cash_value, 2)},
     }
 
 

@@ -198,15 +198,11 @@ function cardSpec(key) {
     };
   }
   if (key === "b2b_cash") {
-    const val = currentRange === "today"
-      ? dashboardData?.numbers?.b2b_cash_today
-      : currentRange === "year" || currentRange === "ytd"
-      ? dashboardData?.numbers?.b2b_cash_year
-      : dashboardData?.numbers?.b2b_cash_month;
+    const val = dashboardData?.numbers?.b2b_cash?.value || 0;
     const periodLabel = currentRange === "today" ? "today" : rangeLabel.toLowerCase();
     return {
       label: `B2B cash collected ${periodLabel}`,
-      value: formatMoney(val || 0),
+      value: formatMoney(val),
       meta: "",
       sparkline: [],
       tooltip: "Total cash actually collected from B2B clients (payments received on invoices).",
