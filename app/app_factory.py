@@ -24,6 +24,34 @@ from app.core.monitoring import configure_monitoring
 from app.core.rate_limit import limiter
 from app.database import get_async_session
 
+
+async def seed_chart_of_accounts() -> None:
+    """Ensure core accounting accounts exist. Safe to run on every startup."""
+    from decimal import Decimal
+    from sqlalchemy import select
+    from app.db.session import AsyncSessionLocal
+    from app.models.accounting import Account
+
+    CORE_ACCOUNTS = [
+        ("1000", "Cash",              "asset"),
+        ("1100", "Accounts Receivable", "asset"),
+        ("2000", "Accounts Payable",  "liability"),
+        ("2200", "Deferred Revenue",  "liability"),
+        ("4000", "Revenue",           "revenue"),
+        ("5000", "Cost of Goods Sold","expense"),
+        ("6000", "Expenses",          "expense"),
+    ]
+    try:
+        async with AsyncSessionLocal() as db:
+            for code, name, atype in CORE_ACCOUNTS:
+                r = await db.execute(select(Account).where(Account.code == code))
+                if r.scalar_one_or_none() is None:
+                    db.add(Account(code=code, name=name, type=atype, balance=Decimal("0")))
+            await db.commit()
+            logger.info("seed_chart_of_accounts: core accounts ready")
+    except Exception:
+        logger.exception("seed_chart_of_accounts: failed — journals will not post until accounts exist")
+
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 
 # ── HTML shown when an unhandled 500 occurs during an HTML page navigation ─
@@ -81,6 +109,7 @@ async def lifespan(_: FastAPI):
     configure_logging()
     configure_monitoring()
     await verify_migration_status()
+    await seed_chart_of_accounts()
     yield
 
 
