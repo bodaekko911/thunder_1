@@ -924,6 +924,7 @@ async def delete_expenses_batch(
 async def import_receive_products_endpoint(
     file: UploadFile = File(...),
     dry_run: bool = Form(True),
+    affect_stock: bool = Form(True),
     db: AsyncSession = Depends(get_async_session),
     current_user=Depends(get_current_user),
 ):
@@ -934,6 +935,7 @@ async def import_receive_products_endpoint(
         filename=file.filename or "receive_products.xlsx",
         current_user=current_user,
         dry_run=dry_run,
+        affect_stock=affect_stock,
     )
 
 
@@ -1260,6 +1262,10 @@ td{padding:8px 12px;border-top:1px solid var(--border);color:var(--sub);white-sp
                     <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:13px;color:var(--sub)">
                         <input type="checkbox" id="chk-receive-products-dryrun" checked style="accent-color:var(--teal)">
                         <span><b style="color:var(--text)">Dry run</b> - preview without saving (recommended first step)</span>
+                    </label>
+                    <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:13px;color:var(--sub)">
+                        <input type="checkbox" id="chk-receive-products-affect-stock" checked style="accent-color:var(--teal)">
+                        <span><b style="color:var(--text)">Affect stock</b> - update product quantities (uncheck to record cost only)</span>
                     </label>
                 </div>
 
@@ -1682,9 +1688,11 @@ async function doImportReceiveProducts() {
     showResult('receive-products', '', '');
 
     const dryRun = document.getElementById('chk-receive-products-dryrun').checked;
+    const affectStock = document.getElementById('chk-receive-products-affect-stock').checked;
     const fd = new FormData();
     fd.append('file', f);
     fd.append('dry_run', dryRun ? 'true' : 'false');
+    fd.append('affect_stock', affectStock ? 'true' : 'false');
 
     let res, data;
     try {

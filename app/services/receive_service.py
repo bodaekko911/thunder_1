@@ -52,6 +52,7 @@ class ReceiptCreate(BaseModel):
     receive_date: date_type
     supplier_ref: Optional[str]   = Field(None, max_length=150)
     notes:        Optional[str]   = None
+    affect_stock: bool            = True
 
 
 class BatchReceiptItem(BaseModel):
@@ -416,7 +417,8 @@ async def _create_receipt_core(
 
     qty_before    = Decimal(str(product.stock or 0))
     qty_after     = qty_before + qty
-    product.stock = qty_after
+    if data.affect_stock:
+        product.stock = qty_after
     if unit_cost is not None:
         product.cost = unit_cost
 
@@ -436,20 +438,23 @@ async def _create_receipt_core(
     )
     db.add(receipt)
 
-    move = StockMove(
-        product_id=product.id,
-        type="in",
-        qty=qty,
-        qty_before=qty_before,
-        qty_after=qty_after,
-        ref_type="receipt",
-        ref_id=0,
-        note=f"Receipt {ref_number}",
-        user_id=current_user.id,
-    )
-    db.add(move)
-    await db.flush()
-    move.ref_id = receipt.id
+    if data.affect_stock:
+        move = StockMove(
+            product_id=product.id,
+            type="in",
+            qty=qty,
+            qty_before=qty_before,
+            qty_after=qty_after,
+            ref_type="receipt",
+            ref_id=0,
+            note=f"Receipt {ref_number}",
+            user_id=current_user.id,
+        )
+        db.add(move)
+        await db.flush()
+        move.ref_id = receipt.id
+    else:
+        await db.flush()
 
     expense_ref: Optional[str] = None
     if total_cost and total_cost > 0:

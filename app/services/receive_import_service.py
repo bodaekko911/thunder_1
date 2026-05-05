@@ -150,6 +150,7 @@ async def import_receive_products(
     filename: str,
     current_user: User,
     dry_run: bool = True,
+    affect_stock: bool = True,
 ) -> dict:
     workbook = openpyxl.load_workbook(io.BytesIO(workbook_bytes), data_only=True)
     sheet = workbook.active
@@ -271,10 +272,12 @@ async def import_receive_products(
                 receive_date=row["receive_date"],
                 supplier_ref=None,
                 notes=None,
+                affect_stock=affect_stock,
             )
             created = await create_receipt(db, payload, current_user)
             receipts_created += 1
-            stock_moves_created += 1
+            if affect_stock:
+                stock_moves_created += 1
             record(
                 db,
                 "Import",
