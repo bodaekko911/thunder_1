@@ -1244,7 +1244,18 @@ async function loadExpenses() {
     const tbody = document.getElementById("exp-tbody");
     tbody.innerHTML = `<tr class="empty-row"><td colspan="7">Loading…</td></tr>`;
     try {
-        const data = await (await fetch(url)).json();
+        const response = await fetch(url);
+        if (!response.ok) {
+            const body = await response.text();
+            console.error("Failed to load expenses", {
+                status: response.status,
+                statusText: response.statusText,
+                body
+            });
+            tbody.innerHTML = `<tr class="empty-row"><td colspan="7">Could not load expenses (${response.status}). Check your session or try again.</td></tr>`;
+            return;
+        }
+        const data = await response.json();
         if (!data.length) {
             tbody.innerHTML = `<tr class="empty-row"><td colspan="7">No expenses found</td></tr>`;
             return;
@@ -1269,7 +1280,8 @@ async function loadExpenses() {
             </tr>
         `).join("");
     } catch(err) {
-        tbody.innerHTML = `<tr class="empty-row"><td colspan="7">Failed to load</td></tr>`;
+        console.error("Failed to load expenses", err);
+        tbody.innerHTML = `<tr class="empty-row"><td colspan="7">Could not load expenses. Check the console for details.</td></tr>`;
     }
 }
 

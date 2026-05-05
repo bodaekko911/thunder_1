@@ -1,4 +1,6 @@
 import asyncio
+from datetime import date
+from decimal import Decimal
 from types import SimpleNamespace
 
 import pytest
@@ -28,8 +30,10 @@ class FakeScalarResult:
 class FakeSession:
     def __init__(self, results):
         self._results = list(results)
+        self.statements = []
 
-    async def execute(self, _statement):
+    async def execute(self, statement):
+        self.statements.append(statement)
         return FakeScalarResult(self._results.pop(0))
 
 
@@ -72,3 +76,88 @@ def test_archive_category_rejects_category_with_existing_expenses() -> None:
 
     assert exc_info.value.status_code == 400
     assert "Archive it instead" in exc_info.value.detail
+
+
+def test_list_expenses_returns_expenses_with_no_filters() -> None:
+    fake_db = FakeSession(
+        [
+            [
+                SimpleNamespace(
+                    id=1,
+                    ref_number="EXP-00001",
+                    category_id=7,
+                    category=SimpleNamespace(name="Utilities", account_code="5001"),
+                    user=SimpleNamespace(name="Admin"),
+                    farm=SimpleNamespace(name="North Farm"),
+                    farm_id=2,
+                    expense_date=date(2026, 4, 10),
+                    amount=Decimal("125.50"),
+                    payment_method="cash",
+                    vendor="Power Co",
+                    description="Monthly bill",
+                )
+            ]
+        ]
+    )
+
+    result = asyncio.run(expense_service.list_expenses(fake_db))
+
+    assert result == [
+        {
+            "id": 1,
+            "ref_number": "EXP-00001",
+            "category": "Utilities",
+            "category_id": 7,
+            "account_code": "5001",
+            "expense_date": "2026-04-10",
+            "amount": 125.5,
+            "payment_method": "cash",
+            "vendor": "Power Co",
+            "description": "Monthly bill",
+            "created_by": "Admin",
+            "farm_id": 2,
+            "farm_name": "North Farm",
+        }
+    ]
+
+
+def test_list_expenses_applies_category_filter() -> None:
+    fake_db = FakeSession([[]])
+
+    asyncio.run(expense_service.list_expenses(fake_db, category_id=7))
+
+    sql = str(fake_db.statements[0].compile(compile_kwargs={"literal_binds": True}))
+    assert "expenses.category_id = 7" in sql
+
+
+def test_list_expenses_applies_date_range_filters() -> None:
+    fake_db = FakeSession([[]])
+
+    asyncio.run(
+        expense_service.list_expenses(
+            fake_db,
+            date_from="2026-04-01",
+            date_to="2026-04-30",
+        )
+    )
+
+    sql = str(fake_db.statements[0].compile(compile_kwargs={"literal_binds": True}))
+    assert "expenses.expense_date >= '2026-04-01'" in sql
+    assert "expenses.expense_date <= '2026-04-30'" in sql
+
+
+def test_list_expenses_ignores_invalid_date_filters() -> None:
+    fake_db = FakeSession([[]])
+
+    result = asyncio.run(
+        expense_service.list_expenses(
+            fake_db,
+            date_from="2026-99-99",
+            date_to="not-a-date",
+        )
+    )
+
+    sql = str(fake_db.statements[0].compile(compile_kwargs={"literal_binds": True}))
+    assert result == []
+    assert "expenses.expense_date >=" not in sql
+    assert "expenses.expense_date <=" not in sql

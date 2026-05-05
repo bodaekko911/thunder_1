@@ -55,9 +55,17 @@ async def delete_expense_category(
 async def get_expenses(
     category_id: Optional[int] = None,
     month: Optional[str] = None,
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
     db: AsyncSession = Depends(get_async_session),
 ):
-    return await list_expenses(db, category_id=category_id, month=month)
+    return await list_expenses(
+        db,
+        category_id=category_id,
+        month=month,
+        date_from=date_from,
+        date_to=date_to,
+    )
 
 
 @router.get("/api/summary")

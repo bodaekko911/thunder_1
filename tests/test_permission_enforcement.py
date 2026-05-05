@@ -118,6 +118,58 @@ def test_expense_edit_requires_explicit_update_permission() -> None:
     )
 
 
+def test_expense_list_endpoint_forwards_supported_filters(monkeypatch) -> None:
+    user = SimpleNamespace(
+        id=15,
+        name="Expense Viewer",
+        role="viewer",
+        permissions="page_expenses",
+        is_active=True,
+    )
+    client, _fake_db = _make_client(user)
+    captured = {}
+
+    async def fake_list_expenses(db, **kwargs):
+        captured.update(kwargs)
+        return [
+            {
+                "id": 1,
+                "ref_number": "EXP-00001",
+                "category": "Utilities",
+                "category_id": 7,
+                "account_code": "5001",
+                "expense_date": "2026-04-10",
+                "amount": 125.5,
+                "payment_method": "cash",
+                "vendor": "Power Co",
+                "description": "Monthly bill",
+                "created_by": "Admin",
+                "farm_id": None,
+                "farm_name": None,
+            }
+        ]
+
+    monkeypatch.setattr("app.routers.expenses_refactored.list_expenses", fake_list_expenses)
+
+    response = client.get(
+        "/expenses/api/list",
+        params={
+            "category_id": 7,
+            "date_from": "2026-04-01",
+            "date_to": "2026-04-30",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()[0]["ref_number"] == "EXP-00001"
+    assert captured == {
+        "category_id": 7,
+        "month": None,
+        "date_from": "2026-04-01",
+        "date_to": "2026-04-30",
+    }
+
+
 def test_receive_products_create_requires_explicit_create_permission() -> None:
     user = SimpleNamespace(
         id=11,

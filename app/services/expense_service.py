@@ -24,6 +24,15 @@ def _payment_account_code(payment_method: str) -> str:
     return "1000" if payment_method in {"cash", "card"} else "1200"
 
 
+def _parse_filter_date(value: Optional[str]) -> Optional[date_type]:
+    if not value:
+        return None
+    try:
+        return date_type.fromisoformat(value)
+    except ValueError:
+        return None
+
+
 async def _next_expense_reference(db: AsyncSession) -> str:
     result = await db.execute(select(func.max(Expense.id)))
     max_id = result.scalar() or 0
@@ -208,6 +217,8 @@ async def list_expenses(
     *,
     category_id: Optional[int] = None,
     month: Optional[str] = None,
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
 ) -> list[dict]:
     statement = select(Expense).options(
         selectinload(Expense.category),
@@ -225,6 +236,12 @@ async def list_expenses(
             )
         except (ValueError, IndexError):
             pass
+    start_date = _parse_filter_date(date_from)
+    end_date = _parse_filter_date(date_to)
+    if start_date:
+        statement = statement.where(Expense.expense_date >= start_date)
+    if end_date:
+        statement = statement.where(Expense.expense_date <= end_date)
 
     statement = statement.order_by(Expense.expense_date.desc(), Expense.id.desc())
     result = await db.execute(statement)
