@@ -1,8 +1,12 @@
 from pathlib import Path
 
 
+def _source() -> str:
+    return Path("app/routers/expenses.py").read_text(encoding="utf-8")
+
+
 def test_expenses_load_expenses_reports_api_failures() -> None:
-    source = Path("app/routers/expenses.py").read_text(encoding="utf-8")
+    source = _source()
 
     assert "if (!response.ok)" in source
     assert "const body = await response.text()" in source
@@ -14,7 +18,7 @@ def test_expenses_load_expenses_reports_api_failures() -> None:
 
 
 def test_expenses_load_expenses_renders_rows_defensively() -> None:
-    source = Path("app/routers/expenses.py").read_text(encoding="utf-8")
+    source = _source()
 
     assert 'const paymentMethod = String(e.payment_method || "cash")' in source
     assert "const amount = Number(e.amount || 0)" in source
@@ -27,10 +31,32 @@ def test_expenses_load_expenses_renders_rows_defensively() -> None:
 
 
 def test_expenses_boot_does_not_block_table_on_secondary_loaders() -> None:
-    source = Path("app/routers/expenses.py").read_text(encoding="utf-8")
+    source = _source()
 
-    assert "loadCategories().catch" in source
-    assert "loadSummary().catch" in source
-    assert "loadFarmsDropdown().catch" in source
-    assert "await loadExpenses();" in source
+    assert "await Promise.allSettled([" in source
+    assert "loadCategories()," in source
+    assert "loadSummary()," in source
+    assert "loadExpenses()," in source
+    assert "loadFarmsDropdown()" in source
     assert "Promise.all([loadCategories(), loadSummary(), loadExpenses(), loadFarmsDropdown()])" not in source
+
+
+def test_expenses_boot_has_no_dead_month_filter_dom_write() -> None:
+    source = _source()
+
+    assert 'id="month-filter"' not in source
+    assert 'getElementById("month-filter")' not in source
+
+
+def test_expenses_loaders_check_status_and_log_debug_shapes() -> None:
+    source = _source()
+
+    assert 'console.log("Loading expenses page data: categories")' in source
+    assert 'console.log("Loading expenses page data: summary")' in source
+    assert 'console.log("Loading expenses page data: expenses")' in source
+    assert 'console.log("Loading expenses page data: farms")' in source
+    assert "async function readJsonResponse(response, loaderName)" in source
+    assert "if (!response.ok)" in source
+    assert 'showInlineError("cat-list-body"' in source
+    assert "Summary error" in source
+    assert "Farm list unavailable" in source

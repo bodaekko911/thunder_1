@@ -1114,11 +1114,6 @@ if (window.__appTheme) {
     document.getElementById("mode-btn").innerHTML = "&#9728;&#65039;";
 }
 
-// Set default month filter to current month
-const today = new Date();
-document.getElementById("month-filter").value =
-    today.getFullYear() + "-" + String(today.getMonth() + 1).padStart(2, "0");
-
 // ── Toast ─────────────────────────────────────────────
 function showToast(msg, type = "") {
     const el = document.getElementById("toast");
@@ -1138,10 +1133,16 @@ document.querySelectorAll(".modal-bg").forEach(bg => {
 
 // ── Categories ────────────────────────────────────────
 async function loadCategories() {
+    console.log("Loading expenses page data: categories");
     try {
-        categories = await (await fetch("/expenses/api/categories")).json();
+        const response = await fetch("/expenses/api/categories");
+        const data = await readJsonResponse(response, "categories");
+        if (!Array.isArray(data)) throw new Error(`categories returned ${describeDataShape(data)}`);
+        categories = data;
         renderCategories();
     } catch(e) {
+        console.error("Failed to load expense categories", e);
+        showInlineError("cat-list-body", e.message || "Failed to load categories");
         showToast("Failed to load categories", "err");
     }
 }
@@ -1217,20 +1218,33 @@ function filterCategory(id) {
 
 // ── Summary ───────────────────────────────────────────
 async function loadSummary() {
+    console.log("Loading expenses page data: summary");
     try {
-        const d = await (await fetch("/expenses/api/summary")).json();
-        document.getElementById("stat-this-month").innerText = d.this_month.toFixed(2);
-        document.getElementById("stat-last-month").innerText = d.last_month.toFixed(2);
-        document.getElementById("stat-all-time").innerText   = d.total_all.toFixed(2);
-        document.getElementById("cat-all-total").innerText   = d.this_month.toFixed(0);
-        if (d.breakdown.length) {
-            document.getElementById("stat-top-cat").innerText        = d.breakdown[0].name;
-            document.getElementById("stat-top-cat-amount").innerText = d.breakdown[0].total.toFixed(2) + " EGP this month";
+        const response = await fetch("/expenses/api/summary");
+        const d = await readJsonResponse(response, "summary");
+        if (!d || typeof d !== "object" || Array.isArray(d)) throw new Error(`summary returned ${describeDataShape(d)}`);
+        const thisMonth = Number(d.this_month || 0);
+        const lastMonth = Number(d.last_month || 0);
+        const totalAll = Number(d.total_all || 0);
+        const breakdown = Array.isArray(d.breakdown) ? d.breakdown : [];
+        document.getElementById("stat-this-month").innerText = Number.isFinite(thisMonth) ? thisMonth.toFixed(2) : "0.00";
+        document.getElementById("stat-last-month").innerText = Number.isFinite(lastMonth) ? lastMonth.toFixed(2) : "0.00";
+        document.getElementById("stat-all-time").innerText   = Number.isFinite(totalAll) ? totalAll.toFixed(2) : "0.00";
+        document.getElementById("cat-all-total").innerText   = Number.isFinite(thisMonth) ? thisMonth.toFixed(0) : "0";
+        if (breakdown.length) {
+            const topTotal = Number(breakdown[0].total || 0);
+            document.getElementById("stat-top-cat").innerText        = breakdown[0].name || "—";
+            document.getElementById("stat-top-cat-amount").innerText = (Number.isFinite(topTotal) ? topTotal.toFixed(2) : "0.00") + " EGP this month";
         } else {
             document.getElementById("stat-top-cat").innerText        = "—";
             document.getElementById("stat-top-cat-amount").innerText = "";
         }
-    } catch(e) {}
+    } catch(e) {
+        console.error("Failed to load expense summary", e);
+        document.getElementById("stat-top-cat").innerText = "Summary error";
+        document.getElementById("stat-top-cat-amount").innerText = e.message || "Failed to load summary";
+        showToast("Failed to load summary", "err");
+    }
 }
 
 // ── Expenses ──────────────────────────────────────────
@@ -1244,7 +1258,42 @@ function escapeHtml(value) {
     }[c]));
 }
 
+function describeDataShape(data) {
+    if (Array.isArray(data)) return `array(${data.length})`;
+    if (data && typeof data === "object") return `object(${Object.keys(data).join(",")})`;
+    return String(data);
+}
+
+function showInlineError(elementId, message) {
+    const el = document.getElementById(elementId);
+    if (el) el.innerHTML = `<div style="padding:12px;color:#ef4444;font-size:12px">${escapeHtml(message)}</div>`;
+}
+
+async function readJsonResponse(response, loaderName) {
+    const body = await response.text();
+    let data = null;
+    try {
+        data = body ? JSON.parse(body) : null;
+    } catch(parseErr) {
+        console.error(`Loading expenses page data: ${loaderName} invalid JSON`, {
+            status: response.status,
+            body
+        });
+        throw new Error(`Invalid JSON from ${loaderName} (${response.status})`);
+    }
+    console.log(`Loading expenses page data: ${loaderName} response`, {
+        status: response.status,
+        shape: describeDataShape(data)
+    });
+    if (!response.ok) {
+        const message = data && data.detail ? data.detail : (body || response.statusText);
+        throw new Error(`${loaderName} failed (${response.status}): ${message}`);
+    }
+    return data;
+}
+
 async function loadExpenses() {
+    console.log("Loading expenses page data: expenses");
     const dateFrom = document.getElementById("date-from-filter").value;
     const dateTo   = document.getElementById("date-to-filter").value;
     const params = new URLSearchParams();
@@ -1277,6 +1326,10 @@ async function loadExpenses() {
             tbody.innerHTML = `<tr class="empty-row"><td colspan="7">Could not load expenses (${response.status}): ${escapeHtml(String(message))}</td></tr>`;
             return;
         }
+        console.log("Loading expenses page data: expenses response", {
+            status: response.status,
+            shape: describeDataShape(data)
+        });
         if (!Array.isArray(data)) {
             console.error("Expenses API returned non-array JSON", { url, status: response.status, data });
             tbody.innerHTML = `<tr class="empty-row"><td colspan="7">Could not load expenses: API returned an unexpected response shape.</td></tr>`;
@@ -1494,21 +1547,32 @@ async function deleteExpense(id, ref) {
 
 // ── Farm dropdown for cost allocation ─────────────────
 async function loadFarmsDropdown() {
+    console.log("Loading expenses page data: farms");
     try {
-        const farms = await (await fetch("/farm/api/farms")).json();
+        const response = await fetch("/farm/api/farms");
+        const farms = await readJsonResponse(response, "farms");
+        if (!Array.isArray(farms)) throw new Error(`farms returned ${describeDataShape(farms)}`);
         const sel = document.getElementById("m-farm");
+        if (!sel) return;
         sel.innerHTML = `<option value="">— General expense —</option>` +
-            farms.map(f => `<option value="${f.id}">${f.name}</option>`).join("");
-    } catch(e) { /* farm endpoint optional */ }
+            farms.map(f => `<option value="${f.id}">${escapeHtml(String(f.name || "Farm #" + f.id))}</option>`).join("");
+    } catch(e) {
+        console.error("Failed to load farms dropdown", e);
+        const sel = document.getElementById("m-farm");
+        if (sel) sel.innerHTML = `<option value="">Farm list unavailable</option>`;
+        showToast("Failed to load farms", "err");
+    }
 }
 
 // ── Boot ──────────────────────────────────────────────
 async function bootstrapExpensesPage() {
     await initUser();
-    loadCategories().catch(err => console.error("Failed to load expense categories", err));
-    loadSummary().catch(err => console.error("Failed to load expense summary", err));
-    loadFarmsDropdown().catch(err => console.error("Failed to load farms dropdown", err));
-    await loadExpenses();
+    await Promise.allSettled([
+        loadCategories(),
+        loadSummary(),
+        loadExpenses(),
+        loadFarmsDropdown()
+    ]);
 }
 
 bootstrapExpensesPage();
