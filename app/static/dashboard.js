@@ -227,37 +227,17 @@ function sparklineBars(values) {
 function renderNumbers() {
   ["sales", "clients_owe", "b2b_cash", "spent", "stock_alerts"].forEach((key) => {
     const node = document.querySelector(`[data-card="${key}"]`);
-    if (!node) return; // card not in DOM yet (old HTML cached)
+    if (!node) return;
     const spec = cardSpec(key);
-    // On first render, build the structure once
-    let btn = node.querySelector(".number-card-button");
-    if (!btn) {
-      node.innerHTML = `
-        <div class="number-card-button">
-          <span class="number-label"></span>
-          <strong class="number-value"></strong>
-          <span class="number-meta"></span>
-          <div class="number-sparkline-or-breakdown"></div>
-        </div>
-      `;
-      btn = node.querySelector(".number-card-button");
-    }
-    // Update text in-place — no DOM teardown, no flicker
-    btn.dataset.tooltip = spec.tooltip;
-    btn.querySelector(".number-label").textContent = spec.label;
-    btn.querySelector(".number-value").textContent = spec.value;
-    btn.querySelector(".number-meta").textContent = spec.meta;
-    const extra = btn.querySelector(".number-sparkline-or-breakdown");
-    if (spec.sparkline.length) {
-      extra.className = "sparkline-bars";
-      extra.innerHTML = sparklineBars(spec.sparkline);
-    } else if (spec.meta) {
-      extra.className = "number-breakdown";
-      extra.textContent = spec.meta;
-    } else {
-      extra.className = "number-breakdown";
-      extra.textContent = "";
-    }
+    // Always rebuild inner structure to ensure all elements exist
+    node.innerHTML = `
+      <div class="number-card-button" data-tooltip="${escHtml(spec.tooltip || "")}">
+        <span class="number-label">${escHtml(spec.label || "")}</span>
+        <strong class="number-value">${escHtml(spec.value || "")}</strong>
+        <span class="number-meta">${escHtml(spec.meta || "")}</span>
+        ${spec.sparkline && spec.sparkline.length ? `<div class="sparkline-bars">${sparklineBars(spec.sparkline)}</div>` : spec.meta ? `<div class="number-breakdown">${escHtml(spec.meta)}</div>` : ""}
+      </div>
+    `;
   });
 }
 
