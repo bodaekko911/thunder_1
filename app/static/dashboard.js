@@ -329,13 +329,14 @@ function renderChart() {
         },
       },
     });
-    // don't return — fall through so first render is complete
     return;
   }
   salesChart.data.labels = chartData.labels;
   salesChart.data.datasets.forEach((dataset, i) => {
-    dataset.data = chartData.datasets[i].data;
-    dataset.backgroundColor = chartData.datasets[i].backgroundColor;
+    if (chartData.datasets[i]) {
+      dataset.data = chartData.datasets[i].data;
+      dataset.backgroundColor = chartData.datasets[i].backgroundColor;
+    }
   });
   salesChart.options.plugins.tooltip.callbacks.afterBody = tooltipAfterBody;
   salesChart.update("none");
@@ -429,11 +430,11 @@ async function loadDashboard() {
       document.getElementById("loading").classList.add("hidden");
       dashboardHasLoaded = true;
     }
-    renderBriefing();
-    renderNumbers();
-    renderChart();
-    renderTopProducts();
-    renderRecentActivity();
+    try { renderBriefing(); } catch(e) { console.error("renderBriefing", e); }
+    try { renderNumbers(); } catch(e) { console.error("renderNumbers", e); }
+    try { renderChart(); } catch(e) { console.error("renderChart", e); }
+    try { renderTopProducts(); } catch(e) { console.error("renderTopProducts", e); }
+    try { renderRecentActivity(); } catch(e) { console.error("renderRecentActivity", e); }
     markUpdated();
   } catch (error) {
     if (error.name === "AbortError") return;
