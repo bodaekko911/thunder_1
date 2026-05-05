@@ -227,6 +227,7 @@ function sparklineBars(values) {
 function renderNumbers() {
   ["sales", "clients_owe", "b2b_cash", "spent", "stock_alerts"].forEach((key) => {
     const node = document.querySelector(`[data-card="${key}"]`);
+    if (!node) return; // card not in DOM yet (old HTML cached)
     const spec = cardSpec(key);
     // On first render, build the structure once
     let btn = node.querySelector(".number-card-button");
