@@ -488,26 +488,24 @@ async def _build_numbers(db: AsyncSession, rng: dict[str, Any], user: User, erro
     # B2B cash collected — debit on account 1000 for payment journals in range
     b2b_cash_value = 0.0
     try:
-        cash_acc_r = await db.execute(select(Account).where(Account.code == "1000"))
-        cash_acc = cash_acc_r.scalar_one_or_none()
-        if cash_acc:
-            utc_s = rng["utc_start"]
-            utc_e = rng["utc_end"]
-            cash_r = await db.execute(
-                select(func.coalesce(func.sum(JournalEntry.debit), 0))
-                .join(Journal, JournalEntry.journal_id == Journal.id)
-                .where(
-                    JournalEntry.account_id == cash_acc.id,
-                    Journal.created_at >= utc_s,
-                    Journal.created_at <= utc_e,
-                    Journal.ref_type.in_([
-                        "b2b_payment", "b2b_collection",
-                        "consignment_payment", "consignment_client_payment",
-                    ]),
-                )
-            )
-            b2b_cash_value = _safe_float(cash_r.scalar())
+        from sqlalchemy import text
+        cash_r = await db.execute(
+            text("""
+                SELECT COALESCE(SUM(je.debit), 0)
+                FROM journal_entries je
+                JOIN journals j ON je.journal_id = j.id
+                JOIN accounts a ON je.account_id = a.id
+                WHERE a.code = '1000'
+                  AND je.debit > 0
+                  AND j.created_at >= :utc_s
+                  AND j.created_at <= :utc_e
+                  AND j.ref_type IN ('b2b_payment','b2b_collection','consignment_payment','consignment_client_payment')
+            """),
+            {"utc_s": rng["utc_start"], "utc_e": rng["utc_end"]},
+        )
+        b2b_cash_value = float(cash_r.scalar() or 0)
     except Exception:
+        logger.exception("dashboard_summary: b2b_cash query failed")
         _append_error(errors, "numbers.b2b_cash")
 
     sales_delta = _delta_pct(sales_value, sales_prior)
