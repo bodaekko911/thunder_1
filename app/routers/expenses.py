@@ -213,13 +213,25 @@ async def delete_category(
 @router.get("/api/list")
 async def list_expenses(
     category_id: Optional[int] = None,
-    month: Optional[str] = None,   # "YYYY-MM"
+    month: Optional[str] = None,       # legacy "YYYY-MM" — kept for backward compat
+    date_from: Optional[str] = None,   # "YYYY-MM-DD"
+    date_to: Optional[str] = None,     # "YYYY-MM-DD"
     db: AsyncSession = Depends(get_async_session),
 ):
     stmt = select(Expense)
     if category_id:
         stmt = stmt.where(Expense.category_id == category_id)
-    if month:
+    if date_from:
+        try:
+            stmt = stmt.where(Expense.expense_date >= date_from)
+        except (ValueError, IndexError):
+            pass
+    if date_to:
+        try:
+            stmt = stmt.where(Expense.expense_date <= date_to)
+        except (ValueError, IndexError):
+            pass
+    if month and not date_from and not date_to:
         try:
             y, m = int(month[:4]), int(month[5:7])
             stmt = stmt.where(
@@ -919,7 +931,11 @@ nav {
             <div class="main-head">
                 <span class="main-title" id="main-title">All Expenses</span>
                 <div class="filter-row">
-                    <input type="month" class="filter-input" id="month-filter"
+                    <label style="font-size:11px;color:var(--sub);white-space:nowrap">From</label>
+                    <input type="date" class="filter-input" id="date-from-filter"
+                        oninput="loadExpenses()" style="cursor:pointer">
+                    <label style="font-size:11px;color:var(--sub);white-space:nowrap">To</label>
+                    <input type="date" class="filter-input" id="date-to-filter"
                         oninput="loadExpenses()" style="cursor:pointer">
                     <button class="add-cat-btn" onclick="clearFilter()" title="Clear filter">✕ Clear</button>
                 </div>
@@ -942,6 +958,21 @@ nav {
                     </tbody>
                 </table>
             </div>
+        </div>
+    </div>
+</div>
+
+<!-- Expense Receipt Modal -->
+<div class="modal-bg" id="receipt-modal" onclick="if(event.target===this)closeModal('receipt-modal')">
+    <div class="modal" style="max-width:480px">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:18px">
+            <div class="modal-title" style="margin:0">Expense Receipt</div>
+            <div style="display:flex;gap:8px">
+                <button class="btn-save" style="padding:6px 14px;font-size:12px" onclick="printReceipt()">🖨 Print</button>
+                <button class="btn-cancel" style="padding:6px 14px;font-size:12px" onclick="closeModal('receipt-modal')">Close</button>
+            </div>
+        </div>
+        <div id="receipt-content" style="font-family:var(--mono,monospace);font-size:13px;line-height:1.8">
         </div>
     </div>
 </div>
@@ -1204,10 +1235,12 @@ async function loadSummary() {
 
 // ── Expenses ──────────────────────────────────────────
 async function loadExpenses() {
-    const month  = document.getElementById("month-filter").value;
+    const dateFrom = document.getElementById("date-from-filter").value;
+    const dateTo   = document.getElementById("date-to-filter").value;
     let url = "/expenses/api/list?";
     if (activeCatId) url += `category_id=${activeCatId}&`;
-    if (month)       url += `month=${month}`;
+    if (dateFrom)    url += `date_from=${dateFrom}&`;
+    if (dateTo)      url += `date_to=${dateTo}&`;
     const tbody = document.getElementById("exp-tbody");
     tbody.innerHTML = `<tr class="empty-row"><td colspan="7">Loading…</td></tr>`;
     try {
@@ -1227,7 +1260,9 @@ async function loadExpenses() {
                 <td><div class="exp-vendor">${e.vendor || "—"}</div></td>
                 <td><span class="method-pill method-${e.payment_method}">${e.payment_method.replace("_"," ")}</span></td>
                 <td><div class="exp-amount">${e.amount.toFixed(2)}</div></td>
-                <td>
+                <td style="display:flex;gap:4px;flex-wrap:wrap">
+                    <button class="action-btn" onclick="viewReceipt(${JSON.stringify(e).replace(/"/g,'&quot;')})">View</button>
+                    <button class="action-btn" onclick="viewReceipt(${JSON.stringify(e).replace(/"/g,'&quot;')}, true)">Print</button>
                     ${hasPermission("action_expenses_update") ? `<button class="action-btn" onclick="openEditModal(${JSON.stringify(e).replace(/"/g,'&quot;')})">Edit</button>` : ""}
                     ${hasPermission("action_expenses_delete") ? `<button class="action-btn del" onclick="deleteExpense(${e.id}, '${e.ref_number}')">Delete</button>` : ""}
                 </td>
@@ -1238,8 +1273,53 @@ async function loadExpenses() {
     }
 }
 
+function viewReceipt(e, autoPrint = false) {
+    const methodLabel = e.payment_method.replace(/_/g, " ").replace(/\b\w/g, c => c.toUpperCase());
+    document.getElementById("receipt-content").innerHTML = `
+        <div style="text-align:center;margin-bottom:16px;padding-bottom:12px;border-bottom:1px dashed var(--border)">
+            <div style="font-size:16px;font-weight:700;color:var(--text)">EXPENSE RECEIPT</div>
+            <div style="font-size:11px;color:var(--sub);margin-top:2px">${e.ref_number}</div>
+        </div>
+        <div style="display:grid;grid-template-columns:auto 1fr;gap:4px 16px;font-size:13px">
+            <span style="color:var(--sub)">Date</span>        <span style="color:var(--text);font-weight:500">${e.expense_date}</span>
+            <span style="color:var(--sub)">Category</span>    <span style="color:var(--text);font-weight:500">${e.category}</span>
+            <span style="color:var(--sub)">Vendor</span>      <span style="color:var(--text)">${e.vendor || "—"}</span>
+            <span style="color:var(--sub)">Method</span>      <span style="color:var(--text)">${methodLabel}</span>
+            ${e.farm_name ? `<span style="color:var(--sub)">Farm</span><span style="color:#84cc16;font-weight:500">${e.farm_name}</span>` : ""}
+            ${e.description ? `<span style="color:var(--sub)">Notes</span><span style="color:var(--text)">${e.description}</span>` : ""}
+            <span style="color:var(--sub)">Recorded by</span><span style="color:var(--text)">${e.created_by || "—"}</span>
+        </div>
+        <div style="margin-top:16px;padding-top:12px;border-top:1px dashed var(--border);display:flex;justify-content:space-between;align-items:center">
+            <span style="font-size:13px;color:var(--sub)">Total Amount</span>
+            <span style="font-size:20px;font-weight:700;color:var(--text)">EGP ${e.amount.toFixed(2)}</span>
+        </div>
+    `;
+    openModal("receipt-modal");
+    if (autoPrint) setTimeout(printReceipt, 300);
+}
+
+function printReceipt() {
+    const content = document.getElementById("receipt-content").innerHTML;
+    const win = window.open("", "_blank", "width=420,height=600");
+    win.document.write(`
+        <html><head><title>Expense Receipt</title>
+        <style>
+            body { font-family: monospace; padding: 24px; font-size: 13px; line-height: 1.8; color: #111; }
+            .grid { display: grid; grid-template-columns: auto 1fr; gap: 4px 16px; }
+            .label { color: #666; }
+            .sep { border: none; border-top: 1px dashed #ccc; margin: 12px 0; }
+            .total { display: flex; justify-content: space-between; font-weight: 700; font-size: 16px; }
+            @media print { body { padding: 8px; } }
+        </style></head>
+        <body>${content}<script>window.onload=()=>{window.print();window.close();}<\/script>
+        </body></html>
+    `);
+    win.document.close();
+}
+
 function clearFilter() {
-    document.getElementById("month-filter").value = "";
+    document.getElementById("date-from-filter").value = "";
+    document.getElementById("date-to-filter").value = "";
     loadExpenses();
 }
 
