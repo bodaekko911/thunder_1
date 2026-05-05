@@ -1,4 +1,3 @@
-import logging
 from datetime import date as date_type
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -15,8 +14,6 @@ from app.models.expense import Expense, ExpenseCategory
 from app.models.farm import Farm, FarmDelivery, FarmDeliveryItem
 from app.models.user import User
 from app.schemas.expense import ExpenseCategoryCreate, ExpenseCreate, ExpenseUpdate
-
-logger = logging.getLogger("erp.expenses")
 
 
 def _clean_text(value: Optional[str]) -> Optional[str]:
@@ -145,6 +142,35 @@ async def _get_active_category(db: AsyncSession, category_id: int) -> ExpenseCat
     return category
 
 
+async def _get_or_create_salary_category(db: AsyncSession) -> ExpenseCategory:
+    account = await _get_or_create_account(
+        db,
+        "5006",
+        account_name="Salaries & Wages",
+    )
+    account.type = "expense"
+    account.name = account.name or "Salaries & Wages"
+
+    result = await db.execute(
+        select(ExpenseCategory).where(ExpenseCategory.name == "Salaries & Wages")
+    )
+    category = result.scalar_one_or_none()
+    if category:
+        category.account_code = "5006"
+        category.is_active = "1"
+        return category
+
+    category = ExpenseCategory(
+        name="Salaries & Wages",
+        account_code="5006",
+        description="Payroll salary payments",
+        is_active="1",
+    )
+    db.add(category)
+    await db.flush()
+    return category
+
+
 async def list_categories(db: AsyncSession) -> list[dict]:
     result = await db.execute(
         select(ExpenseCategory)
@@ -226,13 +252,6 @@ async def list_expenses(
     date_from: Optional[str] = None,
     date_to: Optional[str] = None,
 ) -> list[dict]:
-    logger.info(
-        "Listing expenses with filters category_id=%s month=%s date_from=%s date_to=%s",
-        category_id,
-        month,
-        date_from,
-        date_to,
-    )
     statement = select(Expense).options(
         selectinload(Expense.category),
         selectinload(Expense.user),
@@ -240,12 +259,8 @@ async def list_expenses(
     )
     if category_id:
         statement = statement.where(Expense.category_id == category_id)
-    try:
-        start_date = _parse_filter_date(date_from)
-        end_date = _parse_filter_date(date_to)
-    except HTTPException:
-        logger.info("Expense list query rejected due to invalid filters", exc_info=True)
-        raise
+    start_date = _parse_filter_date(date_from)
+    end_date = _parse_filter_date(date_to)
     if start_date:
         statement = statement.where(Expense.expense_date >= start_date)
     if end_date:
@@ -258,19 +273,11 @@ async def list_expenses(
                 func.extract("month", Expense.expense_date) == month_number,
             )
         except (ValueError, IndexError):
-            raise HTTPException(
-                status_code=400,
-                detail="Invalid month filter - use YYYY-MM",
-            ) from None
+            raise HTTPException(status_code=400, detail="Invalid month filter - use YYYY-MM") from None
 
     statement = statement.order_by(Expense.expense_date.desc(), Expense.id.desc())
-    try:
-        result = await db.execute(statement)
-    except Exception:
-        logger.exception("Expense list query failed")
-        raise
+    result = await db.execute(statement)
     expenses = result.scalars().all()
-    logger.info("Expense list query succeeded; returned %s matching rows", len(expenses))
     return [
         {
             "id": expense.id,
@@ -393,6 +400,72 @@ async def create_expense_entry(db: AsyncSession, data: ExpenseCreate, current_us
         "amount": float(expense.amount),
         "category": category.name,
     }
+
+
+async def create_payroll_expense(
+    db: AsyncSession,
+    payroll,
+    current_user: User,
+    *,
+    payment_method: str = "cash",
+    paid_date: Optional[date_type] = None,
+) -> Expense:
+    if payment_method not in {"cash", "bank_transfer", "card"}:
+        raise HTTPException(status_code=400, detail="Invalid payment method")
+
+    amount = round(float(payroll.net_salary or 0), 2)
+    if amount <= 0:
+        raise HTTPException(status_code=400, detail="Payroll net salary must be greater than 0")
+
+    existing_result = await db.execute(
+        select(Expense)
+        .options(selectinload(Expense.category))
+        .where(Expense.payroll_id == payroll.id)
+    )
+    existing = existing_result.scalar_one_or_none()
+    if existing:
+        return existing
+
+    category = await _get_or_create_salary_category(db)
+    employee = getattr(payroll, "employee", None)
+    employee_name = getattr(employee, "name", None) or f"Employee #{payroll.employee_id}"
+    payment_date = paid_date or date_type.today()
+    reference_number = await _next_expense_reference(db)
+    description = f"Salary payment - {employee_name} - {payroll.period} - payroll #{payroll.id}"
+
+    journal = await _post_expense_journal(
+        db,
+        description=f"Salaries & Wages expense - {reference_number} - {employee_name}",
+        amount=amount,
+        expense_account_code=category.account_code,
+        payment_method=payment_method,
+        user_id=current_user.id,
+    )
+
+    expense = Expense(
+        ref_number=reference_number,
+        category_id=category.id,
+        user_id=current_user.id,
+        expense_date=payment_date,
+        amount=amount,
+        payment_method=payment_method,
+        vendor=employee_name,
+        description=description,
+        journal_id=journal.id,
+        payroll_id=payroll.id,
+    )
+    db.add(expense)
+    await db.flush()
+    record(
+        db,
+        "Expenses",
+        "add_payroll_expense",
+        f"Salaries & Wages - {reference_number} - {amount:.2f} - payroll #{payroll.id}",
+        user=current_user,
+        ref_type="expense",
+        ref_id=expense.id or 0,
+    )
+    return expense
 
 
 async def update_expense_entry(

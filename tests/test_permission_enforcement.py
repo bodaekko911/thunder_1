@@ -200,6 +200,29 @@ def test_receive_products_create_requires_explicit_create_permission() -> None:
     )
 
 
+def test_hr_mark_paid_requires_explicit_permission() -> None:
+    user = SimpleNamespace(
+        id=16,
+        name="HR Payroll Viewer",
+        role="viewer",
+        permissions="page_hr,tab_hr_payroll",
+        is_active=True,
+    )
+    client, fake_db = _make_client(user)
+
+    response = client.patch(
+        "/hr/api/payroll/7/pay",
+        json={"payment_method": "cash"},
+    )
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Permission denied: action_hr_mark_paid"
+    assert any(
+        log.action == "PERMISSION_DENIED" and log.ref_id == "action_hr_mark_paid"
+        for log in fake_db.logged
+    )
+
+
 def test_receive_products_update_requires_explicit_update_permission() -> None:
     user = SimpleNamespace(
         id=12,

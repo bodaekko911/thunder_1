@@ -1231,6 +1231,7 @@ async function loadSummary() {
         document.getElementById("stat-last-month").innerText = Number.isFinite(lastMonth) ? lastMonth.toFixed(2) : "0.00";
         document.getElementById("stat-all-time").innerText   = Number.isFinite(totalAll) ? totalAll.toFixed(2) : "0.00";
         document.getElementById("cat-all-total").innerText   = Number.isFinite(thisMonth) ? thisMonth.toFixed(0) : "0";
+
         if (breakdown.length) {
             const topTotal = Number(breakdown[0].total || 0);
             document.getElementById("stat-top-cat").innerText        = breakdown[0].name || "—";

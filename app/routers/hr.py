@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException
+﻿from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import HTMLResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -13,6 +13,7 @@ from app.core.log import record
 from app.core.navigation import render_app_header
 from app.models.hr import Employee, Attendance, Payroll
 from app.models.user import User
+from app.services.expense_service import create_payroll_expense
 
 router = APIRouter(
     prefix="/hr",
@@ -21,7 +22,7 @@ router = APIRouter(
 )
 
 
-# ── Schemas ────────────────────────────────────────────
+# â”€â”€ Schemas â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 class EmployeeCreate(BaseModel):
     name:        str
     phone:       Optional[str]  = None
@@ -54,7 +55,11 @@ class PayrollUpdate(BaseModel):
     notes:      Optional[str] = None
 
 
-# ── EMPLOYEE API ───────────────────────────────────────
+class PayrollPayRequest(BaseModel):
+    payment_method: str = "cash"
+
+
+# â”€â”€ EMPLOYEE API â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 @router.get("/api/employees")
 async def get_employees(q: str = "", db: AsyncSession = Depends(get_async_session)):
     stmt = select(Employee).where(Employee.is_active == True)
@@ -71,10 +76,10 @@ async def get_employees(q: str = "", db: AsyncSession = Depends(get_async_sessio
         {
             "id":          e.id,
             "name":        e.name,
-            "phone":       e.phone or "—",
-            "position":    e.position or "—",
-            "department":  e.department or "—",
-            "hire_date":   str(e.hire_date) if e.hire_date else "—",
+            "phone":       e.phone or "â€”",
+            "position":    e.position or "â€”",
+            "department":  e.department or "â€”",
+            "hire_date":   str(e.hire_date) if e.hire_date else "â€”",
             "base_salary": float(e.base_salary),
             "is_active":   e.is_active,
         }
@@ -91,7 +96,7 @@ async def add_employee(data: EmployeeCreate, db: AsyncSession = Depends(get_asyn
     )
     db.add(e); await db.flush()
     record(db, "HR", "add_employee",
-           f"Added employee: {e.name} — {e.position or ''} / {e.department or ''} — salary: {float(e.base_salary):.2f}",
+           f"Added employee: {e.name} â€” {e.position or ''} / {e.department or ''} â€” salary: {float(e.base_salary):.2f}",
            ref_type="employee", ref_id=e.id)
     await db.commit(); await db.refresh(e)
     return {"id": e.id, "name": e.name}
@@ -124,7 +129,7 @@ async def deactivate_employee(emp_id: int, db: AsyncSession = Depends(get_async_
     return {"ok": True}
 
 
-# ── ATTENDANCE API ─────────────────────────────────────
+# â”€â”€ ATTENDANCE API â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 @router.get("/api/attendance")
 async def get_attendance(emp_id: int = None, period: str = None, db: AsyncSession = Depends(get_async_session)):
     stmt = select(Attendance).options(selectinload(Attendance.employee))
@@ -144,7 +149,7 @@ async def get_attendance(emp_id: int = None, period: str = None, db: AsyncSessio
         {
             "id":          r.id,
             "employee_id": r.employee_id,
-            "employee":    r.employee.name if r.employee else "—",
+            "employee":    r.employee.name if r.employee else "â€”",
             "date":        str(r.date),
             "status":      r.status,
             "note":        r.note or "",
@@ -217,7 +222,7 @@ async def mark_absent_today(data: AttendanceCreate, db: AsyncSession = Depends(g
     return {"ok": True}
 
 
-# ── PAYROLL API ────────────────────────────────────────
+# â”€â”€ PAYROLL API â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 @router.get("/api/payroll")
 async def get_payroll(period: str = None, db: AsyncSession = Depends(get_async_session)):
     stmt = select(Payroll).options(selectinload(Payroll.employee))
@@ -226,11 +231,22 @@ async def get_payroll(period: str = None, db: AsyncSession = Depends(get_async_s
     stmt = stmt.order_by(Payroll.period.desc(), Payroll.id)
     _r = await db.execute(stmt)
     records = _r.scalars().all()
+    from app.models.expense import Expense
+
+    payroll_ids = [r.id for r in records]
+    expense_by_payroll = {}
+    if payroll_ids:
+        expense_result = await db.execute(
+            select(Expense).where(Expense.payroll_id.in_(payroll_ids))
+        )
+        expense_by_payroll = {
+            expense.payroll_id: expense for expense in expense_result.scalars().all()
+        }
     return [
         {
             "id":          r.id,
             "employee_id": r.employee_id,
-            "employee":    r.employee.name if r.employee else "—",
+            "employee":    r.employee.name if r.employee else "â€”",
             "period":      r.period,
             "base_salary": float(r.base_salary) if r.base_salary else 0,
             "days_worked": r.days_worked or 0,
@@ -240,6 +256,8 @@ async def get_payroll(period: str = None, db: AsyncSession = Depends(get_async_s
             "net_salary":  float(r.net_salary)  if r.net_salary  else 0,
             "paid":        r.paid,
             "paid_at":     str(r.paid_at) if r.paid_at else None,
+            "expense_id":  expense_by_payroll[r.id].id if r.id in expense_by_payroll else None,
+            "expense_ref_number": expense_by_payroll[r.id].ref_number if r.id in expense_by_payroll else None,
         }
         for r in records
     ]
@@ -291,7 +309,7 @@ async def preview_payroll(period: str, db: AsyncSession = Depends(get_async_sess
         result.append({
             "employee_id":  emp.id,
             "employee":     emp.name,
-            "position":     emp.position or "—",
+            "position":     emp.position or "â€”",
             "base_salary":  float(emp.base_salary),
             "working_days": working_days,
             "days_elapsed": days_elapsed,
@@ -379,7 +397,7 @@ async def run_payroll(data: PayrollRun, db: AsyncSession = Depends(get_async_ses
         created += 1
 
     record(db, "HR", "run_payroll",
-           f"Payroll run for {data.period} — {created} created, {skipped} updated",
+           f"Payroll run for {data.period} â€” {created} created, {skipped} updated",
            ref_type="payroll", ref_id=data.period)
     await db.commit()
     return {"created": created, "skipped": skipped, "period": data.period}
@@ -403,25 +421,51 @@ async def update_payroll(payroll_id: int, data: PayrollUpdate, db: AsyncSession 
     if data.notes:
         p.notes = data.notes
     record(db, "HR", "update_payroll",
-           f"Updated payroll #{payroll_id} — bonuses: {data.bonuses}, deductions: {data.deductions}, net: {p.net_salary:.2f}",
+           f"Updated payroll #{payroll_id} â€” bonuses: {data.bonuses}, deductions: {data.deductions}, net: {p.net_salary:.2f}",
            ref_type="payroll", ref_id=payroll_id)
     await db.commit()
     return {"ok": True, "net_salary": float(p.net_salary)}
 
 @router.patch("/api/payroll/{payroll_id}/pay", dependencies=[Depends(require_permission("action_hr_mark_paid"))])
-async def mark_paid(payroll_id: int, db: AsyncSession = Depends(get_async_session), current_user: User = Depends(get_current_user)):
+async def mark_paid(
+    payroll_id: int,
+    data: PayrollPayRequest = PayrollPayRequest(),
+    db: AsyncSession = Depends(get_async_session),
+    current_user: User = Depends(get_current_user),
+):
     from datetime import datetime, timezone
-    _r = await db.execute(select(Payroll).where(Payroll.id == payroll_id))
+    _r = await db.execute(
+        select(Payroll)
+        .options(selectinload(Payroll.employee))
+        .where(Payroll.id == payroll_id)
+    )
     p = _r.scalar_one_or_none()
     if not p:
         raise HTTPException(status_code=404, detail="Payroll record not found")
+    if float(p.net_salary or 0) <= 0:
+        raise HTTPException(status_code=400, detail="Payroll net salary must be greater than 0")
+    paid_at = p.paid_at or datetime.now(timezone.utc)
+    expense = await create_payroll_expense(
+        db,
+        p,
+        current_user,
+        payment_method=data.payment_method,
+        paid_date=paid_at.date(),
+    )
     p.paid    = True
-    p.paid_at = datetime.now(timezone.utc)
+    p.paid_at = paid_at
     record(db, "HR", "mark_payroll_paid",
-           f"Marked payroll #{payroll_id} as paid — net: {float(p.net_salary):.2f}",
+           f"Marked payroll #{payroll_id} as paid â€” net: {float(p.net_salary):.2f}",
            ref_type="payroll", ref_id=payroll_id)
     await db.commit()
-    return {"ok": True}
+    return {
+        "ok": True,
+        "payroll_id": p.id,
+        "expense_id": expense.id,
+        "expense_ref_number": expense.ref_number,
+        "category": "Salaries & Wages",
+        "amount": float(expense.amount),
+    }
 
 @router.get("/api/summary")
 async def hr_summary(db: AsyncSession = Depends(get_async_session)):
@@ -448,7 +492,7 @@ async def hr_summary(db: AsyncSession = Depends(get_async_session)):
     }
 
 
-# ── UI ─────────────────────────────────────────────────
+# â”€â”€ UI â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 @router.get("/", response_class=HTMLResponse)
 def hr_ui(current_user: User = Depends(require_permission("page_hr"))):
     return """
@@ -611,19 +655,19 @@ td.mono { font-family: var(--mono); color: var(--green); }
     <div class="stats-grid">
         <div class="stat-card green">
             <div class="stat-label">Total Employees</div>
-            <div class="stat-value green" id="stat-total">—</div>
+            <div class="stat-value green" id="stat-total">â€”</div>
         </div>
         <div class="stat-card blue">
             <div class="stat-label">Present Today</div>
-            <div class="stat-value blue" id="stat-present">—</div>
+            <div class="stat-value blue" id="stat-present">â€”</div>
         </div>
         <div class="stat-card warn">
             <div class="stat-label">Absent Today</div>
-            <div class="stat-value warn" id="stat-absent">—</div>
+            <div class="stat-value warn" id="stat-absent">â€”</div>
         </div>
         <div class="stat-card purple">
             <div class="stat-label">Monthly Payroll</div>
-            <div class="stat-value purple" id="stat-salary">—</div>
+            <div class="stat-value purple" id="stat-salary">â€”</div>
         </div>
     </div>
 
@@ -645,13 +689,13 @@ td.mono { font-family: var(--mono); color: var(--green); }
         <div class="toolbar">
             <div class="search-box">
                 <svg width="15" height="15" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
-                <input id="emp-search" placeholder="Search by name, position or department…" oninput="onEmpSearch()">
+                <input id="emp-search" placeholder="Search by name, position or departmentâ€¦" oninput="onEmpSearch()">
             </div>
         </div>
         <div class="table-wrap">
             <table>
                 <thead><tr><th>Name</th><th>Position</th><th>Department</th><th>Phone</th><th>Hire Date</th><th>Base Salary</th><th>Actions</th></tr></thead>
-                <tbody id="emp-body"><tr><td colspan="7" style="text-align:center;color:var(--muted);padding:40px">Loading…</td></tr></tbody>
+                <tbody id="emp-body"><tr><td colspan="7" style="text-align:center;color:var(--muted);padding:40px">Loadingâ€¦</td></tr></tbody>
             </table>
         </div>
     </div>
@@ -689,6 +733,26 @@ td.mono { font-family: var(--mono); color: var(--green); }
             <div class="fld" style="margin:0;flex:0 0 180px">
                 <input id="pay-period" type="month" style="background:var(--card);border:1px solid var(--border);border-radius:var(--r);padding:10px 14px;color:var(--text);font-family:var(--sans);font-size:14px;outline:none;" onchange="loadPayrollPreview()">
             </div>
+            <button class="btn btn-blue" onclick="loadPayrollRecords()">View Payroll Records</button>
+        </div>
+
+        <div class="stats-grid" id="payroll-record-summary" style="display:none;margin-bottom:14px">
+            <div class="stat-card blue">
+                <div class="stat-label">Records</div>
+                <div class="stat-value blue" id="payroll-record-count">â€”</div>
+            </div>
+            <div class="stat-card green">
+                <div class="stat-label">Paid Total</div>
+                <div class="stat-value green" id="payroll-paid-total">â€”</div>
+            </div>
+            <div class="stat-card warn">
+                <div class="stat-label">Unpaid Total</div>
+                <div class="stat-value warn" id="payroll-unpaid-total">â€”</div>
+            </div>
+            <div class="stat-card purple">
+                <div class="stat-label">Pending Count</div>
+                <div class="stat-value purple" id="payroll-pending-count">â€”</div>
+            </div>
         </div>
 
         <!-- PAYROLL PREVIEW -->
@@ -701,7 +765,7 @@ td.mono { font-family: var(--mono); color: var(--green); }
                     </div>
                     <div style="text-align:right">
                         <div style="font-size:11px;color:var(--muted);margin-bottom:2px">Total to Pay</div>
-                        <div style="font-family:var(--mono);font-size:24px;font-weight:700;color:var(--green)" id="preview-total">—</div>
+                        <div style="font-family:var(--mono);font-size:24px;font-weight:700;color:var(--green)" id="preview-total">â€”</div>
                     </div>
                 </div>
             </div>
@@ -712,14 +776,14 @@ td.mono { font-family: var(--mono); color: var(--green); }
                 </table>
             </div>
             <div style="display:flex;justify-content:flex-end;margin-top:12px;">
-                <button class="btn btn-purple" onclick="confirmRunPayroll()">▶ Confirm & Run Payroll</button>
+                <button class="btn btn-purple" onclick="confirmRunPayroll()">â–¶ Confirm & Run Payroll</button>
             </div>
         </div>
 
         <!-- PAYROLL RECORDS -->
         <div class="table-wrap" id="payroll-records-wrap" style="display:none">
             <table>
-                <thead><tr><th>Employee</th><th>Period</th><th>Base Salary</th><th>Days</th><th>Bonuses</th><th>Deductions</th><th>Net Salary</th><th>Status</th><th>Actions</th></tr></thead>
+                <thead><tr><th>Employee</th><th>Period</th><th>Base Salary</th><th>Days</th><th>Bonuses</th><th>Deductions</th><th>Net Salary</th><th>Status</th><th>Expense</th><th>Actions</th></tr></thead>
                 <tbody id="pay-body"></tbody>
             </table>
         </div>
@@ -755,10 +819,10 @@ td.mono { font-family: var(--mono); color: var(--green); }
         <div class="fld"><label>Date *</label><input id="a-date" type="date"></div>
         <div class="fld"><label>Status</label>
             <select id="a-status">
-                <option value="present">✅ Present</option>
-                <option value="absent">❌ Absent</option>
-                <option value="late">⏰ Late</option>
-                <option value="leave">🏖 Leave</option>
+                <option value="present">âœ… Present</option>
+                <option value="absent">âŒ Absent</option>
+                <option value="late">â° Late</option>
+                <option value="leave">ðŸ– Leave</option>
             </select>
         </div>
         <div class="fld"><label>Note</label><input id="a-note" placeholder="Optional note"></div>
@@ -777,7 +841,7 @@ td.mono { font-family: var(--mono); color: var(--green); }
         <p style="color:var(--muted);font-size:13px;margin-bottom:16px">This will generate payroll records for all active employees for the selected period. Already existing records will be skipped.</p>
         <div class="modal-actions">
             <button class="btn-cancel" onclick="closeRunPayModal()">Cancel</button>
-            <button class="btn btn-purple" onclick="runPayroll()">▶ Run Payroll</button>
+            <button class="btn btn-purple" onclick="runPayroll()">â–¶ Run Payroll</button>
         </div>
     </div>
 </div>
@@ -802,7 +866,7 @@ td.mono { font-family: var(--mono); color: var(--green); }
 <script>
   function setModeButton(isLight){
     const btn = document.getElementById("mode-btn");
-    if(btn) btn.innerText = isLight ? "☀️" : "🌙";
+    if(btn) btn.innerText = isLight ? "â˜€ï¸" : "ðŸŒ™";
 }
 function toggleMode(){
     const isLight = document.body.classList.toggle("light");
@@ -881,23 +945,67 @@ let editingEmpId = null;
 let editingPayId = null;
 let empSearchTimer = null;
 
-/* ── INIT ── */
+function escapeHtml(value){
+    return String(value ?? "").replace(/[&<>"']/g, c => ({
+        "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&#39;"
+    }[c]));
+}
+function safeMoney(value){
+    const amount = Number(value || 0);
+    return Number.isFinite(amount) ? amount.toFixed(2) : "0.00";
+}
+function describeShape(data){
+    if(Array.isArray(data)) return `array(${data.length})`;
+    if(data && typeof data === "object") return `object(${Object.keys(data).join(",")})`;
+    return String(data);
+}
+async function readJsonResponse(response, label){
+    const text = await response.text();
+    let data = null;
+    try { data = text ? JSON.parse(text) : null; }
+    catch(e){ throw new Error(`${label} returned invalid JSON (${response.status})`); }
+    console.log(`HR ${label} response`, {status: response.status, shape: describeShape(data)});
+    if(!response.ok){
+        const message = data && data.detail ? data.detail : (text || response.statusText);
+        throw new Error(`${label} failed (${response.status}): ${message}`);
+    }
+    return data;
+}
+function tableError(tbodyId, colspan, message){
+    document.getElementById(tbodyId).innerHTML =
+        `<tr><td colspan="${colspan}" style="text-align:center;color:var(--danger);padding:40px">${escapeHtml(message)}</td></tr>`;
+}
+
+/* â”€â”€ INIT â”€â”€ */
 async function init(){
-    await loadSummary();
-    await loadEmployees();
+    await Promise.allSettled([loadSummary(), loadEmployees()]);
     // Auto-mark all present today on page load
-    await fetch("/hr/api/attendance/auto-today", {method:"POST"});
+    fetch("/hr/api/attendance/auto-today", {method:"POST"})
+        .then(async res => {
+            if(!res.ok) throw new Error((await res.text()) || res.statusText);
+        })
+        .catch(err => {
+            console.error("Auto attendance failed", err);
+            showToast("Auto attendance failed");
+        });
 }
 
 async function loadSummary(){
-    let d = await (await fetch("/hr/api/summary")).json();
-    document.getElementById("stat-total").innerText   = d.total_employees;
-    document.getElementById("stat-present").innerText = d.present_today;
-    document.getElementById("stat-absent").innerText  = d.absent_today;
-    document.getElementById("stat-salary").innerText  = d.total_salary.toFixed(2);
+    try{
+        let d = await readJsonResponse(await fetch("/hr/api/summary"), "summary");
+        if(!d || typeof d !== "object" || Array.isArray(d)) throw new Error(`summary returned ${describeShape(d)}`);
+        document.getElementById("stat-total").innerText   = Number(d.total_employees || 0);
+        document.getElementById("stat-present").innerText = Number(d.present_today || 0);
+        document.getElementById("stat-absent").innerText  = Number(d.absent_today || 0);
+        document.getElementById("stat-salary").innerText  = safeMoney(d.total_salary);
+    } catch(e){
+        console.error("Failed to load HR summary", e);
+        document.getElementById("stat-salary").innerText = "Error";
+        showToast("Failed to load HR summary");
+    }
 }
 
-/* ── TABS ── */
+/* â”€â”€ TABS â”€â”€ */
 function switchTab(tab){
     const required = {
         employees: "tab_hr_employees",
@@ -915,16 +1023,19 @@ function switchTab(tab){
     if(tab==="payroll")    initPayrollTab();
 }
 
-/* ── EMPLOYEES ── */
+/* â”€â”€ EMPLOYEES â”€â”€ */
 function onEmpSearch(){
     clearTimeout(empSearchTimer);
     empSearchTimer = setTimeout(loadEmployees, 300);
 }
 
 async function loadEmployees(){
+    try{
     let q   = document.getElementById("emp-search").value.trim();
     let url = `/hr/api/employees${q?"?q="+encodeURIComponent(q):""}`;
-    employees = await (await fetch(url)).json();
+    let data = await readJsonResponse(await fetch(url), "employees");
+    if(!Array.isArray(data)) throw new Error(`employees returned ${describeShape(data)}`);
+    employees = data;
 
     if(!employees.length){
         document.getElementById("emp-body").innerHTML =
@@ -932,19 +1043,30 @@ async function loadEmployees(){
         return;
     }
 
-    document.getElementById("emp-body").innerHTML = employees.map(e => `
+    document.getElementById("emp-body").innerHTML = employees.map(e => {
+        const salary = safeMoney(e.base_salary);
+        const name = e.name || "â€”";
+        const position = e.position || "â€”";
+        const department = e.department || "â€”";
+        const phone = e.phone || "â€”";
+        return `
         <tr>
-            <td class="name">${e.name}</td>
-            <td>${e.position}</td>
-            <td>${e.department}</td>
-            <td style="font-family:var(--mono);font-size:12px">${e.phone}</td>
-            <td style="font-size:12px;color:var(--muted)">${e.hire_date}</td>
-            <td class="mono">${e.base_salary.toFixed(2)}</td>
+            <td class="name">${escapeHtml(name)}</td>
+            <td>${escapeHtml(position)}</td>
+            <td>${escapeHtml(department)}</td>
+            <td style="font-family:var(--mono);font-size:12px">${escapeHtml(phone)}</td>
+            <td style="font-size:12px;color:var(--muted)">${escapeHtml(e.hire_date || "â€”")}</td>
+            <td class="mono">${salary}</td>
             <td style="display:flex;gap:6px">
-                <button class="action-btn" onclick="openEditEmpModal(${e.id},'${e.name.replace(/'/g,"\\'")}','${e.position}','${e.department}','${e.phone}',${e.base_salary})">Edit</button>
-                ${hasPermission("action_hr_run_payroll")?`<button class="action-btn danger" onclick="deactivateEmployee(${e.id},'${e.name.replace(/'/g,"\\'")}')">Remove</button>`:""}
+                <button class="action-btn" onclick='openEditEmpModal(${Number(e.id)||0}, ${JSON.stringify(name)}, ${JSON.stringify(position)}, ${JSON.stringify(department)}, ${JSON.stringify(phone)}, ${Number(e.base_salary || 0)})'>Edit</button>
+                ${hasPermission("action_hr_run_payroll")?`<button class="action-btn danger" onclick='deactivateEmployee(${Number(e.id)||0}, ${JSON.stringify(name)})'>Remove</button>`:""}
             </td>
-        </tr>`).join("");
+        </tr>`;
+    }).join("");
+    } catch(e){
+        console.error("Failed to load employees", e);
+        tableError("emp-body", 7, e.message || "Failed to load employees");
+    }
 }
 
 function openAddEmpModal(){
@@ -959,9 +1081,9 @@ function openEditEmpModal(id,name,position,department,phone,salary){
     editingEmpId = id;
     document.getElementById("emp-modal-title").innerText = "Edit Employee";
     document.getElementById("e-name").value       = name;
-    document.getElementById("e-position").value   = position==="—"?"":position;
-    document.getElementById("e-department").value = department==="—"?"":department;
-    document.getElementById("e-phone").value      = phone==="—"?"":phone;
+    document.getElementById("e-position").value   = position==="â€”"?"":position;
+    document.getElementById("e-department").value = department==="â€”"?"":department;
+    document.getElementById("e-phone").value      = phone==="â€”"?"":phone;
     document.getElementById("e-salary").value     = salary;
     document.getElementById("emp-modal").classList.add("open");
 }
@@ -985,18 +1107,18 @@ async function saveEmployee(){
     let data   = await res.json();
     if(data.detail){ showToast("Error: "+data.detail); return; }
     closeEmpModal();
-    showToast(editingEmpId?"Employee updated ✓":"Employee added ✓");
+    showToast(editingEmpId?"Employee updated âœ“":"Employee added âœ“");
     loadEmployees(); loadSummary();
 }
 
 async function deactivateEmployee(id,name){
     if(!confirm(`Remove "${name}" from active employees?`)) return;
     await fetch(`/hr/api/employees/${id}`,{method:"DELETE"});
-    showToast("Employee removed ✓");
+    showToast("Employee removed âœ“");
     loadEmployees(); loadSummary();
 }
 
-/* ── ATTENDANCE ── */
+/* â”€â”€ ATTENDANCE â”€â”€ */
 function initAttendanceTab(){
     // Set default period to current month
     let now = new Date();
@@ -1020,11 +1142,13 @@ function initAttendanceTab(){
 }
 
 async function loadAttendance(){
+    try{
     let period = document.getElementById("att-period").value;
     let empId  = document.getElementById("att-emp-filter").value;
     let url    = `/hr/api/attendance?period=${period}`;
     if(empId) url += `&emp_id=${empId}`;
-    let records = await (await fetch(url)).json();
+    let records = await readJsonResponse(await fetch(url), "attendance");
+    if(!Array.isArray(records)) throw new Error(`attendance returned ${describeShape(records)}`);
 
     if(!records.length){
         document.getElementById("att-body").innerHTML =
@@ -1033,16 +1157,21 @@ async function loadAttendance(){
     }
 
     document.getElementById("att-body").innerHTML = records.map(r => {
-        let cls = `status-${r.status}`;
-        let labels = {present:"✅ Present",absent:"❌ Absent",late:"⏰ Late",leave:"🏖 Leave"};
+        let status = String(r.status || "");
+        let cls = `status-${status}`;
+        let labels = {present:"âœ… Present",absent:"âŒ Absent",late:"â° Late",leave:"ðŸ– Leave"};
         return `
         <tr>
-            <td class="name">${r.employee}</td>
-            <td style="font-family:var(--mono);font-size:12px">${r.date}</td>
-            <td><span class="${cls}">${labels[r.status]||r.status}</span></td>
-            <td style="color:var(--muted);font-size:12px">${r.note||"—"}</td>
+            <td class="name">${escapeHtml(r.employee || "â€”")}</td>
+            <td style="font-family:var(--mono);font-size:12px">${escapeHtml(r.date || "â€”")}</td>
+            <td><span class="${cls}">${escapeHtml(labels[status]||status||"â€”")}</span></td>
+            <td style="color:var(--muted);font-size:12px">${r.note||"â€”"}</td>
         </tr>`;
     }).join("");
+    } catch(e){
+        console.error("Failed to load attendance", e);
+        tableError("att-body", 4, e.message || "Failed to load attendance");
+    }
 }
 
 function openLogAttModal(){
@@ -1064,11 +1193,11 @@ async function saveAttendance(){
     let data = await res.json();
     if(data.detail){ showToast("Error: "+data.detail); return; }
     closeAttModal();
-    showToast(data.updated?"Attendance updated ✓":"Attendance logged ✓");
+    showToast(data.updated?"Attendance updated âœ“":"Attendance logged âœ“");
     loadAttendance(); loadSummary();
 }
 
-/* ── ATTENDANCE TODAY CARD ── */
+/* â”€â”€ ATTENDANCE TODAY CARD â”€â”€ */
 async function loadTodayAttendance(){
     let today = new Date().toISOString().split("T")[0];
     let records = await (await fetch(`/hr/api/attendance?period=${today.slice(0,7)}`)).json();
@@ -1087,7 +1216,7 @@ async function loadTodayAttendance(){
             </div>
             <div style="display:flex;align-items:center;gap:10px">
                 <span style="font-size:12px;font-weight:700;color:${isAbs?"var(--danger)":"var(--green)"}">
-                    ${isAbs?"❌ Absent":"✅ Present"}
+                    ${isAbs?"âŒ Absent":"âœ… Present"}
                 </span>
                 ${hasPermission("action_hr_run_payroll") ? (isAbs
                     ? `<button class="action-btn green" onclick="markPresentToday(${emp.id})">Mark Present</button>`
@@ -1103,7 +1232,7 @@ async function markAbsentToday(empId){
         method:"POST", headers:{"Content-Type":"application/json"},
         body: JSON.stringify({employee_id: empId, date: new Date().toISOString().split("T")[0], status:"absent"}),
     });
-    showToast("Marked absent ✓");
+    showToast("Marked absent âœ“");
     loadTodayAttendance(); loadAttendance(); loadSummary();
 }
 
@@ -1112,11 +1241,11 @@ async function markPresentToday(empId){
         method:"POST", headers:{"Content-Type":"application/json"},
         body: JSON.stringify({employee_id: empId, date: new Date().toISOString().split("T")[0], status:"present"}),
     });
-    showToast("Marked present ✓");
+    showToast("Marked present âœ“");
     loadTodayAttendance(); loadAttendance(); loadSummary();
 }
 
-/* ── PAYROLL ── */
+/* â”€â”€ PAYROLL â”€â”€ */
 function initPayrollTab(){
     let now = new Date();
     let m   = String(now.getMonth()+1).padStart(2,"0");
@@ -1125,38 +1254,45 @@ function initPayrollTab(){
 }
 
 async function loadPayrollPreview(){
+    try{
     let period = document.getElementById("pay-period").value;
     if(!period) return;
 
     document.getElementById("payroll-preview-wrap").style.display  = "";
     document.getElementById("payroll-records-wrap").style.display  = "none";
     document.getElementById("preview-body").innerHTML =
-        `<tr><td colspan="8" style="text-align:center;color:var(--muted);padding:20px">Loading preview…</td></tr>`;
+        `<tr><td colspan="8" style="text-align:center;color:var(--muted);padding:20px">Loading previewâ€¦</td></tr>`;
 
-    let d    = await (await fetch(`/hr/api/payroll/preview?period=${period}`)).json();
+    let d = await readJsonResponse(await fetch(`/hr/api/payroll/preview?period=${period}`), "payroll preview");
+    if(!d || typeof d !== "object" || Array.isArray(d)) throw new Error(`payroll preview returned ${describeShape(d)}`);
+    let previewEmployees = Array.isArray(d.employees) ? d.employees : [];
     let [yr, mo] = period.split("-");
     let monthName = new Date(parseInt(yr), parseInt(mo)-1, 1).toLocaleDateString("en-GB",{month:"long",year:"numeric"});
 
     document.getElementById("preview-meta").innerHTML =
-        `<b>${monthName}</b> &nbsp;·&nbsp; ${d.days_elapsed} of ${d.working_days} working days elapsed`;
-    document.getElementById("preview-total").innerText = d.total_to_pay.toFixed(2) + " EGP";
+        `<b>${monthName}</b> &nbsp;Â·&nbsp; ${d.days_elapsed} of ${d.working_days} working days elapsed`;
+    document.getElementById("preview-total").innerText = safeMoney(d.total_to_pay) + " EGP";
 
-    document.getElementById("preview-body").innerHTML = d.employees.map(e => `
+    document.getElementById("preview-body").innerHTML = previewEmployees.map(e => `
         <tr>
-            <td class="name">${e.employee}<br><span style="font-size:11px;color:var(--muted)">${e.position}</span></td>
-            <td style="font-family:var(--mono)">${e.base_salary.toFixed(2)}</td>
+            <td class="name">${escapeHtml(e.employee || "â€”")}<br><span style="font-size:11px;color:var(--muted)">${escapeHtml(e.position || "â€”")}</span></td>
+            <td style="font-family:var(--mono)">${safeMoney(e.base_salary)}</td>
             <td style="font-family:var(--mono);color:var(--sub)">${e.working_days}</td>
             <td style="font-family:var(--mono);color:var(--green);font-weight:700">${e.days_present}</td>
             <td style="font-family:var(--mono);color:${e.days_absent>0?"var(--danger)":"var(--muted)"}">${e.days_absent}</td>
-            <td style="font-family:var(--mono);color:var(--blue)">${e.daily_rate.toFixed(2)}</td>
-            <td style="font-family:var(--mono);font-size:15px;font-weight:700;color:var(--green)">${e.earned.toFixed(2)}</td>
-            <td><span style="font-size:11px;color:${e.already_run?"var(--warn)":"var(--muted)"}">${e.already_run?"⟳ Will update":"New"}</span></td>
+            <td style="font-family:var(--mono);color:var(--blue)">${safeMoney(e.daily_rate)}</td>
+            <td style="font-family:var(--mono);font-size:15px;font-weight:700;color:var(--green)">${safeMoney(e.earned)}</td>
+            <td><span style="font-size:11px;color:${e.already_run?"var(--warn)":"var(--muted)"}">${e.already_run?"âŸ³ Will update":"New"}</span></td>
         </tr>`).join("") +
         `<tr style="background:var(--card2)">
             <td colspan="6" style="font-weight:700;color:var(--sub)">Total to Pay</td>
-            <td style="font-family:var(--mono);font-size:16px;font-weight:700;color:var(--green)">${d.total_to_pay.toFixed(2)}</td>
+            <td style="font-family:var(--mono);font-size:16px;font-weight:700;color:var(--green)">${safeMoney(d.total_to_pay)}</td>
             <td></td>
         </tr>`;
+    } catch(e){
+        console.error("Failed to load payroll preview", e);
+        tableError("preview-body", 8, e.message || "Failed to load payroll preview");
+    }
 }
 
 async function confirmRunPayroll(){
@@ -1168,32 +1304,37 @@ async function confirmRunPayroll(){
     });
     let data = await res.json();
     if(data.detail){ showToast("Error: "+data.detail); return; }
-    showToast(`✓ Payroll saved — ${data.created} created, ${data.skipped} updated`);
+    showToast(`âœ“ Payroll saved â€” ${data.created} created, ${data.skipped} updated`);
     loadPayrollRecords();
 }
 
 async function loadPayrollRecords(){
+    try{
     let period = document.getElementById("pay-period").value;
-    let records = await (await fetch(`/hr/api/payroll${period?"?period="+period:""}`)).json();
+    let records = await readJsonResponse(await fetch(`/hr/api/payroll${period?"?period="+period:""}`), "payroll records");
+    if(!Array.isArray(records)) throw new Error(`payroll records returned ${describeShape(records)}`);
     document.getElementById("payroll-preview-wrap").style.display = "none";
     document.getElementById("payroll-records-wrap").style.display = "";
+    document.getElementById("payroll-record-summary").style.display = "";
+    updatePayrollRecordSummary(records);
 
     if(!records.length){
         document.getElementById("pay-body").innerHTML =
-            `<tr><td colspan="9" style="text-align:center;color:var(--muted);padding:40px">No payroll records. Use preview above to generate.</td></tr>`;
+            `<tr><td colspan="10" style="text-align:center;color:var(--muted);padding:40px">No payroll records. Use preview above to generate.</td></tr>`;
         return;
     }
-    let totalNet = records.reduce((s,r)=>s+r.net_salary,0);
+    let totalNet = records.reduce((s,r)=>s + (Number(r.net_salary || 0) || 0),0);
     document.getElementById("pay-body").innerHTML = records.map(r=>`
         <tr>
             <td class="name">${r.employee}</td>
             <td style="font-family:var(--mono);font-size:12px;color:var(--muted)">${r.period}</td>
-            <td style="font-family:var(--mono)">${r.base_salary.toFixed(2)}</td>
-            <td style="font-family:var(--mono);color:var(--sub)">${r.days_worked||"—"} / ${r.working_days||"—"}</td>
-            <td style="font-family:var(--mono);color:var(--green)">+${r.bonuses.toFixed(2)}</td>
-            <td style="font-family:var(--mono);color:var(--danger)">-${r.deductions.toFixed(2)}</td>
-            <td style="font-family:var(--mono);font-size:15px;font-weight:700;color:var(--green)">${r.net_salary.toFixed(2)}</td>
-            <td>${r.paid?`<span class="paid-badge">✓ Paid</span>`:`<span class="unpaid-badge">Pending</span>`}</td>
+            <td style="font-family:var(--mono)">${safeMoney(r.base_salary)}</td>
+            <td style="font-family:var(--mono);color:var(--sub)">${r.days_worked||"â€”"} / ${r.working_days||"â€”"}</td>
+            <td style="font-family:var(--mono);color:var(--green)">+${safeMoney(r.bonuses)}</td>
+            <td style="font-family:var(--mono);color:var(--danger)">-${safeMoney(r.deductions)}</td>
+            <td style="font-family:var(--mono);font-size:15px;font-weight:700;color:var(--green)">${safeMoney(r.net_salary)}</td>
+            <td>${r.paid?`<span class="paid-badge">Paid</span>`:`<span class="unpaid-badge">Pending</span>`}</td>
+            <td>${r.expense_ref_number?`<span style="font-family:var(--mono);font-size:12px;color:var(--blue)">${escapeHtml(r.expense_ref_number)}</span>`:`<span style="color:var(--muted)">—</span>`}</td>
             <td style="display:flex;gap:6px">
                 <button class="action-btn purple" onclick="openEditPayModal(${r.id},'${r.employee.replace(/'/g,"\\'")}',${r.bonuses},${r.deductions})">Edit</button>
                 ${!r.paid && hasPermission("action_hr_mark_paid")?`<button class="action-btn green" onclick="markPaid(${r.id})">Mark Paid</button>`:""}
@@ -1201,9 +1342,24 @@ async function loadPayrollRecords(){
         </tr>`).join("") +
         `<tr style="background:var(--card2)">
             <td colspan="6" style="font-weight:700;color:var(--sub)">Total</td>
-            <td style="font-family:var(--mono);font-size:16px;font-weight:700;color:var(--green)">${totalNet.toFixed(2)}</td>
-            <td colspan="2"></td>
+            <td style="font-family:var(--mono);font-size:16px;font-weight:700;color:var(--green)">${safeMoney(totalNet)}</td>
+            <td colspan="3"></td>
         </tr>`;
+    } catch(e){
+        console.error("Failed to load payroll records", e);
+        document.getElementById("payroll-preview-wrap").style.display = "none";
+        document.getElementById("payroll-records-wrap").style.display = "";
+        tableError("pay-body", 10, e.message || "Failed to load payroll records");
+    }
+}
+
+function updatePayrollRecordSummary(records){
+    const paidTotal = records.filter(r=>r.paid).reduce((s,r)=>s + (Number(r.net_salary || 0) || 0), 0);
+    const unpaidTotal = records.filter(r=>!r.paid).reduce((s,r)=>s + (Number(r.net_salary || 0) || 0), 0);
+    document.getElementById("payroll-record-count").innerText = records.length;
+    document.getElementById("payroll-paid-total").innerText = safeMoney(paidTotal);
+    document.getElementById("payroll-unpaid-total").innerText = safeMoney(unpaidTotal);
+    document.getElementById("payroll-pending-count").innerText = records.filter(r=>!r.paid).length;
 }
 
 function openEditPayModal(id,empName,bonuses,deductions){
@@ -1228,18 +1384,33 @@ async function savePayrollEdit(){
     let data = await res.json();
     if(data.detail){ showToast("Error: "+data.detail); return; }
     closeEditPayModal();
-    showToast(`Payroll updated ✓ Net: ${data.net_salary.toFixed(2)}`);
+    showToast(`Payroll updated âœ“ Net: ${data.net_salary.toFixed(2)}`);
     loadPayrollRecords();
 }
 
+
+/* â”€â”€ MODAL CLOSE ON BG â”€â”€ */
 async function markPaid(id){
     if(!confirm("Mark this payroll as paid?")) return;
-    await fetch(`/hr/api/payroll/${id}/pay`,{method:"PATCH"});
-    showToast("Marked as paid ✓");
-    loadPayrollRecords();
+    const method = prompt("Payment method: cash, bank_transfer, or card", "cash") || "cash";
+    if(!["cash","bank_transfer","card"].includes(method)){
+        showToast("Invalid payment method");
+        return;
+    }
+    try{
+        let data = await readJsonResponse(await fetch(`/hr/api/payroll/${id}/pay`,{
+            method:"PATCH",
+            headers:{"Content-Type":"application/json"},
+            body: JSON.stringify({payment_method: method}),
+        }), "mark paid");
+        showToast(`Marked as paid âœ“ Expense ${data.expense_ref_number || ""} created in ${data.category || "Salaries & Wages"}`);
+        await Promise.allSettled([loadPayrollRecords(), loadSummary()]);
+    } catch(e){
+        console.error("Failed to mark payroll paid", e);
+        showToast(e.message || "Failed to mark paid");
+    }
 }
 
-/* ── MODAL CLOSE ON BG ── */
 ["emp-modal","att-modal","edit-pay-modal"].forEach(id=>{
     document.getElementById(id).addEventListener("click",function(e){
         if(e.target===this) this.classList.remove("open");

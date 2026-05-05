@@ -40,8 +40,10 @@ class Expense(Base):
     created_at      = Column(DateTime(timezone=True), server_default=func.now())
 
     farm_id     = Column(Integer, ForeignKey("farms.id"), nullable=True)
+    payroll_id  = Column(Integer, ForeignKey("payroll.id"), nullable=True, unique=True, index=True)
 
     category = relationship("ExpenseCategory", back_populates="expenses")
     user     = relationship("User")
     journal  = relationship("Journal")
     farm     = relationship("Farm")
+    payroll  = relationship("Payroll")
