@@ -401,8 +401,9 @@ async def dashboard_summary(
             pass
 
     from fastapi.responses import JSONResponse
+    from fastapi.encoders import jsonable_encoder
     return JSONResponse(
-        content=data,
+        content=jsonable_encoder(data),
         headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
     )
 
