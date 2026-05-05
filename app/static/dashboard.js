@@ -229,15 +229,33 @@ function renderNumbers() {
     const node = document.querySelector(`[data-card="${key}"]`);
     if (!node) return;
     const spec = cardSpec(key);
-    // Always rebuild inner structure to ensure all elements exist
-    node.innerHTML = `
-      <div class="number-card-button" data-tooltip="${escHtml(spec.tooltip || "")}">
-        <span class="number-label">${escHtml(spec.label || "")}</span>
-        <strong class="number-value">${escHtml(spec.value || "")}</strong>
-        <span class="number-meta">${escHtml(spec.meta || "")}</span>
-        ${spec.sparkline && spec.sparkline.length ? `<div class="sparkline-bars">${sparklineBars(spec.sparkline)}</div>` : spec.meta ? `<div class="number-breakdown">${escHtml(spec.meta)}</div>` : ""}
-      </div>
-    `;
+    let btn = node.querySelector(".number-card-button");
+    // Build structure on first render only
+    if (!btn) {
+      node.innerHTML = `
+        <div class="number-card-button">
+          <span class="number-label"></span>
+          <strong class="number-value"></strong>
+          <span class="number-meta"></span>
+          <div class="number-extra"></div>
+        </div>`;
+      btn = node.querySelector(".number-card-button");
+    }
+    // Update in-place — no teardown, no flicker
+    btn.dataset.tooltip = spec.tooltip || "";
+    btn.querySelector(".number-label").textContent = spec.label || "";
+    btn.querySelector(".number-value").textContent = spec.value || "";
+    btn.querySelector(".number-meta").textContent = spec.meta || "";
+    const extra = btn.querySelector(".number-extra");
+    if (extra) {
+      if (spec.sparkline && spec.sparkline.length) {
+        extra.className = "number-extra sparkline-bars";
+        extra.innerHTML = sparklineBars(spec.sparkline);
+      } else {
+        extra.className = "number-extra";
+        extra.textContent = "";
+      }
+    }
   });
 }
 
