@@ -1234,51 +1234,95 @@ async function loadSummary() {
 }
 
 // ── Expenses ──────────────────────────────────────────
+function escapeHtml(value) {
+    return String(value).replace(/[&<>"']/g, c => ({
+        "&": "&amp;",
+        "<": "&lt;",
+        ">": "&gt;",
+        '"': "&quot;",
+        "'": "&#39;"
+    }[c]));
+}
+
 async function loadExpenses() {
     const dateFrom = document.getElementById("date-from-filter").value;
     const dateTo   = document.getElementById("date-to-filter").value;
-    let url = "/expenses/api/list?";
-    if (activeCatId) url += `category_id=${activeCatId}&`;
-    if (dateFrom)    url += `date_from=${dateFrom}&`;
-    if (dateTo)      url += `date_to=${dateTo}&`;
+    const params = new URLSearchParams();
+    if (activeCatId) params.set("category_id", String(activeCatId));
+    if (dateFrom) params.set("date_from", dateFrom);
+    if (dateTo) params.set("date_to", dateTo);
+    const url = `/expenses/api/list${params.toString() ? "?" + params.toString() : ""}`;
     const tbody = document.getElementById("exp-tbody");
     tbody.innerHTML = `<tr class="empty-row"><td colspan="7">Loading…</td></tr>`;
     try {
         const response = await fetch(url);
+        const body = await response.text();
+        let data = null;
+        try {
+            data = body ? JSON.parse(body) : null;
+        } catch(parseErr) {
+            console.error("Failed to parse expenses JSON", { url, status: response.status, body });
+            tbody.innerHTML = `<tr class="empty-row"><td colspan="7">Could not load expenses (${response.status}): response was not valid JSON.</td></tr>`;
+            return;
+        }
         if (!response.ok) {
-            const body = await response.text();
+            const message = data && data.detail ? data.detail : (body || response.statusText);
             console.error("Failed to load expenses", {
+                url,
                 status: response.status,
                 statusText: response.statusText,
-                body
+                body,
+                data
             });
-            tbody.innerHTML = `<tr class="empty-row"><td colspan="7">Could not load expenses (${response.status}). Check your session or try again.</td></tr>`;
+            tbody.innerHTML = `<tr class="empty-row"><td colspan="7">Could not load expenses (${response.status}): ${escapeHtml(String(message))}</td></tr>`;
             return;
         }
-        const data = await response.json();
+        if (!Array.isArray(data)) {
+            console.error("Expenses API returned non-array JSON", { url, status: response.status, data });
+            tbody.innerHTML = `<tr class="empty-row"><td colspan="7">Could not load expenses: API returned an unexpected response shape.</td></tr>`;
+            return;
+        }
+        console.debug("Loaded expenses", {
+            url,
+            status: response.status,
+            length: data.length,
+            firstRow: data[0] || null
+        });
         if (!data.length) {
-            tbody.innerHTML = `<tr class="empty-row"><td colspan="7">No expenses found</td></tr>`;
+            tbody.innerHTML = `<tr class="empty-row"><td colspan="7">No expenses found in this database.</td></tr>`;
             return;
         }
-        tbody.innerHTML = data.map(e => `
+        tbody.innerHTML = data.map(e => {
+            const paymentMethod = String(e.payment_method || "cash");
+            const methodClass = paymentMethod.replace(/[^a-z0-9_-]/gi, "_");
+            const amount = Number(e.amount || 0);
+            const amountText = Number.isFinite(amount) ? amount.toFixed(2) : "0.00";
+            const ref = e.ref_number || "#" + e.id;
+            const category = e.category || "—";
+            const expenseDate = e.expense_date || "—";
+            const vendor = e.vendor || "";
+            const farmBadge = e.farm_name ? ` <span style="font-size:10px;padding:1px 7px;border-radius:10px;background:rgba(132,204,22,.1);color:#84cc16;font-weight:700">${escapeHtml(String(e.farm_name))}</span>` : "";
+            const rowJson = JSON.stringify(e).replace(/"/g,'&quot;');
+            return `
             <tr>
-                <td><div class="exp-ref">${e.ref_number}</div></td>
+                <td><div class="exp-ref">${escapeHtml(String(ref))}</div></td>
                 <td>
-                    <div class="exp-cat">${e.category}</div>
-                    <div class="exp-vendor">${e.vendor || ""}${e.farm_name ? ` <span style="font-size:10px;padding:1px 7px;border-radius:10px;background:rgba(132,204,22,.1);color:#84cc16;font-weight:700">${e.farm_name}</span>` : ""}</div>
+                    <div class="exp-cat">${escapeHtml(String(category))}</div>
+                    <div class="exp-vendor">${escapeHtml(String(vendor))}${farmBadge}</div>
                 </td>
-                <td><div class="exp-date">${e.expense_date}</div></td>
-                <td><div class="exp-vendor">${e.vendor || "—"}</div></td>
-                <td><span class="method-pill method-${e.payment_method}">${e.payment_method.replace("_"," ")}</span></td>
-                <td><div class="exp-amount">${e.amount.toFixed(2)}</div></td>
+                <td><div class="exp-date">${escapeHtml(String(expenseDate))}</div></td>
+                <td><div class="exp-vendor">${escapeHtml(String(vendor || "—"))}</div></td>
+                <td><span class="method-pill method-${methodClass}">${escapeHtml(paymentMethod.replace(/_/g, " "))}</span></td>
+                <td><div class="exp-amount">${amountText}</div></td>
                 <td style="display:flex;gap:4px;flex-wrap:wrap">
-                    <button class="action-btn" onclick="viewReceipt(${JSON.stringify(e).replace(/"/g,'&quot;')})">View</button>
-                    <button class="action-btn" onclick="viewReceipt(${JSON.stringify(e).replace(/"/g,'&quot;')}, true)">Print</button>
-                    ${hasPermission("action_expenses_update") ? `<button class="action-btn" onclick="openEditModal(${JSON.stringify(e).replace(/"/g,'&quot;')})">Edit</button>` : ""}
-                    ${hasPermission("action_expenses_delete") ? `<button class="action-btn del" onclick="deleteExpense(${e.id}, '${e.ref_number}')">Delete</button>` : ""}
+                    <button class="action-btn" onclick="viewReceipt(${rowJson})">View</button>
+                    <button class="action-btn" onclick="viewReceipt(${rowJson}, true)">Print</button>
+                    ${hasPermission("action_expenses_update") ? `<button class="action-btn" onclick="openEditModal(${rowJson})">Edit</button>` : ""}
+                    ${hasPermission("action_expenses_delete") ? `<button class="action-btn del" onclick="deleteExpense(${Number(e.id) || 0}, ${JSON.stringify(ref).replace(/"/g,'&quot;')})">Delete</button>` : ""}
                 </td>
             </tr>
-        `).join("");
+        `;
+        }).join("");
     } catch(err) {
         console.error("Failed to load expenses", err);
         tbody.innerHTML = `<tr class="empty-row"><td colspan="7">Could not load expenses. Check the console for details.</td></tr>`;
@@ -1286,24 +1330,30 @@ async function loadExpenses() {
 }
 
 function viewReceipt(e, autoPrint = false) {
-    const methodLabel = e.payment_method.replace(/_/g, " ").replace(/\b\w/g, c => c.toUpperCase());
+    const paymentMethod = String(e.payment_method || "cash");
+    const methodLabel = paymentMethod.replace(/_/g, " ").replace(/\\b\\w/g, c => c.toUpperCase());
+    const amount = Number(e.amount || 0);
+    const amountText = Number.isFinite(amount) ? amount.toFixed(2) : "0.00";
+    const ref = e.ref_number || "#" + e.id;
+    const category = e.category || "—";
+    const expenseDate = e.expense_date || "—";
     document.getElementById("receipt-content").innerHTML = `
         <div style="text-align:center;margin-bottom:16px;padding-bottom:12px;border-bottom:1px dashed var(--border)">
             <div style="font-size:16px;font-weight:700;color:var(--text)">EXPENSE RECEIPT</div>
-            <div style="font-size:11px;color:var(--sub);margin-top:2px">${e.ref_number}</div>
+            <div style="font-size:11px;color:var(--sub);margin-top:2px">${escapeHtml(String(ref))}</div>
         </div>
         <div style="display:grid;grid-template-columns:auto 1fr;gap:4px 16px;font-size:13px">
-            <span style="color:var(--sub)">Date</span>        <span style="color:var(--text);font-weight:500">${e.expense_date}</span>
-            <span style="color:var(--sub)">Category</span>    <span style="color:var(--text);font-weight:500">${e.category}</span>
-            <span style="color:var(--sub)">Vendor</span>      <span style="color:var(--text)">${e.vendor || "—"}</span>
+            <span style="color:var(--sub)">Date</span>        <span style="color:var(--text);font-weight:500">${escapeHtml(String(expenseDate))}</span>
+            <span style="color:var(--sub)">Category</span>    <span style="color:var(--text);font-weight:500">${escapeHtml(String(category))}</span>
+            <span style="color:var(--sub)">Vendor</span>      <span style="color:var(--text)">${escapeHtml(String(e.vendor || "—"))}</span>
             <span style="color:var(--sub)">Method</span>      <span style="color:var(--text)">${methodLabel}</span>
-            ${e.farm_name ? `<span style="color:var(--sub)">Farm</span><span style="color:#84cc16;font-weight:500">${e.farm_name}</span>` : ""}
-            ${e.description ? `<span style="color:var(--sub)">Notes</span><span style="color:var(--text)">${e.description}</span>` : ""}
-            <span style="color:var(--sub)">Recorded by</span><span style="color:var(--text)">${e.created_by || "—"}</span>
+            ${e.farm_name ? `<span style="color:var(--sub)">Farm</span><span style="color:#84cc16;font-weight:500">${escapeHtml(String(e.farm_name))}</span>` : ""}
+            ${e.description ? `<span style="color:var(--sub)">Notes</span><span style="color:var(--text)">${escapeHtml(String(e.description))}</span>` : ""}
+            <span style="color:var(--sub)">Recorded by</span><span style="color:var(--text)">${escapeHtml(String(e.created_by || "—"))}</span>
         </div>
         <div style="margin-top:16px;padding-top:12px;border-top:1px dashed var(--border);display:flex;justify-content:space-between;align-items:center">
             <span style="font-size:13px;color:var(--sub)">Total Amount</span>
-            <span style="font-size:20px;font-weight:700;color:var(--text)">EGP ${e.amount.toFixed(2)}</span>
+            <span style="font-size:20px;font-weight:700;color:var(--text)">EGP ${amountText}</span>
         </div>
     `;
     openModal("receipt-modal");
@@ -1323,7 +1373,7 @@ function printReceipt() {
             .total { display: flex; justify-content: space-between; font-weight: 700; font-size: 16px; }
             @media print { body { padding: 8px; } }
         </style></head>
-        <body>${content}<script>window.onload=()=>{window.print();window.close();}<\/script>
+        <body>${content}<script>window.onload=()=>{window.print();window.close();}<\\/script>
         </body></html>
     `);
     win.document.close();
@@ -1362,12 +1412,12 @@ function openEditModal(e) {
     }
     editingId = e.id;
     document.getElementById("modal-title").innerText = "Edit Expense";
-    document.getElementById("modal-sub").innerText   = e.ref_number;
+    document.getElementById("modal-sub").innerText   = e.ref_number || "#" + e.id;
     document.getElementById("modal-save-btn").innerText = "Update";
-    document.getElementById("m-category").value = e.category_id;
-    document.getElementById("m-amount").value   = e.amount;
-    document.getElementById("m-date").value     = e.expense_date;
-    document.getElementById("m-method").value   = e.payment_method;
+    document.getElementById("m-category").value = e.category_id || "";
+    document.getElementById("m-amount").value   = Number.isFinite(Number(e.amount)) ? Number(e.amount) : 0;
+    document.getElementById("m-date").value     = e.expense_date || "";
+    document.getElementById("m-method").value   = String(e.payment_method || "cash");
     document.getElementById("m-vendor").value   = e.vendor || "";
     document.getElementById("m-notes").value    = e.description || "";
     document.getElementById("m-farm").value     = e.farm_id || "";
@@ -1455,7 +1505,10 @@ async function loadFarmsDropdown() {
 // ── Boot ──────────────────────────────────────────────
 async function bootstrapExpensesPage() {
     await initUser();
-    await Promise.all([loadCategories(), loadSummary(), loadExpenses(), loadFarmsDropdown()]);
+    loadCategories().catch(err => console.error("Failed to load expense categories", err));
+    loadSummary().catch(err => console.error("Failed to load expense summary", err));
+    loadFarmsDropdown().catch(err => console.error("Failed to load farms dropdown", err));
+    await loadExpenses();
 }
 
 bootstrapExpensesPage();

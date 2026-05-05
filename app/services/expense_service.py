@@ -1,3 +1,4 @@
+import logging
 from datetime import date as date_type
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -15,6 +16,8 @@ from app.models.farm import Farm, FarmDelivery, FarmDeliveryItem
 from app.models.user import User
 from app.schemas.expense import ExpenseCategoryCreate, ExpenseCreate, ExpenseUpdate
 
+logger = logging.getLogger("erp.expenses")
+
 
 def _clean_text(value: Optional[str]) -> Optional[str]:
     return (value or "").strip() or None
@@ -28,9 +31,12 @@ def _parse_filter_date(value: Optional[str]) -> Optional[date_type]:
     if not value:
         return None
     try:
-        return date_type.fromisoformat(value)
+        return datetime.strptime(value, "%Y-%m-%d").date()
     except ValueError:
-        return None
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid date filter '{value}' - use YYYY-MM-DD",
+        ) from None
 
 
 async def _next_expense_reference(db: AsyncSession) -> str:
@@ -220,6 +226,13 @@ async def list_expenses(
     date_from: Optional[str] = None,
     date_to: Optional[str] = None,
 ) -> list[dict]:
+    logger.info(
+        "Listing expenses with filters category_id=%s month=%s date_from=%s date_to=%s",
+        category_id,
+        month,
+        date_from,
+        date_to,
+    )
     statement = select(Expense).options(
         selectinload(Expense.category),
         selectinload(Expense.user),
@@ -227,7 +240,17 @@ async def list_expenses(
     )
     if category_id:
         statement = statement.where(Expense.category_id == category_id)
-    if month:
+    try:
+        start_date = _parse_filter_date(date_from)
+        end_date = _parse_filter_date(date_to)
+    except HTTPException:
+        logger.info("Expense list query rejected due to invalid filters", exc_info=True)
+        raise
+    if start_date:
+        statement = statement.where(Expense.expense_date >= start_date)
+    if end_date:
+        statement = statement.where(Expense.expense_date <= end_date)
+    if month and not start_date and not end_date:
         try:
             year, month_number = int(month[:4]), int(month[5:7])
             statement = statement.where(
@@ -235,17 +258,19 @@ async def list_expenses(
                 func.extract("month", Expense.expense_date) == month_number,
             )
         except (ValueError, IndexError):
-            pass
-    start_date = _parse_filter_date(date_from)
-    end_date = _parse_filter_date(date_to)
-    if start_date:
-        statement = statement.where(Expense.expense_date >= start_date)
-    if end_date:
-        statement = statement.where(Expense.expense_date <= end_date)
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid month filter - use YYYY-MM",
+            ) from None
 
     statement = statement.order_by(Expense.expense_date.desc(), Expense.id.desc())
-    result = await db.execute(statement)
+    try:
+        result = await db.execute(statement)
+    except Exception:
+        logger.exception("Expense list query failed")
+        raise
     expenses = result.scalars().all()
+    logger.info("Expense list query succeeded; returned %s matching rows", len(expenses))
     return [
         {
             "id": expense.id,

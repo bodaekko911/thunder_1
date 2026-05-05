@@ -146,18 +146,36 @@ def test_list_expenses_applies_date_range_filters() -> None:
     assert "expenses.expense_date <= '2026-04-30'" in sql
 
 
-def test_list_expenses_ignores_invalid_date_filters() -> None:
+def test_list_expenses_rejects_invalid_date_filters_without_500() -> None:
     fake_db = FakeSession([[]])
 
-    result = asyncio.run(
+    with pytest.raises(HTTPException) as exc_info:
+        asyncio.run(
+            expense_service.list_expenses(
+                fake_db,
+                date_from="2026-99-99",
+                date_to="not-a-date",
+            )
+        )
+
+    assert exc_info.value.status_code == 400
+    assert "YYYY-MM-DD" in exc_info.value.detail
+    assert fake_db.statements == []
+
+
+def test_list_expenses_uses_month_only_without_date_range() -> None:
+    fake_db = FakeSession([[]])
+
+    asyncio.run(
         expense_service.list_expenses(
             fake_db,
-            date_from="2026-99-99",
-            date_to="not-a-date",
+            month="2026-04",
+            date_from="2026-04-01",
+            date_to="2026-04-30",
         )
     )
 
     sql = str(fake_db.statements[0].compile(compile_kwargs={"literal_binds": True}))
-    assert result == []
-    assert "expenses.expense_date >=" not in sql
-    assert "expenses.expense_date <=" not in sql
+    assert "EXTRACT(year FROM expenses.expense_date)" not in sql
+    assert "expenses.expense_date >= '2026-04-01'" in sql
+    assert "expenses.expense_date <= '2026-04-30'" in sql
