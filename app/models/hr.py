@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Numeric, Date, DateTime, ForeignKey, Text, Boolean
+from sqlalchemy import Column, Integer, String, Numeric, Date, DateTime, ForeignKey, Text, Boolean, UniqueConstraint
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 from app.database import Base
@@ -15,6 +15,7 @@ class Employee(Base):
     hire_date   = Column(Date)
     base_salary = Column(Numeric(12, 2), default=0)
     is_active   = Column(Boolean, default=True)
+    attendance_auto_status = Column(String(20), nullable=False, default="present", server_default="present")
     created_at  = Column(DateTime(timezone=True), server_default=func.now())
 
     attendance = relationship("Attendance", back_populates="employee")
@@ -23,6 +24,9 @@ class Employee(Base):
 
 class Attendance(Base):
     __tablename__ = "attendance"
+    __table_args__ = (
+        UniqueConstraint("employee_id", "date", name="uq_attendance_employee_date"),
+    )
 
     id          = Column(Integer, primary_key=True, index=True)
     employee_id = Column(Integer, ForeignKey("employees.id"), nullable=False)

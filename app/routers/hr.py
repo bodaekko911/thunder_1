@@ -14,6 +14,11 @@ from app.core.navigation import render_app_header
 from app.models.hr import Employee, Attendance, Payroll
 from app.models.user import User
 
+ATTENDANCE_STATUS_PRESENT = "present"
+ATTENDANCE_STATUS_ABSENT = "absent"
+ATTENDANCE_AUTO_STATUSES = {ATTENDANCE_STATUS_PRESENT, ATTENDANCE_STATUS_ABSENT}
+ATTENDANCE_STATUSES = ATTENDANCE_AUTO_STATUSES | {"late", "leave"}
+
 router = APIRouter(
     prefix="/hr",
     tags=["HR"],
@@ -54,6 +59,67 @@ class PayrollUpdate(BaseModel):
     notes:      Optional[str] = None
 
 
+def _normalize_attendance_status(status: str) -> str:
+    normalized = (status or ATTENDANCE_STATUS_PRESENT).strip().lower()
+    if normalized not in ATTENDANCE_STATUSES:
+        raise HTTPException(status_code=400, detail="Invalid attendance status")
+    return normalized
+
+
+def _normalize_auto_attendance_status(status: str | None) -> str:
+    normalized = (status or ATTENDANCE_STATUS_PRESENT).strip().lower()
+    return normalized if normalized in ATTENDANCE_AUTO_STATUSES else ATTENDANCE_STATUS_PRESENT
+
+
+async def _get_employee_or_404(db: AsyncSession, employee_id: int) -> Employee:
+    result = await db.execute(select(Employee).where(Employee.id == employee_id))
+    employee = result.scalar_one_or_none()
+    if not employee:
+        raise HTTPException(status_code=404, detail="Employee not found")
+    return employee
+
+
+async def _get_attendance_for_day(
+    db: AsyncSession,
+    employee_id: int,
+    attendance_date: date,
+) -> Attendance | None:
+    result = await db.execute(
+        select(Attendance)
+        .where(
+            Attendance.employee_id == employee_id,
+            Attendance.date == attendance_date,
+        )
+        .order_by(Attendance.id.desc())
+    )
+    return result.scalars().first()
+
+
+async def _upsert_attendance_for_day(
+    db: AsyncSession,
+    employee_id: int,
+    attendance_date: date,
+    status: str,
+    note: str | None = None,
+) -> tuple[Attendance, bool]:
+    status = _normalize_attendance_status(status)
+    existing = await _get_attendance_for_day(db, employee_id, attendance_date)
+    if existing:
+        existing.status = status
+        existing.note = note
+        return existing, True
+
+    attendance = Attendance(
+        employee_id=employee_id,
+        date=attendance_date,
+        status=status,
+        note=note,
+    )
+    db.add(attendance)
+    await db.flush()
+    return attendance, False
+
+
 # ── EMPLOYEE API ───────────────────────────────────────
 @router.get("/api/employees")
 async def get_employees(q: str = "", db: AsyncSession = Depends(get_async_session)):
@@ -77,6 +143,9 @@ async def get_employees(q: str = "", db: AsyncSession = Depends(get_async_sessio
             "hire_date":   str(e.hire_date) if e.hire_date else "—",
             "base_salary": float(e.base_salary),
             "is_active":   e.is_active,
+            "attendance_auto_status": _normalize_auto_attendance_status(
+                getattr(e, "attendance_auto_status", None)
+            ),
         }
         for e in emps
     ]
@@ -154,67 +223,89 @@ async def get_attendance(emp_id: int = None, period: str = None, db: AsyncSessio
 
 @router.post("/api/attendance")
 async def log_attendance(data: AttendanceCreate, db: AsyncSession = Depends(get_async_session), current_user: User = Depends(get_current_user)):
-    # Check if already logged for that day
-    _r = await db.execute(select(Attendance).where(
-        Attendance.employee_id == data.employee_id,
-        Attendance.date == date.fromisoformat(data.date),
-    ))
-    existing = _r.scalar_one_or_none()
-    if existing:
-        existing.status = data.status
-        existing.note   = data.note
-        await db.commit()
-        return {"id": existing.id, "updated": True}
-
-    a = Attendance(
-        employee_id=data.employee_id,
-        date=date.fromisoformat(data.date),
-        status=data.status,
-        note=data.note,
+    attendance_date = date.fromisoformat(data.date)
+    status = _normalize_attendance_status(data.status)
+    employee = await _get_employee_or_404(db, data.employee_id)
+    attendance, updated = await _upsert_attendance_for_day(
+        db,
+        data.employee_id,
+        attendance_date,
+        status,
+        data.note,
     )
-    db.add(a); await db.commit(); await db.refresh(a)
-    return {"id": a.id, "updated": False}
+    if attendance_date == date.today() and status in ATTENDANCE_AUTO_STATUSES:
+        employee.attendance_auto_status = status
+    await db.commit()
+    return {"id": attendance.id, "updated": updated}
 
 
 @router.post("/api/attendance/auto-today")
 async def auto_mark_today(db: AsyncSession = Depends(get_async_session), current_user: User = Depends(get_current_user)):
-    """Auto-mark all active employees as present today if not already logged."""
+    """Auto-log all active employees today using their persistent attendance mode."""
     today = date.today()
     _r = await db.execute(select(Employee).where(Employee.is_active == True))
     employees = _r.scalars().all()
     created = 0
+    present = 0
+    absent = 0
     for emp in employees:
-        _ex = await db.execute(select(Attendance).where(
-            Attendance.employee_id == emp.id,
-            Attendance.date == today,
-        ))
-        exists = _ex.scalar_one_or_none()
+        status = _normalize_auto_attendance_status(getattr(emp, "attendance_auto_status", None))
+        exists = await _get_attendance_for_day(db, emp.id, today)
         if not exists:
-            db.add(Attendance(employee_id=emp.id, date=today, status="present"))
+            db.add(Attendance(employee_id=emp.id, date=today, status=status))
             created += 1
+            if status == ATTENDANCE_STATUS_ABSENT:
+                absent += 1
+            else:
+                present += 1
     await db.commit()
-    return {"ok": True, "created": created, "date": str(today)}
+    return {
+        "ok": True,
+        "created": created,
+        "present": present,
+        "absent": absent,
+        "date": str(today),
+    }
 
 @router.post("/api/attendance/mark-absent")
 async def mark_absent_today(data: AttendanceCreate, db: AsyncSession = Depends(get_async_session), current_user: User = Depends(get_current_user)):
-    """Mark a specific employee as absent today (overrides auto-present)."""
+    """Keep an employee absent every day until they are manually marked present."""
     today = date.today()
-    _r = await db.execute(select(Attendance).where(
-        Attendance.employee_id == data.employee_id,
-        Attendance.date == today,
-    ))
-    existing = _r.scalar_one_or_none()
-    if existing:
-        existing.status = "absent"
-        existing.note   = data.note
-        await db.commit()
-        return {"id": existing.id, "updated": True}
-    db.add(Attendance(
-        employee_id=data.employee_id,
-        date=today, status="absent", note=data.note,
-    ))
+    employee = await _get_employee_or_404(db, data.employee_id)
+    employee.attendance_auto_status = ATTENDANCE_STATUS_ABSENT
+    attendance, updated = await _upsert_attendance_for_day(
+        db,
+        data.employee_id,
+        today,
+        ATTENDANCE_STATUS_ABSENT,
+        data.note,
+    )
     await db.commit()
-    return {"ok": True}
+    return {
+        "id": attendance.id,
+        "updated": updated,
+        "auto_status": employee.attendance_auto_status,
+    }
+
+@router.post("/api/attendance/mark-present")
+async def mark_present_today(data: AttendanceCreate, db: AsyncSession = Depends(get_async_session), current_user: User = Depends(get_current_user)):
+    """Return an employee to the default auto-present mode."""
+    today = date.today()
+    employee = await _get_employee_or_404(db, data.employee_id)
+    employee.attendance_auto_status = ATTENDANCE_STATUS_PRESENT
+    attendance, updated = await _upsert_attendance_for_day(
+        db,
+        data.employee_id,
+        today,
+        ATTENDANCE_STATUS_PRESENT,
+        data.note,
+    )
+    await db.commit()
+    return {
+        "id": attendance.id,
+        "updated": updated,
+        "auto_status": employee.attendance_auto_status,
+    }
 
 
 # ── PAYROLL API ────────────────────────────────────────
@@ -911,10 +1002,10 @@ function safeStatusClass(value){
 
 /* ── INIT ── */
 async function init(){
-    await loadSummary();
-    await loadEmployees();
     // Auto-mark all present today on page load
     await fetch("/hr/api/attendance/auto-today", {method:"POST"});
+    await loadSummary();
+    await loadEmployees();
 }
 
 async function loadSummary(){
@@ -1113,7 +1204,10 @@ async function saveAttendance(){
     if(data.detail){ showToast("Error: "+data.detail); return; }
     closeAttModal();
     showToast(data.updated?"Attendance updated":"Attendance logged");
-    loadAttendance(); loadSummary();
+    if(dt === new Date().toISOString().split("T")[0] && ["present","absent"].includes(body.status)){
+        await loadEmployees();
+    }
+    loadTodayAttendance(); loadAttendance(); loadSummary();
 }
 
 /* ── ATTENDANCE TODAY CARD ── */
@@ -1124,20 +1218,25 @@ async function loadTodayAttendance(){
     let grid = document.getElementById("today-attendance-grid");
     if(!grid) return;
     if(!employees.length){ grid.innerHTML = `<div style="color:var(--muted);font-size:13px">No employees found</div>`; return; }
+    const todayLabels = {present:"Present",absent:"Absent",late:"Late",leave:"Leave"};
     grid.innerHTML = employees.map(emp => {
         let rec    = todayRecs.find(r => r.employee_id === emp.id);
-        let status = rec ? rec.status : "present";
+        let autoStatus = emp.attendance_auto_status || "present";
+        let status = rec ? rec.status : autoStatus;
         let isAbs  = status === "absent";
+        let isAutoAbsent = autoStatus === "absent";
+        let statusText = isAutoAbsent ? "Absent until marked present" : (todayLabels[status] || status || "Present");
+        let statusColor = isAbs || isAutoAbsent ? "var(--danger)" : "var(--green)";
         return `<div style="display:flex;align-items:center;justify-content:space-between;padding:8px 12px;background:var(--card2);border:1px solid ${isAbs?"rgba(255,77,109,.2)":"rgba(0,255,157,.1)"};border-radius:9px;">
             <div>
                 <span style="font-weight:600;font-size:13px;color:var(--text)">${displayText(emp.name)}</span>
                 <span style="font-size:11px;color:var(--muted);margin-left:8px">${escapeHtml(normalizeDashFallback(emp.position))}</span>
             </div>
             <div style="display:flex;align-items:center;gap:10px">
-                <span style="font-size:12px;font-weight:700;color:${isAbs?"var(--danger)":"var(--green)"}">
-                    ${isAbs?"Absent":"Present"}
+                <span style="font-size:12px;font-weight:700;color:${statusColor}">
+                    ${escapeHtml(statusText)}
                 </span>
-                ${hasPermission("action_hr_run_payroll") ? (isAbs
+                ${hasPermission("action_hr_run_payroll") ? ((isAbs || isAutoAbsent)
                     ? `<button class="action-btn green" onclick="markPresentToday(${emp.id})">Mark Present</button>`
                     : `<button class="action-btn danger" onclick="markAbsentToday(${emp.id})">Mark Absent</button>`
                 ) : ""}
@@ -1147,20 +1246,26 @@ async function loadTodayAttendance(){
 }
 
 async function markAbsentToday(empId){
-    await fetch("/hr/api/attendance/mark-absent",{
+    let res = await fetch("/hr/api/attendance/mark-absent",{
         method:"POST", headers:{"Content-Type":"application/json"},
         body: JSON.stringify({employee_id: empId, date: new Date().toISOString().split("T")[0], status:"absent"}),
     });
-    showToast("Marked absent");
+    let data = await res.json();
+    if(data.detail){ showToast("Error: "+data.detail); return; }
+    showToast("Marked absent until marked present");
+    await loadEmployees();
     loadTodayAttendance(); loadAttendance(); loadSummary();
 }
 
 async function markPresentToday(empId){
-    await fetch("/hr/api/attendance",{
+    let res = await fetch("/hr/api/attendance/mark-present",{
         method:"POST", headers:{"Content-Type":"application/json"},
         body: JSON.stringify({employee_id: empId, date: new Date().toISOString().split("T")[0], status:"present"}),
     });
+    let data = await res.json();
+    if(data.detail){ showToast("Error: "+data.detail); return; }
     showToast("Marked present");
+    await loadEmployees();
     loadTodayAttendance(); loadAttendance(); loadSummary();
 }
 
