@@ -412,7 +412,7 @@ async function loadDashboard() {
   if (dashboardAbortController) dashboardAbortController.abort();
   dashboardAbortController = new AbortController();
   const requestId = ++dashboardRequestId;
-  let url = `/dashboard/summary?range=${currentRange}`;
+  let url = `/dashboard/summary?range=${currentRange}&_=${Date.now()}`;
   if (currentRange === "custom" && customStart && customEnd) {
     url += `&start=${customStart}&end=${customEnd}`;
   }

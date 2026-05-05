@@ -400,7 +400,11 @@ async def dashboard_summary(
         except Exception:
             pass
 
-    return data
+    from fastapi.responses import JSONResponse
+    return JSONResponse(
+        content=data,
+        headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
+    )
 
 
 # ── new: /dashboard/insights ──────────────────────────────────────────
