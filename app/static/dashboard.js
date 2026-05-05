@@ -259,19 +259,71 @@ function renderNumbers() {
   });
 }
 
+// Only update innerHTML if content actually changed — eliminates flicker on refresh
+function setHTML(el, html) {
+  if (!el) return;
+  if (el.innerHTML !== html) el.innerHTML = html;
+}
+function setText(id, text) {
+  const el = document.getElementById(id);
+  if (el && el.textContent !== text) el.textContent = text;
+}
+
 function renderBriefing() {
   const briefing = dashboardData?.briefing || {};
-  document.getElementById("briefing-lead").textContent = briefing.lead || "You haven't recorded any sales yet for this period.";
-  document.getElementById("briefing-body").textContent = briefing.body || "";
+  setText("briefing-lead", briefing.lead || "You haven't recorded any sales yet for this period.");
+  setText("briefing-body", briefing.body || "");
   const actionsNode = document.getElementById("briefing-actions");
   const actions = briefing.actions || [];
-  if (!actions.length) {
-    actionsNode.innerHTML = "";
-    return;
-  }
-  actionsNode.innerHTML = actions.map((action) => (
+  const html = actions.map((action) => (
     `<a class="briefing-action" href="${escHtml(action.link)}"><span>${escHtml(action.text)}</span><strong>${escHtml(action.cta)} →</strong></a>`
   )).join("");
+  setHTML(actionsNode, html);
+}
+
+function topProductsTitle() {
+  const label = dashboardData?.range?.label || "This period";
+  return `Best-sellers ${label.toLowerCase()}`;
+}
+
+function renderTopProducts() {
+  setText("top-products-title", topProductsTitle());
+  const key = topProductsTab === "revenue" ? "top_products_by_revenue" : "top_products_by_qty";
+  const products = dashboardData?.panels?.[key] || [];
+  const maxValue = Math.max(...products.map((p) => topProductsTab === "revenue" ? Number(p.revenue || 0) : Number(p.qty || 0)), 1);
+  const container = document.getElementById("top-products-list");
+  const html = !products.length
+    ? `<div class="empty-state">No products sold in this range.</div>`
+    : products.map((product) => {
+        const value = topProductsTab === "revenue" ? Number(product.revenue || 0) : Number(product.qty || 0);
+        const label = topProductsTab === "revenue" ? formatMoney(value) : `${formatNumber(value)} units`;
+        const width = Math.max(8, Math.round((value / maxValue) * 100));
+        return `<div class="list-row top-product-row"><div class="row-main"><span class="row-title">${escHtml(product.name)}</span><span class="row-value">${escHtml(label)}</span></div><span class="row-bar"><span style="width:${width}%"></span></span></div>`;
+      }).join("");
+  setHTML(container, html);
+}
+
+function renderRecentActivity() {
+  const rows = (dashboardData?.panels?.recent_activity || []).filter((item) => activityFilter === "all" ? true : item.type === activityFilter);
+  const tbody = document.getElementById("recent-activity");
+  const html = !rows.length
+    ? `<tr><td colspan="4" class="empty-cell">No activity in this range.</td></tr>`
+    : rows.map((item) => `
+        <tr data-link="${escHtml(item.link || "#")}">
+          <td class="mono">${escHtml(item.invoice_number || "-")}</td>
+          <td>${escHtml(item.customer || "-")}</td>
+          <td class="${item.type === "refund" ? "negative" : "positive"}">${escHtml(item.type === "refund" ? `-${formatMoney(Math.abs(item.total || 0))}` : formatMoney(item.total || 0))}</td>
+          <td>${escHtml(item.time_relative || "-")}</td>
+        </tr>`).join("");
+  if (tbody.innerHTML !== html) {
+    tbody.innerHTML = html;
+    tbody.querySelectorAll("tr[data-link]").forEach((row) => {
+      row.addEventListener("click", () => {
+        const link = row.dataset.link;
+        if (link && link !== "#") window.location.assign(link);
+      });
+    });
+  }
 }
 
 function chartTitle() {
@@ -291,11 +343,11 @@ function chartLabels(buckets) {
 
 function renderChart() {
   const buckets = dashboardData?.chart?.buckets || [];
-  document.getElementById("chart-title").textContent = chartTitle();
-  document.getElementById("chart-table").innerHTML = `
+  setText("chart-title", chartTitle());
+  setHTML(document.getElementById("chart-table"), `
     <tr><th>Date</th><th>POS</th><th>B2B</th><th>Refunds</th><th>Orders</th></tr>
     ${buckets.map((bucket) => `<tr><td>${bucket.date}</td><td>${formatMoneyPrecise(bucket.pos)}</td><td>${formatMoneyPrecise(bucket.b2b)}</td><td>${formatMoneyPrecise(bucket.refunds)}</td><td>${bucket.orders}</td></tr>`).join("")}
-  `;
+  `);
   const accentColor = getComputedStyle(document.documentElement).getPropertyValue("--accent").trim();
   const chartData = {
     labels: chartLabels(buckets),
