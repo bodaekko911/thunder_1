@@ -188,6 +188,7 @@ def receive_ui(current_user: User = Depends(require_permission("page_receive_pro
     return """<!DOCTYPE html>
 <html>
 <head>
+<meta charset="UTF-8">
 <script src="/static/theme-init.js"></script>
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Receive Products</title>

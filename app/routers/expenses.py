@@ -597,6 +597,7 @@ def expenses_ui(current_user: User = Depends(require_permission("page_expenses")
     return """<!DOCTYPE html>
 <html>
 <head>
+<meta charset="UTF-8">
 <script src="/static/theme-init.js"></script>
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <script src="/static/theme.js"></script>
@@ -1418,7 +1419,7 @@ function printReceipt() {
     const content = document.getElementById("receipt-content").innerHTML;
     const win = window.open("", "_blank", "width=420,height=600");
     win.document.write(`
-        <html><head><title>Expense Receipt</title>
+        <html><head><meta charset="UTF-8"><title>Expense Receipt</title>
         <style>
             body { font-family: monospace; padding: 24px; font-size: 13px; line-height: 1.8; color: #111; }
             .grid { display: grid; grid-template-columns: auto 1fr; gap: 4px 16px; }

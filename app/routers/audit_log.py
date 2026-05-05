@@ -93,8 +93,8 @@ def audit_log_ui():
     return """<!DOCTYPE html>
 <html lang="en">
 <head>
-<script src="/static/theme-init.js"></script>
 <meta charset="UTF-8">
+<script src="/static/theme-init.js"></script>
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Audit Log — Thunder ERP</title>
 <link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,300;0,400;0,600;1,300;1,400&family=DM+Sans:wght@300;400;500;600&family=DM+Mono:wght@400;500&family=Outfit:wght@400;500;600;700;800;900&display=swap" rel="stylesheet">

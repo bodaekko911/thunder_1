@@ -1375,6 +1375,7 @@ def b2b_ui(current_user: User = Depends(require_permission("page_b2b"))):
     return """<!DOCTYPE html>
 <html>
 <head>
+<meta charset="UTF-8">
 <script src="/static/theme-init.js"></script>
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>B2B — Thunder ERP</title>

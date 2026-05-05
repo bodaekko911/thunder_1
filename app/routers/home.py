@@ -11,6 +11,7 @@ def home_ui(_=Depends(get_current_user)):
 <!DOCTYPE html>
 <html>
 <head>
+<meta charset="UTF-8">
 <script src="/static/theme-init.js"></script>
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Habiba Organic Farm — ERP</title>

@@ -331,6 +331,7 @@ async def print_refund(refund_id: int, db: AsyncSession = Depends(get_async_sess
     return f"""<!DOCTYPE html>
 <html>
 <head>
+<meta charset="UTF-8">
 <script src="/static/theme-init.js"></script>
 <title>{refund.refund_number}</title>
 <style>
@@ -382,6 +383,7 @@ def refunds_ui():
     return """<!DOCTYPE html>
 <html>
 <head>
+<meta charset="UTF-8">
 <script src="/static/theme-init.js"></script>
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <script src="/static/theme.js"></script>

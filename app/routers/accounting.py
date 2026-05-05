@@ -871,6 +871,7 @@ def accounting_ui(current_user: User = Depends(require_permission("page_accounti
 <!DOCTYPE html>
 <html>
 <head>
+<meta charset="UTF-8">
 <script src="/static/theme-init.js"></script>
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Accounting</title>
@@ -2303,7 +2304,7 @@ function printInvDetail(){
             <td style="padding:8px 12px;border-bottom:1px solid #eee;text-align:right;font-weight:700">${item.total.toFixed(2)}</td>
         </tr>`).join("");
     let win = window.open("","_blank","width=650,height=900");
-    win.document.write(`<!DOCTYPE html><html><head><title>${inv.invoice_number}</title>
+    win.document.write(`<!DOCTYPE html><html><head><meta charset="UTF-8"><title>${inv.invoice_number}</title>
     <style>body{font-family:Arial,sans-serif;padding:30px;color:#111;max-width:600px;margin:0 auto}
     .header{text-align:center;margin-bottom:20px;padding-bottom:16px;border-bottom:2px solid #2a7a2a}
     .logo{max-height:120px;margin-bottom:6px}

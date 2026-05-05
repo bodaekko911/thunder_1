@@ -279,8 +279,8 @@ def customer_profile_ui(customer_id: int):
     return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
-<script src="/static/theme-init.js"></script>
 <meta charset="UTF-8">
+<script src="/static/theme-init.js"></script>
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Customer Profile — Thunder ERP</title>
 <link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,300;0,400;0,600;1,300;1,400&family=DM+Sans:wght@300;400;500;600&family=DM+Mono:wght@400;500&family=Outfit:wght@400;500;600;700;800;900&display=swap" rel="stylesheet">
@@ -635,6 +635,7 @@ def customers_ui(current_user: User = Depends(require_permission("page_customers
 <!DOCTYPE html>
 <html>
 <head>
+<meta charset="UTF-8">
 <script src="/static/theme-init.js"></script>
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Customers</title>

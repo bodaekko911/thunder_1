@@ -265,6 +265,7 @@ async def view_invoice(invoice_id: int, db: AsyncSession = Depends(get_async_ses
     return f"""<!DOCTYPE html>
 <html>
 <head>
+<meta charset="UTF-8">
 <script src="/static/theme-init.js"></script>
 <title>Receipt {inv.invoice_number}</title>
 <style>
@@ -359,6 +360,7 @@ def pos_ui(current_user: User = Depends(require_permission("page_pos"))):
     return """<!DOCTYPE html>
 <html>
 <head>
+<meta charset="UTF-8">
 <script src="/static/theme-init.js"></script>
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>POS — Thunder ERP</title>
