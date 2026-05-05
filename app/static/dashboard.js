@@ -297,13 +297,18 @@ function renderChart() {
     <tr><th>Date</th><th>POS</th><th>B2B</th><th>Refunds</th><th>Orders</th></tr>
     ${buckets.map((bucket) => `<tr><td>${bucket.date}</td><td>${formatMoneyPrecise(bucket.pos)}</td><td>${formatMoneyPrecise(bucket.b2b)}</td><td>${formatMoneyPrecise(bucket.refunds)}</td><td>${bucket.orders}</td></tr>`).join("")}
   `;
+  const accentColor = getComputedStyle(document.documentElement).getPropertyValue("--accent").trim();
   const chartData = {
     labels: chartLabels(buckets),
     datasets: [
-      { label: "POS", data: buckets.map((bucket) => bucket.pos), backgroundColor: getComputedStyle(document.documentElement).getPropertyValue("--accent").trim(), stack: "sales" },
-      { label: "B2B", data: buckets.map((bucket) => bucket.b2b), backgroundColor: "#3b5f8a", stack: "sales" },
-      { label: "Refunds", data: buckets.map((bucket) => bucket.refunds), backgroundColor: "#b54040", stack: "sales" },
+      { label: "POS", data: buckets.map((b) => b.pos), backgroundColor: accentColor, stack: "sales" },
+      { label: "B2B", data: buckets.map((b) => b.b2b), backgroundColor: "#3b5f8a", stack: "sales" },
+      { label: "Refunds", data: buckets.map((b) => b.refunds), backgroundColor: "#b54040", stack: "sales" },
     ],
+  };
+  const tooltipAfterBody = (items) => {
+    const bucket = buckets[items[0]?.dataIndex || 0];
+    return [`Transactions: ${bucket?.orders || 0}`];
   };
   if (!salesChart) {
     salesChart = new Chart(document.getElementById("sales-chart"), {
@@ -316,14 +321,7 @@ function renderChart() {
         interaction: { mode: "index", intersect: false },
         plugins: {
           legend: { display: true, position: "top", align: "end" },
-          tooltip: {
-            callbacks: {
-              afterBody(items) {
-                const bucket = buckets[items[0]?.dataIndex || 0];
-                return [`Transactions: ${bucket?.orders || 0}`];
-              },
-            },
-          },
+          tooltip: { callbacks: { afterBody: tooltipAfterBody } },
         },
         scales: {
           x: { stacked: true, grid: { display: false } },
@@ -331,17 +329,15 @@ function renderChart() {
         },
       },
     });
+    // don't return — fall through so first render is complete
     return;
   }
   salesChart.data.labels = chartData.labels;
-  salesChart.data.datasets.forEach((dataset, index) => {
-    dataset.data = chartData.datasets[index].data;
-    dataset.backgroundColor = chartData.datasets[index].backgroundColor;
+  salesChart.data.datasets.forEach((dataset, i) => {
+    dataset.data = chartData.datasets[i].data;
+    dataset.backgroundColor = chartData.datasets[i].backgroundColor;
   });
-  salesChart.options.plugins.tooltip.callbacks.afterBody = (items) => {
-    const bucket = buckets[items[0]?.dataIndex || 0];
-    return [`Transactions: ${bucket?.orders || 0}`];
-  };
+  salesChart.options.plugins.tooltip.callbacks.afterBody = tooltipAfterBody;
   salesChart.update("none");
 }
 

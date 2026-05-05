@@ -395,7 +395,7 @@ async def dashboard_summary(
 
     if redis_client and cache_key:
         try:
-            await redis_client.setex(cache_key, 60, json.dumps(data, default=str))
+            await redis_client.setex(cache_key, 10, json.dumps(data, default=str))
             await redis_client.aclose()
         except Exception:
             pass

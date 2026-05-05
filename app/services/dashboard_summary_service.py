@@ -947,11 +947,12 @@ async def get_summary(
         "spent": {"value": 0.0, "delta_pct": None, "direction": "flat", "sparkline": []},
         "stock_alerts": {"value": 0, "out_count": 0, "low_count": 0},
         "margin": {"value_pct": None, "delta_pts": None, "gross_profit": None},
+        "b2b_cash": {"value": 0.0},
     }
     alt_sales_today = {"value": 0.0}
     try:
         number_payload = await _build_numbers(db, rng, user, errors)
-        numbers = {key: number_payload[key] for key in ("sales", "clients_owe", "spent", "stock_alerts", "margin")}
+        numbers = {key: number_payload[key] for key in ("sales", "clients_owe", "spent", "stock_alerts", "margin", "b2b_cash")}
         alt_sales_today = number_payload.get("alt_sales_today", {"value": 0.0})
     except Exception:
         logger.error("dashboard_summary: numbers section failed", exc_info=True)
