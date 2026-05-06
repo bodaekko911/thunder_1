@@ -1,7 +1,7 @@
 from collections import defaultdict
 
 from fastapi import APIRouter, Depends, HTTPException
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 from sqlalchemy import func, select, asc, desc
@@ -842,12 +842,19 @@ def customers_ui(current_user: User = Depends(require_permission("page_customers
     --sans:    'Outfit', sans-serif;
     --mono:    'JetBrains Mono', monospace;
     --r:       12px;
+    --c-champion:#ffb547;
+    --c-loyal:#00ff9d;
+    --c-new:#4d9fff;
+    --c-at_risk:#ff944d;
+    --c-lost:#ff4d6d;
 }
 body.light{
     --bg:#f4f5ef;--surface:#f1f3eb;--card:#eceee6;--card2:#e4e6de;
     --border:rgba(0,0,0,0.08);--border2:rgba(0,0,0,0.14);
-    --green:#0f8a43;
+    --green:#0f8a43;--blue:#185fa5;--danger:#a32d2d;--warn:#854f0b;
     --text:#1a1e14;--sub:#4a5040;--muted:#7b816f;
+    --c-champion:#854f0b;--c-loyal:#0f8a43;--c-new:#185fa5;
+    --c-at_risk:#8a4800;--c-lost:#a32d2d;
 }
 body.light nav{background:rgba(244,245,239,.92);}
 body.light .nav-link:hover{background:rgba(0,0,0,.05);}
@@ -900,6 +907,25 @@ nav {
 .content { max-width: 1300px; margin: 0 auto; padding: 28px 24px; display: flex; flex-direction: column; gap: 20px; }
 .page-title { font-size: 24px; font-weight: 800; letter-spacing: -.5px; }
 .page-sub   { color: var(--muted); font-size: 13px; margin-top: 3px; }
+.customer-tabs{display:flex;align-items:center;gap:8px;border-bottom:1px solid var(--border);padding-bottom:8px}
+.customer-tab{background:transparent;border:1px solid transparent;color:var(--sub);font-family:var(--sans);font-size:13px;font-weight:800;padding:9px 14px;border-radius:var(--r);cursor:pointer;transition:all .18s}
+.customer-tab:hover{background:var(--card);border-color:var(--border);color:var(--text)}
+.customer-tab.active{background:rgba(0,255,157,.10);border-color:rgba(0,255,157,.24);color:var(--green)}
+#customers-tab-panel > * + *,#segments-tab-panel > * + *{margin-top:20px}
+.seg-tabs{display:flex;gap:10px;flex-wrap:wrap}
+.seg-tab{display:flex;flex-direction:column;gap:4px;background:var(--card);border:1px solid var(--border);border-top:3px solid transparent;border-radius:var(--r);padding:14px 18px;cursor:pointer;transition:all .2s;min-width:130px;flex:1}
+.seg-tab:hover{border-color:var(--border2)}
+.seg-tab.active{border-top-color:var(--seg-color)}
+.seg-tab-label{font-size:10px;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;color:var(--muted)}
+.seg-tab-count{font-family:var(--mono);font-size:28px;font-weight:700;color:var(--seg-color)}
+.seg-tab-avg{font-size:11px;color:var(--muted)}
+.seg-def{background:var(--card);border:1px solid var(--border);padding:12px 18px;font-size:12px;color:var(--sub);border-left:3px solid var(--seg-color);border-radius:0 var(--r) var(--r) 0;display:none}
+td.name-cell{color:var(--text);font-weight:600}
+.seg-pill{display:inline-block;font-size:10px;font-weight:700;letter-spacing:.8px;text-transform:uppercase;padding:3px 9px;border-radius:6px;background:color-mix(in srgb,var(--seg-color) 14%,transparent);color:var(--seg-color);border:1px solid color-mix(in srgb,var(--seg-color) 28%,transparent)}
+.empty{text-align:center;padding:48px;color:var(--muted);font-size:13px}
+.bar-wrap{display:flex;align-items:center;gap:8px}
+.bar-bg{flex:1;height:4px;background:var(--border);border-radius:2px;overflow:hidden;min-width:40px}
+.bar-fill{height:100%;border-radius:2px;background:var(--seg-color)}
 
 .toolbar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 .search-box {
@@ -1105,6 +1131,12 @@ th.sortable.active.desc .sort-arrow { transform: rotate(180deg); }
         <div class="page-sub">View and manage your customer base</div>
     </div>
 
+    <div class="customer-tabs">
+        <button id="customers-tab-btn" class="customer-tab active" onclick="showCustomerTab('customers')">Customers</button>
+        <button id="segments-tab-btn" class="customer-tab" onclick="showCustomerTab('segments')">Segments</button>
+    </div>
+
+    <div id="customers-tab-panel">
     <div class="toolbar">
         <div class="search-box">
             <svg width="15" height="15" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24">
@@ -1144,6 +1176,57 @@ th.sortable.active.desc .sort-arrow { transform: rotate(180deg); }
                 <button class="page-btn" id="prev-btn" onclick="prevPage()">← Prev</button>
                 <button class="page-btn" id="next-btn" onclick="nextPage()">Next →</button>
             </div>
+        </div>
+    </div>
+
+    </div>
+
+    <div id="segments-tab-panel" style="display:none;">
+        <div>
+            <div class="page-title">Customer Segments</div>
+            <div class="page-sub">Auto-classified by recency and spend - updates live from your invoices</div>
+        </div>
+
+        <div class="seg-tabs" id="segments-tabs">
+            <div style="color:var(--muted);font-size:13px;padding:20px">Loading...</div>
+        </div>
+
+        <div class="seg-def" id="segments-def"></div>
+
+        <div class="toolbar">
+            <div class="search-box">
+                <svg width="15" height="15" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24">
+                    <circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/>
+                </svg>
+                <input id="segments-search" placeholder="Filter by name, phone or email..." oninput="filterSegmentTable()">
+            </div>
+            <span class="count-badge" id="segments-count-badge">-</span>
+            <button class="btn-export" id="segments-export-btn" onclick="exportSegmentsCSV()">
+                <svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2" viewBox="0 0 24 24">
+                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                    <polyline points="7 10 12 15 17 10"/>
+                    <line x1="12" y1="15" x2="12" y2="3"/>
+                </svg>
+                Export CSV
+            </button>
+        </div>
+
+        <div class="table-wrap">
+            <table>
+                <thead>
+                    <tr>
+                        <th>Name</th>
+                        <th>Phone</th>
+                        <th>Last Purchase</th>
+                        <th>Orders</th>
+                        <th>Net Spent</th>
+                        <th>Segment</th>
+                    </tr>
+                </thead>
+                <tbody id="segments-table-body">
+                    <tr><td colspan="6" class="empty">Loading...</td></tr>
+                </tbody>
+            </table>
         </div>
     </div>
 </div>
@@ -1521,6 +1604,281 @@ function showToast(msg){
     toastTimer = setTimeout(()=>t.classList.remove("show"), 3000);
 }
 
+const CUSTOMER_SEGMENT_META = {
+    champion: {
+        label: "Champions",
+        color: "var(--c-champion)",
+        def: "Purchased within 60 days and in the top 25% by net spend. Your most valuable customers - reward them.",
+    },
+    loyal: {
+        label: "Loyal",
+        color: "var(--c-loyal)",
+        def: "Purchased within the last 60 days. Regular buyers who keep coming back.",
+    },
+    new: {
+        label: "New",
+        color: "var(--c-new)",
+        def: "First purchase within 60 days, with 2 or fewer orders. Nurture them into loyal regulars.",
+    },
+    at_risk: {
+        label: "At Risk",
+        color: "var(--c-at_risk)",
+        def: "Last purchase was 61-180 days ago. A targeted offer now can win them back.",
+    },
+    lost: {
+        label: "Lost",
+        color: "var(--c-lost)",
+        def: "Last purchase over 180 days ago, or never purchased. Worth a re-engagement campaign.",
+    },
+};
+
+let allSegmentsData = {};
+let activeSegment = "champion";
+let maxSegmentSpend = 1;
+let customerSegmentsLoaded = false;
+
+function segmentDisplayValue(value){
+    if(value == null || value === "" || value === "\\u2014") return "-";
+    return value;
+}
+
+function escapeSegmentHtml(value){
+    return String(value == null ? "" : value)
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;");
+}
+
+function formatSegmentMoney(value){
+    const number = Number(value || 0);
+    const safeNumber = Number.isFinite(number) ? number : 0;
+    return safeNumber.toLocaleString("en-US", {minimumFractionDigits:2, maximumFractionDigits:2});
+}
+
+function segmentRowsFor(seg){
+    const groups = allSegmentsData && typeof allSegmentsData.segments === "object" && allSegmentsData.segments
+        ? allSegmentsData.segments
+        : {};
+    const rows = groups[seg];
+    return Array.isArray(rows) ? rows.filter(Boolean) : [];
+}
+
+function filteredSegmentRows(seg){
+    const search = document.getElementById("segments-search");
+    const q = search ? search.value.trim().toLowerCase() : "";
+    let rows = segmentRowsFor(seg);
+    if(!q) return rows;
+    return rows.filter(customer => {
+        customer = customer || {};
+        return [customer.name, customer.phone, customer.email].some(value =>
+            String(value || "").toLowerCase().includes(q)
+        );
+    });
+}
+
+async function loadSegments() {
+    const tbody = document.getElementById("segments-table-body");
+
+    try {
+        const res = await fetch("/customers-mgmt/api/segments");
+        const text = await res.text();
+
+        if (!res.ok) {
+            throw new Error(`HTTP ${res.status}: ${text}`);
+        }
+
+        let data;
+        try {
+            data = JSON.parse(text);
+        } catch (parseErr) {
+            throw new Error(`Invalid JSON: ${parseErr.message}`);
+        }
+
+        allSegmentsData = data && typeof data === "object" ? data : {};
+        const segmentGroups = allSegmentsData.segments && typeof allSegmentsData.segments === "object"
+            ? allSegmentsData.segments
+            : {};
+        const segmentCustomers = Object.values(segmentGroups).flatMap(rows =>
+            Array.isArray(rows) ? rows : []
+        );
+        maxSegmentSpend = Math.max(1, ...segmentCustomers.map(customer => {
+            const netSpent = Number((customer || {}).net_spent || 0);
+            return Number.isFinite(netSpent) ? netSpent : 0;
+        }));
+
+        renderSegmentTabs(allSegmentsData);
+        renderCustomerSegment(activeSegment);
+    } catch (err) {
+        console.error("Failed to load customer segments", err);
+        if (tbody) {
+            tbody.innerHTML = `<tr><td colspan="6" class="empty">Failed to load customer segments</td></tr>`;
+        }
+        const countBadge = document.getElementById("segments-count-badge");
+        if (countBadge) countBadge.textContent = "-";
+        const tabs = document.getElementById("segments-tabs");
+        if (tabs) {
+            tabs.innerHTML = `<div style="color:var(--danger);font-size:13px;padding:20px">Failed to load customer segments</div>`;
+        }
+    }
+}
+
+function renderSegmentTabs(data){
+    const tabs = document.getElementById("segments-tabs");
+    if(!tabs) return;
+    const counts = data && typeof data.counts === "object" && data.counts ? data.counts : {};
+    const avgSpent = data && typeof data.avg_spent === "object" && data.avg_spent ? data.avg_spent : {};
+    const order = ["champion","loyal","new","at_risk","lost"];
+    tabs.innerHTML = order.map(seg => {
+        const meta = CUSTOMER_SEGMENT_META[seg];
+        return `<div class="seg-tab${seg===activeSegment ? " active" : ""}" style="--seg-color:${meta.color}" onclick="selectCustomerSegment('${seg}')">
+            <span class="seg-tab-label">${meta.label}</span>
+            <span class="seg-tab-count">${Number(counts[seg] || 0)}</span>
+            <span class="seg-tab-avg">avg ${formatSegmentMoney(avgSpent[seg] || 0)}</span>
+        </div>`;
+    }).join("");
+}
+
+function selectCustomerSegment(seg){
+    if(!CUSTOMER_SEGMENT_META[seg]) return;
+    activeSegment = seg;
+    document.querySelectorAll("#segments-tabs .seg-tab").forEach(el => {
+        el.classList.toggle("active", el.querySelector(".seg-tab-label").textContent === CUSTOMER_SEGMENT_META[seg].label);
+    });
+    renderCustomerSegment(seg);
+}
+
+function renderCustomerSegment(seg){
+    const meta = CUSTOMER_SEGMENT_META[seg] || CUSTOMER_SEGMENT_META.champion;
+    const defEl = document.getElementById("segments-def");
+    if(defEl){
+        defEl.style.display = "block";
+        defEl.style.setProperty("--seg-color", meta.color);
+        defEl.textContent = meta.def;
+    }
+    renderSegmentTable(seg);
+}
+
+function filterSegmentTable(){
+    renderSegmentTable(activeSegment);
+}
+
+function renderSegmentTable(seg){
+    const meta = CUSTOMER_SEGMENT_META[seg] || CUSTOMER_SEGMENT_META.champion;
+    const rows = filteredSegmentRows(seg);
+    const countBadge = document.getElementById("segments-count-badge");
+    if(countBadge) countBadge.textContent = `${rows.length} customers`;
+    const tbody = document.getElementById("segments-table-body");
+    if(!tbody) return;
+
+    if(!rows.length){
+        tbody.innerHTML = `<tr><td colspan="6" class="empty">No customers in this segment</td></tr>`;
+        return;
+    }
+
+    tbody.innerHTML = rows.map(customer => {
+        customer = customer || {};
+        const id = Number(customer.id);
+        const canOpenProfile = Number.isFinite(id) && id > 0;
+        const name = segmentDisplayValue(customer.name);
+        const phone = segmentDisplayValue(customer.phone);
+        const lastPurchase = segmentDisplayValue(customer.last_purchase);
+        const invoiceCount = Number(customer.inv_count || 0);
+        const safeInvoiceCount = Number.isFinite(invoiceCount) ? invoiceCount : 0;
+        const netSpent = Number(customer.net_spent || 0);
+        const safeNetSpent = Number.isFinite(netSpent) ? netSpent : 0;
+        const width = Math.max(0, Math.min(100, Math.round(safeNetSpent / maxSegmentSpend * 100)));
+        const profileHandler = canOpenProfile ? ` onclick="location.href='/customers-mgmt/profile/${id}'"` : "";
+
+        return `<tr style="--seg-color:${meta.color}"${profileHandler}>
+            <td class="name-cell">${escapeSegmentHtml(name)}</td>
+            <td style="font-family:var(--mono);font-size:12px">${escapeSegmentHtml(phone)}</td>
+            <td style="font-family:var(--mono);font-size:12px;color:var(--muted)">${escapeSegmentHtml(lastPurchase)}</td>
+            <td style="font-family:var(--mono);color:var(--blue)">${safeInvoiceCount}</td>
+            <td>
+                <div class="bar-wrap">
+                    <span style="font-family:var(--mono);font-size:13px;color:${meta.color};min-width:72px;display:inline-block">${formatSegmentMoney(safeNetSpent)}</span>
+                    <div class="bar-bg"><div class="bar-fill" style="width:${width}%"></div></div>
+                </div>
+            </td>
+            <td><span class="seg-pill" style="--seg-color:${meta.color}">${meta.label}</span></td>
+        </tr>`;
+    }).join("");
+}
+
+function exportSegmentsCSV(){
+    const rows = filteredSegmentRows(activeSegment);
+    if(!rows.length){
+        showToast("No customer segments to export");
+        return;
+    }
+
+    const btn = document.getElementById("segments-export-btn");
+    const originalHtml = btn ? btn.innerHTML : "";
+    if(btn){
+        btn.disabled = true;
+        btn.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" style="animation:spin .8s linear infinite;flex-shrink:0"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg> Exporting...`;
+    }
+
+    try {
+        const label = CUSTOMER_SEGMENT_META[activeSegment].label;
+        const headers = ["ID","Name","Phone","Email","Segment","Last Purchase","Orders","Net Spent"];
+        const csvRows = rows.map(customer => {
+            customer = customer || {};
+            const netSpent = Number(customer.net_spent || 0);
+            const safeNetSpent = Number.isFinite(netSpent) ? netSpent : 0;
+            const invoiceCount = Number(customer.inv_count || 0);
+            const safeInvoiceCount = Number.isFinite(invoiceCount) ? invoiceCount : 0;
+            return [
+                customer.id || "",
+                csvCell(segmentDisplayValue(customer.name)),
+                csvCell(segmentDisplayValue(customer.phone)),
+                csvCell(segmentDisplayValue(customer.email)),
+                csvCell(label),
+                csvCell(segmentDisplayValue(customer.last_purchase)),
+                safeInvoiceCount,
+                safeNetSpent.toFixed(2),
+            ];
+        });
+        const csv = [headers, ...csvRows].map(r => r.join(",")).join("\\n");
+        const link = document.createElement("a");
+        link.href = URL.createObjectURL(new Blob([csv], {type:"text/csv;charset=utf-8;"}));
+        link.download = `customers_${activeSegment}_${new Date().toISOString().slice(0,10)}.csv`;
+        link.click();
+        URL.revokeObjectURL(link.href);
+        showToast(`Exported ${rows.length} segment customers`);
+    } finally {
+        if(btn){
+            btn.disabled = false;
+            btn.innerHTML = originalHtml;
+        }
+    }
+}
+
+function showCustomerTab(tab) {
+    const showSegments = tab === "segments";
+
+    document.getElementById("customers-tab-panel").style.display = showSegments ? "none" : "block";
+    document.getElementById("segments-tab-panel").style.display = showSegments ? "block" : "none";
+
+    document.getElementById("customers-tab-btn").classList.toggle("active", !showSegments);
+    document.getElementById("segments-tab-btn").classList.toggle("active", showSegments);
+
+    const url = new URL(window.location.href);
+    url.searchParams.set("tab", tab);
+    history.replaceState(null, "", url.toString());
+
+    if (showSegments && !customerSegmentsLoaded) {
+        customerSegmentsLoaded = true;
+        loadSegments();
+    }
+}
+
+document.addEventListener("DOMContentLoaded", () => {
+    const initialTab = new URLSearchParams(window.location.search).get("tab") || "customers";
+    showCustomerTab(initialTab === "segments" ? "segments" : "customers");
+});
+
 load();
 </script>
 </body>
@@ -1531,7 +1889,7 @@ load();
 # ═══════════════════════════════════════════════════════
 #  CUSTOMER SEGMENTATION
 #  GET /customers-mgmt/api/segments  — JSON data
-#  GET /customers-mgmt/segments/     — HTML page
+#  GET /customers-mgmt/segments/     — redirect to Customers tab
 # ═══════════════════════════════════════════════════════
 
 @router.get("/api/segments")
@@ -1666,278 +2024,6 @@ async def get_segments(db: AsyncSession = Depends(get_async_session)):
     }
 
 
-@router.get("/segments/", response_class=HTMLResponse)
-def segments_ui(current_user: User = Depends(require_permission("page_customers"))):
-    return """<!DOCTYPE html>
-<html>
-<head>
-<meta charset="UTF-8">
-<script src="/static/theme-init.js"></script>
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Customer Segments — Thunder ERP</title>
-<link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
-<style>
-:root {
-    --bg:#060810;--surface:#0a0d18;--card:#0f1424;--card2:#151c30;
-    --border:rgba(255,255,255,0.06);--border2:rgba(255,255,255,0.11);
-    --green:#00ff9d;--blue:#4d9fff;--amber:#ffb547;--rose:#ff4d6d;
-    --text:#f0f4ff;--sub:#8899bb;--muted:#445066;
-    --sans:'Outfit',sans-serif;--mono:'JetBrains Mono',monospace;--r:12px;
-    --c-champion:#ffb547;--c-loyal:#00ff9d;--c-new:#4d9fff;
-    --c-at_risk:#ff944d;--c-lost:#ff4d6d;
-}
-body.light {
-    --bg:#f4f5ef;--surface:#f1f3eb;--card:#eceee6;--card2:#e4e6de;
-    --border:rgba(0,0,0,0.08);--border2:rgba(0,0,0,0.14);
-    --green:#0f8a43;--blue:#185fa5;--amber:#854f0b;--rose:#a32d2d;
-    --text:#1a1e14;--sub:#4a5040;--muted:#7b816f;
-    --c-champion:#854f0b;--c-loyal:#0f8a43;--c-new:#185fa5;
-    --c-at_risk:#8a4800;--c-lost:#a32d2d;
-}
-*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
-body{font-family:var(--sans);background:var(--bg);color:var(--text);min-height:100vh;font-size:14px}
-
-.content{max-width:1300px;margin:0 auto;padding:28px 24px;display:flex;flex-direction:column;gap:22px}
-.page-title{font-size:24px;font-weight:800;letter-spacing:-.5px}
-.page-sub{color:var(--muted);font-size:13px;margin-top:3px}
-
-.seg-tabs{display:flex;gap:10px;flex-wrap:wrap}
-.seg-tab{
-    display:flex;flex-direction:column;gap:4px;
-    background:var(--card);border:1px solid var(--border);
-    border-radius:var(--r);padding:14px 18px;cursor:pointer;
-    transition:all .2s;min-width:130px;flex:1;
-    border-top:3px solid transparent;
-}
-.seg-tab:hover{border-color:var(--border2)}
-.seg-tab.active{border-top-color:var(--seg-color)}
-.seg-tab-label{font-size:10px;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;color:var(--muted)}
-.seg-tab-count{font-family:var(--mono);font-size:28px;font-weight:700;color:var(--seg-color)}
-.seg-tab-avg{font-size:11px;color:var(--muted)}
-
-.seg-def{
-    background:var(--card);border:1px solid var(--border);
-    padding:12px 18px;font-size:12px;color:var(--sub);
-    border-left:3px solid var(--seg-color);
-    border-radius:0 var(--r) var(--r) 0;display:none;
-}
-
-.table-wrap{background:var(--card);border:1px solid var(--border);border-radius:var(--r);overflow:hidden}
-table{width:100%;border-collapse:collapse}
-thead{background:var(--card2)}
-th{font-size:10px;font-weight:700;letter-spacing:1px;text-transform:uppercase;color:var(--muted);padding:12px 16px;text-align:left;white-space:nowrap}
-td{padding:12px 16px;border-top:1px solid var(--border);font-size:13px;color:var(--sub)}
-tbody tr:hover td{background:rgba(255,255,255,.02);cursor:pointer}
-td.name-cell{color:var(--text);font-weight:600}
-.seg-pill{display:inline-block;font-size:10px;font-weight:700;letter-spacing:.8px;text-transform:uppercase;padding:3px 9px;border-radius:6px;background:color-mix(in srgb,var(--seg-color) 14%,transparent);color:var(--seg-color);border:1px solid color-mix(in srgb,var(--seg-color) 28%,transparent)}
-.empty{text-align:center;padding:48px;color:var(--muted);font-size:13px}
-.bar-wrap{display:flex;align-items:center;gap:8px}
-.bar-bg{flex:1;height:4px;background:var(--border);border-radius:2px;overflow:hidden;min-width:40px}
-.bar-fill{height:100%;border-radius:2px;background:var(--seg-color)}
-
-.toolbar{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
-.search-box{display:flex;align-items:center;gap:9px;background:var(--card);border:1px solid var(--border);border-radius:var(--r);padding:0 14px;flex:1;min-width:200px;transition:border-color .2s}
-.search-box:focus-within{border-color:rgba(77,159,255,.35)}
-.search-box input{background:transparent;border:none;outline:none;color:var(--text);font-family:var(--sans);font-size:14px;padding:11px 0;width:100%}
-.search-box input::placeholder{color:var(--muted)}
-.count-badge{background:var(--card2);border:1px solid var(--border2);color:var(--sub);font-family:var(--mono);font-size:12px;padding:8px 14px;border-radius:var(--r);white-space:nowrap}
-.btn-export{background:var(--card2);border:1px solid var(--border2);color:var(--sub);display:flex;align-items:center;gap:7px;padding:10px 15px;border-radius:var(--r);font-family:var(--sans);font-size:13px;font-weight:600;cursor:pointer;transition:all .2s;white-space:nowrap}
-.btn-export:hover{border-color:var(--blue);color:var(--blue)}
-@keyframes spin{to{transform:rotate(360deg)}}
-::-webkit-scrollbar{width:4px}
-::-webkit-scrollbar-thumb{background:var(--border2);border-radius:4px}
-@media(max-width:640px){
-    .seg-tab{min-width:calc(50% - 5px);flex:none}
-    .seg-tab-count{font-size:22px}
-}
-</style>
-<script src="/static/auth-guard.js"></script>
-</head>
-<body>
-""" + render_app_header(current_user, "page_customers") + """
-
-<div class="content">
-    <div>
-        <div class="page-title">Customer Segments</div>
-        <div class="page-sub">Auto-classified by recency and spend — updates live from your invoices</div>
-    </div>
-
-    <div class="seg-tabs" id="seg-tabs">
-        <div style="color:var(--muted);font-size:13px;padding:20px">Loading…</div>
-    </div>
-
-    <div class="seg-def" id="seg-def"></div>
-
-    <div class="toolbar">
-        <div class="search-box">
-            <svg width="15" height="15" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24">
-                <circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/>
-            </svg>
-            <input id="search" placeholder="Filter by name, phone or email…" oninput="filterTable()">
-        </div>
-        <span class="count-badge" id="count-badge">—</span>
-        <button class="btn-export" id="export-btn" onclick="exportCSV()">
-            <svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2" viewBox="0 0 24 24">
-                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
-                <polyline points="7 10 12 15 17 10"/>
-                <line x1="12" y1="15" x2="12" y2="3"/>
-            </svg>
-            Export CSV
-        </button>
-    </div>
-
-    <div class="table-wrap">
-        <table>
-            <thead>
-                <tr>
-                    <th>Name</th>
-                    <th>Phone</th>
-                    <th>Last Purchase</th>
-                    <th>Orders</th>
-                    <th>Net Spent</th>
-                    <th>Segment</th>
-                </tr>
-            </thead>
-            <tbody id="table-body">
-                <tr><td colspan="6" class="empty">Loading…</td></tr>
-            </tbody>
-        </table>
-    </div>
-</div>
-
-<script>
-const SEG_META = {
-    champion: {
-        label: "Champions",
-        color: "var(--c-champion)",
-        def: "Purchased within 60 days AND in the top 25% by net spend. Your most valuable customers — reward them.",
-    },
-    loyal: {
-        label: "Loyal",
-        color: "var(--c-loyal)",
-        def: "Purchased within the last 60 days. Regular buyers who keep coming back.",
-    },
-    new: {
-        label: "New",
-        color: "var(--c-new)",
-        def: "First purchase within 60 days, with 2 or fewer orders. Nurture them into loyal regulars.",
-    },
-    at_risk: {
-        label: "At Risk",
-        color: "var(--c-at_risk)",
-        def: "Last purchase was 61–180 days ago. A targeted offer now can win them back.",
-    },
-    lost: {
-        label: "Lost",
-        color: "var(--c-lost)",
-        def: "Last purchase over 180 days ago, or never purchased. Worth a re-engagement campaign.",
-    },
-};
-
-let allData   = {};
-let activeSeg = "champion";
-let maxSpend  = 1;
-
-const fmt = n => Number(n).toLocaleString("en-US", {minimumFractionDigits:2, maximumFractionDigits:2});
-const esc = s => String(s||"").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
-
-async function load(){
-    const d = await (await fetch("/customers-mgmt/api/segments")).json();
-    allData  = d;
-    maxSpend = Math.max(1, ...Object.values(d.segments).flat().map(c => c.net_spent));
-    renderTabs(d);
-    renderSegment(activeSeg);
-}
-
-function renderTabs(d){
-    const order = ["champion","loyal","new","at_risk","lost"];
-    document.getElementById("seg-tabs").innerHTML = order.map(seg => {
-        const m = SEG_META[seg];
-        return `<div class="seg-tab${seg===activeSeg?" active":""}" style="--seg-color:${m.color}" onclick="selectSeg('${seg}')">
-            <span class="seg-tab-label">${m.label}</span>
-            <span class="seg-tab-count">${d.counts[seg]||0}</span>
-            <span class="seg-tab-avg">avg ${fmt(d.avg_spent[seg]||0)}</span>
-        </div>`;
-    }).join("");
-}
-
-function selectSeg(seg){
-    activeSeg = seg;
-    document.querySelectorAll(".seg-tab").forEach(el => {
-        el.classList.toggle("active", el.querySelector(".seg-tab-label").textContent === SEG_META[seg].label);
-    });
-    renderSegment(seg);
-}
-
-function renderSegment(seg){
-    const defEl = document.getElementById("seg-def");
-    defEl.style.display = "block";
-    defEl.style.setProperty("--seg-color", SEG_META[seg].color);
-    defEl.textContent = SEG_META[seg].def;
-    renderTable(seg, document.getElementById("search").value.trim());
-}
-
-function filterTable(){ renderTable(activeSeg, document.getElementById("search").value.trim()); }
-
-function renderTable(seg, q){
-    let rows = [...((allData.segments||{})[seg]||[])];
-    if(q){
-        const lq = q.toLowerCase();
-        rows = rows.filter(c =>
-            c.name.toLowerCase().includes(lq) ||
-            (c.phone||"").includes(lq) ||
-            (c.email||"").toLowerCase().includes(lq)
-        );
-    }
-    document.getElementById("count-badge").textContent = `${rows.length} customers`;
-    const color = SEG_META[seg].color;
-    const tbody = document.getElementById("table-body");
-    if(!rows.length){
-        tbody.innerHTML = `<tr><td colspan="6" class="empty">No customers in this segment</td></tr>`;
-        return;
-    }
-    tbody.innerHTML = rows.map(c => `
-        <tr style="--seg-color:${color}" onclick="location.href='/customers-mgmt/profile/${c.id}'">
-            <td class="name-cell">${esc(c.name)}</td>
-            <td style="font-family:var(--mono);font-size:12px">${esc(c.phone)}</td>
-            <td style="font-family:var(--mono);font-size:12px;color:var(--muted)">${c.last_purchase||"—"}</td>
-            <td style="font-family:var(--mono);color:var(--blue)">${c.inv_count}</td>
-            <td>
-                <div class="bar-wrap">
-                    <span style="font-family:var(--mono);font-size:13px;color:${color};min-width:72px;display:inline-block">${fmt(c.net_spent)}</span>
-                    <div class="bar-bg"><div class="bar-fill" style="width:${Math.round(c.net_spent/maxSpend*100)}%"></div></div>
-                </div>
-            </td>
-            <td><span class="seg-pill" style="--seg-color:${color}">${SEG_META[seg].label}</span></td>
-        </tr>`).join("");
-}
-
-function exportCSV(){
-    const rows = (allData.segments||{})[activeSeg]||[];
-    if(!rows.length) return;
-    const label = SEG_META[activeSeg].label;
-    const headers = ["ID","Name","Phone","Email","Segment","Last Purchase","Orders","Net Spent"];
-    const csv = [
-        headers,
-        ...rows.map(c => [
-            c.id,
-            `"${c.name.replace(/"/g,'""')}"`,
-            c.phone==="—"?"":c.phone,
-            c.email==="—"?"":c.email,
-            label,
-            c.last_purchase||"",
-            c.inv_count,
-            c.net_spent.toFixed(2),
-        ])
-    ].map(r=>r.join(",")).join("\\n");
-    const link = document.createElement("a");
-    link.href = URL.createObjectURL(new Blob([csv],{type:"text/csv;charset=utf-8;"}));
-    link.download = `customers_${activeSeg}_${new Date().toISOString().slice(0,10)}.csv`;
-    link.click();
-    URL.revokeObjectURL(link.href);
-}
-
-load();
-</script>
-</body>
-</html>"""
+@router.get("/segments/")
+def segments_ui_redirect():
+    return RedirectResponse(url="/customers-mgmt/?tab=segments", status_code=302)

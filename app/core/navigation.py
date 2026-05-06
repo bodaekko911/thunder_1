@@ -33,7 +33,6 @@ NAV_GROUPS = [
             {"label": "Accounting", "href": "/accounting/", "permission": "page_accounting"},
             {"label": "Expenses", "href": "/expenses/", "permission": "page_expenses"},
             {"label": "Customers", "href": "/customers-mgmt/", "permission": "page_customers"},
-            {"label": "Segments", "href": "/customers-mgmt/segments/", "permission": "page_customers"},
             {"label": "Suppliers", "href": "/suppliers/", "permission": "page_suppliers"},
         ],
     },
