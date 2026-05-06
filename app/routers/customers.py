@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import HTMLResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
-from sqlalchemy import case, func, select, asc, desc
+from sqlalchemy import func, select, asc, desc
 
 from app.database import get_async_session
 from app.core.permissions import get_current_user, require_permission
@@ -52,11 +52,7 @@ async def get_customers(
         .correlate(Customer)
         .scalar_subquery()
     )
-    net_spent_raw_expr = inv_total_sq - ref_total_sq
-    net_spent_expr = case(
-        (net_spent_raw_expr < 0, 0),
-        else_=net_spent_raw_expr,
-    )
+    net_spent_expr = func.greatest(inv_total_sq - ref_total_sq, 0)
 
     SORT_EXPRS = {
         "name":         Customer.name,
@@ -1297,52 +1293,13 @@ function escapeJsString(value){
         .split(newline).join(backslash + "n");
 }
 
-function escapeHtml(value){
-    return String(value == null ? "" : value)
-        .replace(/&/g, "&amp;")
-        .replace(/</g, "&lt;")
-        .replace(/>/g, "&gt;")
-        .replace(/"/g, "&quot;")
-        .replace(/'/g, "&#39;");
-}
-
-function normalizeDash(value){
-    const text = String(value == null ? "" : value);
-    return text === "â€”" || text === "—" ? "" : text;
-}
-
-function displayText(value){
-    const text = normalizeDash(value);
-    return text ? escapeHtml(text) : "-";
-}
-
-function setTableMessage(message){
-    document.getElementById("table-body").innerHTML =
-        `<tr><td colspan="8" style="text-align:center;color:var(--muted);padding:40px">${escapeHtml(message)}</td></tr>`;
-}
-
-function handleLoadError(error){
-    console.error("Failed to load customers", error);
-    totalItems = 0;
-    document.getElementById("count-badge").innerText = "0 customers";
-    document.getElementById("page-info").innerText = "Unable to load customers";
-    document.getElementById("prev-btn").disabled = true;
-    document.getElementById("next-btn").disabled = true;
-    setTableMessage(error && error.message ? error.message : "Unable to load customers");
-}
-
 async function load(){
     let q   = document.getElementById("search").value.trim();
     let url = `/customers-mgmt/api/list?skip=${currentPage*pageSize}&limit=${pageSize}&sort_by=${sortBy}&sort_dir=${sortDir}`;
     if(q) url += `&q=${encodeURIComponent(q)}`;
 
-    let response = await fetch(url);
-    let data = await response.json();
-    if(!response.ok || data.detail || !Array.isArray(data.items)){
-        handleLoadError(new Error(data.detail || "Failed to load customers"));
-        return;
-    }
-    totalItems = Number(data.total || 0);
+    let data = await (await fetch(url)).json();
+    totalItems = data.total;
 
     document.getElementById("count-badge").innerText = `${totalItems} customers`;
     document.getElementById("page-info").innerText =
@@ -1352,22 +1309,23 @@ async function load(){
     document.getElementById("next-btn").disabled = (currentPage+1)*pageSize >= totalItems;
 
     if(!data.items.length){
-        setTableMessage("No customers found");
+        document.getElementById("table-body").innerHTML =
+            `<tr><td colspan="8" style="text-align:center;color:var(--muted);padding:40px">No customers found</td></tr>`;
         return;
     }
 
     document.getElementById("table-body").innerHTML = data.items.map(c => `
-        <tr onclick="openHistory(${c.id},'${escapeJsString(c.name)}',${Number(c.invoices || 0)},${Number(c.total_spent || 0)})">
-            <td class="name">${displayText(c.name)}</td>
-            <td class="phone">${displayText(c.phone)}</td>
-            <td style="font-size:12px">${displayText(c.email)}</td>
-            <td class="mono" style="color:${Number(c.discount_pct || 0)>0 ? "var(--warn)" : "var(--muted)"}">${Number(c.discount_pct || 0)>0 ? Number(c.discount_pct || 0).toFixed(1) + "%" : "-"}</td>
-            <td style="font-size:12px">${displayText(c.address)}</td>
-            <td style="font-family:var(--mono);color:var(--blue)">${Number(c.invoices || 0)}</td>
-            <td class="mono">${Number(c.total_spent || 0).toFixed(2)}</td>
+        <tr onclick="openHistory(${c.id},'${escapeJsString(c.name)}',${c.invoices},${c.total_spent})">
+            <td class="name">${c.name}</td>
+            <td class="phone">${c.phone}</td>
+            <td style="font-size:12px">${c.email}</td>
+            <td class="mono" style="color:${c.discount_pct>0 ? "var(--warn)" : "var(--muted)"}">${c.discount_pct>0 ? c.discount_pct.toFixed(1) + "%" : "—"}</td>
+            <td style="font-size:12px">${c.address}</td>
+            <td style="font-family:var(--mono);color:var(--blue)">${c.invoices}</td>
+            <td class="mono">${c.total_spent.toFixed(2)}</td>
             <td style="display:flex;gap:6px" onclick="event.stopPropagation()">
                 <a class="action-btn" href="/customers-mgmt/profile/${c.id}" style="text-decoration:none;display:inline-flex;align-items:center">Profile</a>
-                <button class="action-btn" onclick="openEditModal(${c.id},'${escapeJsString(normalizeDash(c.name))}','${escapeJsString(normalizeDash(c.phone))}','${escapeJsString(normalizeDash(c.email))}','${escapeJsString(normalizeDash(c.address))}',${Number(c.discount_pct || 0)})">Edit</button>
+                <button class="action-btn" onclick="openEditModal(${c.id},'${escapeJsString(c.name)}','${escapeJsString(c.phone)}','${escapeJsString(c.email)}','${escapeJsString(c.address)}',${c.discount_pct})">Edit</button>
                 <button class="action-btn danger" onclick="deleteCustomer(${c.id},'${escapeJsString(c.name)}')">Delete</button>
             </td>
         </tr>`).join("");
@@ -1408,7 +1366,7 @@ async function exportCSV(){
             c.total_spent.toFixed(2),
         ]);
 
-        const csv = [headers, ...rows].map(r => r.join(",")).join("\\n");
+        const csv = [headers, ...rows].map(r => r.join(",")).join("\n");
         const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
         const link = document.createElement("a");
         link.href  = URL.createObjectURL(blob);
@@ -1428,7 +1386,7 @@ async function exportCSV(){
 
 function csvCell(val) {
     const s = String(val ?? "");
-    return (s.includes(",") || s.includes('"') || s.includes("\\n"))
+    return (s.includes(",") || s.includes('"') || s.includes("\n"))
         ? `"${s.replace(/"/g, '""')}"` : s;
 }
 
@@ -1563,8 +1521,423 @@ function showToast(msg){
     toastTimer = setTimeout(()=>t.classList.remove("show"), 3000);
 }
 
-load().catch(handleLoadError);
+load();
 </script>
 </body>
 </html>
 """
+
+
+# ═══════════════════════════════════════════════════════
+#  CUSTOMER SEGMENTATION
+#  GET /customers-mgmt/api/segments  — JSON data
+#  GET /customers-mgmt/segments/     — HTML page
+# ═══════════════════════════════════════════════════════
+
+@router.get("/api/segments")
+async def get_segments(db: AsyncSession = Depends(get_async_session)):
+    from datetime import datetime, timezone, timedelta
+
+    now  = datetime.now(timezone.utc)
+    d60  = now - timedelta(days=60)
+    d180 = now - timedelta(days=180)
+
+    # ── All aggregates in a single SQL round-trip ──────
+    last_inv_sq = (
+        select(func.max(Invoice.created_at))
+        .where(Invoice.customer_id == Customer.id, Invoice.status == "paid")
+        .correlate(Customer)
+        .scalar_subquery()
+    )
+    first_inv_sq = (
+        select(func.min(Invoice.created_at))
+        .where(Invoice.customer_id == Customer.id, Invoice.status == "paid")
+        .correlate(Customer)
+        .scalar_subquery()
+    )
+    ref_total_sq = (
+        select(func.coalesce(func.sum(RetailRefund.total), 0))
+        .where(RetailRefund.customer_id == Customer.id)
+        .correlate(Customer)
+        .scalar_subquery()
+    )
+    net_spent_sq = (
+        select(
+            func.greatest(
+                func.coalesce(func.sum(Invoice.total), 0) - ref_total_sq,
+                0,
+            )
+        )
+        .where(Invoice.customer_id == Customer.id, Invoice.status == "paid")
+        .correlate(Customer)
+        .scalar_subquery()
+    )
+    inv_count_sq = (
+        select(func.count(Invoice.id))
+        .where(Invoice.customer_id == Customer.id, Invoice.status == "paid")
+        .correlate(Customer)
+        .scalar_subquery()
+    )
+
+    rows_result = await db.execute(
+        select(
+            Customer.id,
+            Customer.name,
+            Customer.phone,
+            Customer.email,
+            Customer.discount_pct,
+            last_inv_sq.label("last_purchase"),
+            first_inv_sq.label("first_purchase"),
+            net_spent_sq.label("net_spent"),
+            inv_count_sq.label("inv_count"),
+        ).order_by(Customer.name)
+    )
+    customers_data = rows_result.all()
+
+    # Champion threshold = 75th-percentile net_spent among active customers
+    active_spends = sorted(
+        [float(r.net_spent or 0) for r in customers_data
+         if r.net_spent and float(r.net_spent) > 0],
+        reverse=True,
+    )
+    champion_threshold = (
+        active_spends[max(0, int(len(active_spends) * 0.25) - 1)]
+        if active_spends else 0
+    )
+
+    segments: dict[str, list] = {
+        "champion": [], "loyal": [], "new": [], "at_risk": [], "lost": [],
+    }
+
+    for r in customers_data:
+        last  = r.last_purchase
+        first = r.first_purchase
+        spent = float(r.net_spent or 0)
+        count = int(r.inv_count or 0)
+
+        # Normalise timezone
+        if last is not None and last.tzinfo is None:
+            from datetime import timezone as _tz
+            last  = last.replace(tzinfo=_tz.utc)
+        if first is not None and first.tzinfo is None:
+            from datetime import timezone as _tz
+            first = first.replace(tzinfo=_tz.utc)
+
+        if last is None:
+            seg = "lost"
+        elif first and first >= d60 and count <= 2:
+            seg = "new"
+        elif last >= d60 and spent >= champion_threshold and champion_threshold > 0:
+            seg = "champion"
+        elif last >= d60:
+            seg = "loyal"
+        elif last >= d180:
+            seg = "at_risk"
+        else:
+            seg = "lost"
+
+        segments[seg].append({
+            "id":            r.id,
+            "name":          r.name,
+            "phone":         r.phone or "—",
+            "email":         r.email or "—",
+            "discount_pct":  float(r.discount_pct or 0),
+            "net_spent":     round(spent, 2),
+            "inv_count":     count,
+            "last_purchase": last.strftime("%Y-%m-%d") if last else None,
+            "first_purchase": first.strftime("%Y-%m-%d") if first else None,
+        })
+
+    for seg_list in segments.values():
+        seg_list.sort(key=lambda x: x["net_spent"], reverse=True)
+
+    counts   = {k: len(v) for k, v in segments.items()}
+    counts["total"] = sum(counts.values())
+    avg_spent = {
+        k: round(sum(c["net_spent"] for c in v) / len(v), 2) if v else 0
+        for k, v in segments.items()
+    }
+
+    return {
+        "counts":              counts,
+        "avg_spent":           avg_spent,
+        "champion_threshold":  round(champion_threshold, 2),
+        "segments":            segments,
+    }
+
+
+@router.get("/segments/", response_class=HTMLResponse)
+def segments_ui(current_user: User = Depends(require_permission("page_customers"))):
+    return """<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<script src="/static/theme-init.js"></script>
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Customer Segments — Thunder ERP</title>
+<link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+<style>
+:root {
+    --bg:#060810;--surface:#0a0d18;--card:#0f1424;--card2:#151c30;
+    --border:rgba(255,255,255,0.06);--border2:rgba(255,255,255,0.11);
+    --green:#00ff9d;--blue:#4d9fff;--amber:#ffb547;--rose:#ff4d6d;
+    --text:#f0f4ff;--sub:#8899bb;--muted:#445066;
+    --sans:'Outfit',sans-serif;--mono:'JetBrains Mono',monospace;--r:12px;
+    --c-champion:#ffb547;--c-loyal:#00ff9d;--c-new:#4d9fff;
+    --c-at_risk:#ff944d;--c-lost:#ff4d6d;
+}
+body.light {
+    --bg:#f4f5ef;--surface:#f1f3eb;--card:#eceee6;--card2:#e4e6de;
+    --border:rgba(0,0,0,0.08);--border2:rgba(0,0,0,0.14);
+    --green:#0f8a43;--blue:#185fa5;--amber:#854f0b;--rose:#a32d2d;
+    --text:#1a1e14;--sub:#4a5040;--muted:#7b816f;
+    --c-champion:#854f0b;--c-loyal:#0f8a43;--c-new:#185fa5;
+    --c-at_risk:#8a4800;--c-lost:#a32d2d;
+}
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+body{font-family:var(--sans);background:var(--bg);color:var(--text);min-height:100vh;font-size:14px}
+
+.content{max-width:1300px;margin:0 auto;padding:28px 24px;display:flex;flex-direction:column;gap:22px}
+.page-title{font-size:24px;font-weight:800;letter-spacing:-.5px}
+.page-sub{color:var(--muted);font-size:13px;margin-top:3px}
+
+.seg-tabs{display:flex;gap:10px;flex-wrap:wrap}
+.seg-tab{
+    display:flex;flex-direction:column;gap:4px;
+    background:var(--card);border:1px solid var(--border);
+    border-radius:var(--r);padding:14px 18px;cursor:pointer;
+    transition:all .2s;min-width:130px;flex:1;
+    border-top:3px solid transparent;
+}
+.seg-tab:hover{border-color:var(--border2)}
+.seg-tab.active{border-top-color:var(--seg-color)}
+.seg-tab-label{font-size:10px;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;color:var(--muted)}
+.seg-tab-count{font-family:var(--mono);font-size:28px;font-weight:700;color:var(--seg-color)}
+.seg-tab-avg{font-size:11px;color:var(--muted)}
+
+.seg-def{
+    background:var(--card);border:1px solid var(--border);
+    padding:12px 18px;font-size:12px;color:var(--sub);
+    border-left:3px solid var(--seg-color);
+    border-radius:0 var(--r) var(--r) 0;display:none;
+}
+
+.table-wrap{background:var(--card);border:1px solid var(--border);border-radius:var(--r);overflow:hidden}
+table{width:100%;border-collapse:collapse}
+thead{background:var(--card2)}
+th{font-size:10px;font-weight:700;letter-spacing:1px;text-transform:uppercase;color:var(--muted);padding:12px 16px;text-align:left;white-space:nowrap}
+td{padding:12px 16px;border-top:1px solid var(--border);font-size:13px;color:var(--sub)}
+tbody tr:hover td{background:rgba(255,255,255,.02);cursor:pointer}
+td.name-cell{color:var(--text);font-weight:600}
+.seg-pill{display:inline-block;font-size:10px;font-weight:700;letter-spacing:.8px;text-transform:uppercase;padding:3px 9px;border-radius:6px;background:color-mix(in srgb,var(--seg-color) 14%,transparent);color:var(--seg-color);border:1px solid color-mix(in srgb,var(--seg-color) 28%,transparent)}
+.empty{text-align:center;padding:48px;color:var(--muted);font-size:13px}
+.bar-wrap{display:flex;align-items:center;gap:8px}
+.bar-bg{flex:1;height:4px;background:var(--border);border-radius:2px;overflow:hidden;min-width:40px}
+.bar-fill{height:100%;border-radius:2px;background:var(--seg-color)}
+
+.toolbar{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.search-box{display:flex;align-items:center;gap:9px;background:var(--card);border:1px solid var(--border);border-radius:var(--r);padding:0 14px;flex:1;min-width:200px;transition:border-color .2s}
+.search-box:focus-within{border-color:rgba(77,159,255,.35)}
+.search-box input{background:transparent;border:none;outline:none;color:var(--text);font-family:var(--sans);font-size:14px;padding:11px 0;width:100%}
+.search-box input::placeholder{color:var(--muted)}
+.count-badge{background:var(--card2);border:1px solid var(--border2);color:var(--sub);font-family:var(--mono);font-size:12px;padding:8px 14px;border-radius:var(--r);white-space:nowrap}
+.btn-export{background:var(--card2);border:1px solid var(--border2);color:var(--sub);display:flex;align-items:center;gap:7px;padding:10px 15px;border-radius:var(--r);font-family:var(--sans);font-size:13px;font-weight:600;cursor:pointer;transition:all .2s;white-space:nowrap}
+.btn-export:hover{border-color:var(--blue);color:var(--blue)}
+@keyframes spin{to{transform:rotate(360deg)}}
+::-webkit-scrollbar{width:4px}
+::-webkit-scrollbar-thumb{background:var(--border2);border-radius:4px}
+@media(max-width:640px){
+    .seg-tab{min-width:calc(50% - 5px);flex:none}
+    .seg-tab-count{font-size:22px}
+}
+</style>
+<script src="/static/auth-guard.js"></script>
+</head>
+<body>
+""" + render_app_header(current_user, "page_customers") + """
+
+<div class="content">
+    <div>
+        <div class="page-title">Customer Segments</div>
+        <div class="page-sub">Auto-classified by recency and spend — updates live from your invoices</div>
+    </div>
+
+    <div class="seg-tabs" id="seg-tabs">
+        <div style="color:var(--muted);font-size:13px;padding:20px">Loading…</div>
+    </div>
+
+    <div class="seg-def" id="seg-def"></div>
+
+    <div class="toolbar">
+        <div class="search-box">
+            <svg width="15" height="15" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24">
+                <circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/>
+            </svg>
+            <input id="search" placeholder="Filter by name, phone or email…" oninput="filterTable()">
+        </div>
+        <span class="count-badge" id="count-badge">—</span>
+        <button class="btn-export" id="export-btn" onclick="exportCSV()">
+            <svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2" viewBox="0 0 24 24">
+                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                <polyline points="7 10 12 15 17 10"/>
+                <line x1="12" y1="15" x2="12" y2="3"/>
+            </svg>
+            Export CSV
+        </button>
+    </div>
+
+    <div class="table-wrap">
+        <table>
+            <thead>
+                <tr>
+                    <th>Name</th>
+                    <th>Phone</th>
+                    <th>Last Purchase</th>
+                    <th>Orders</th>
+                    <th>Net Spent</th>
+                    <th>Segment</th>
+                </tr>
+            </thead>
+            <tbody id="table-body">
+                <tr><td colspan="6" class="empty">Loading…</td></tr>
+            </tbody>
+        </table>
+    </div>
+</div>
+
+<script>
+const SEG_META = {
+    champion: {
+        label: "Champions",
+        color: "var(--c-champion)",
+        def: "Purchased within 60 days AND in the top 25% by net spend. Your most valuable customers — reward them.",
+    },
+    loyal: {
+        label: "Loyal",
+        color: "var(--c-loyal)",
+        def: "Purchased within the last 60 days. Regular buyers who keep coming back.",
+    },
+    new: {
+        label: "New",
+        color: "var(--c-new)",
+        def: "First purchase within 60 days, with 2 or fewer orders. Nurture them into loyal regulars.",
+    },
+    at_risk: {
+        label: "At Risk",
+        color: "var(--c-at_risk)",
+        def: "Last purchase was 61–180 days ago. A targeted offer now can win them back.",
+    },
+    lost: {
+        label: "Lost",
+        color: "var(--c-lost)",
+        def: "Last purchase over 180 days ago, or never purchased. Worth a re-engagement campaign.",
+    },
+};
+
+let allData   = {};
+let activeSeg = "champion";
+let maxSpend  = 1;
+
+const fmt = n => Number(n).toLocaleString("en-US", {minimumFractionDigits:2, maximumFractionDigits:2});
+const esc = s => String(s||"").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+
+async function load(){
+    const d = await (await fetch("/customers-mgmt/api/segments")).json();
+    allData  = d;
+    maxSpend = Math.max(1, ...Object.values(d.segments).flat().map(c => c.net_spent));
+    renderTabs(d);
+    renderSegment(activeSeg);
+}
+
+function renderTabs(d){
+    const order = ["champion","loyal","new","at_risk","lost"];
+    document.getElementById("seg-tabs").innerHTML = order.map(seg => {
+        const m = SEG_META[seg];
+        return `<div class="seg-tab${seg===activeSeg?" active":""}" style="--seg-color:${m.color}" onclick="selectSeg('${seg}')">
+            <span class="seg-tab-label">${m.label}</span>
+            <span class="seg-tab-count">${d.counts[seg]||0}</span>
+            <span class="seg-tab-avg">avg ${fmt(d.avg_spent[seg]||0)}</span>
+        </div>`;
+    }).join("");
+}
+
+function selectSeg(seg){
+    activeSeg = seg;
+    document.querySelectorAll(".seg-tab").forEach(el => {
+        el.classList.toggle("active", el.querySelector(".seg-tab-label").textContent === SEG_META[seg].label);
+    });
+    renderSegment(seg);
+}
+
+function renderSegment(seg){
+    const defEl = document.getElementById("seg-def");
+    defEl.style.display = "block";
+    defEl.style.setProperty("--seg-color", SEG_META[seg].color);
+    defEl.textContent = SEG_META[seg].def;
+    renderTable(seg, document.getElementById("search").value.trim());
+}
+
+function filterTable(){ renderTable(activeSeg, document.getElementById("search").value.trim()); }
+
+function renderTable(seg, q){
+    let rows = [...((allData.segments||{})[seg]||[])];
+    if(q){
+        const lq = q.toLowerCase();
+        rows = rows.filter(c =>
+            c.name.toLowerCase().includes(lq) ||
+            (c.phone||"").includes(lq) ||
+            (c.email||"").toLowerCase().includes(lq)
+        );
+    }
+    document.getElementById("count-badge").textContent = `${rows.length} customers`;
+    const color = SEG_META[seg].color;
+    const tbody = document.getElementById("table-body");
+    if(!rows.length){
+        tbody.innerHTML = `<tr><td colspan="6" class="empty">No customers in this segment</td></tr>`;
+        return;
+    }
+    tbody.innerHTML = rows.map(c => `
+        <tr style="--seg-color:${color}" onclick="location.href='/customers-mgmt/profile/${c.id}'">
+            <td class="name-cell">${esc(c.name)}</td>
+            <td style="font-family:var(--mono);font-size:12px">${esc(c.phone)}</td>
+            <td style="font-family:var(--mono);font-size:12px;color:var(--muted)">${c.last_purchase||"—"}</td>
+            <td style="font-family:var(--mono);color:var(--blue)">${c.inv_count}</td>
+            <td>
+                <div class="bar-wrap">
+                    <span style="font-family:var(--mono);font-size:13px;color:${color};min-width:72px;display:inline-block">${fmt(c.net_spent)}</span>
+                    <div class="bar-bg"><div class="bar-fill" style="width:${Math.round(c.net_spent/maxSpend*100)}%"></div></div>
+                </div>
+            </td>
+            <td><span class="seg-pill" style="--seg-color:${color}">${SEG_META[seg].label}</span></td>
+        </tr>`).join("");
+}
+
+function exportCSV(){
+    const rows = (allData.segments||{})[activeSeg]||[];
+    if(!rows.length) return;
+    const label = SEG_META[activeSeg].label;
+    const headers = ["ID","Name","Phone","Email","Segment","Last Purchase","Orders","Net Spent"];
+    const csv = [
+        headers,
+        ...rows.map(c => [
+            c.id,
+            `"${c.name.replace(/"/g,'""')}"`,
+            c.phone==="—"?"":c.phone,
+            c.email==="—"?"":c.email,
+            label,
+            c.last_purchase||"",
+            c.inv_count,
+            c.net_spent.toFixed(2),
+        ])
+    ].map(r=>r.join(",")).join("\\n");
+    const link = document.createElement("a");
+    link.href = URL.createObjectURL(new Blob([csv],{type:"text/csv;charset=utf-8;"}));
+    link.download = `customers_${activeSeg}_${new Date().toISOString().slice(0,10)}.csv`;
+    link.click();
+    URL.revokeObjectURL(link.href);
+}
+
+load();
+</script>
+</body>
+</html>"""
