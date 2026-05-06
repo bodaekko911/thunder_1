@@ -485,23 +485,6 @@ async def _build_numbers(db: AsyncSession, rng: dict[str, Any], user: User, erro
 
     margin = await _build_margin_block(db, rng, sales_value, sales_prior, errors)
 
-    # Net profit = gross profit - operating expenses
-    gross_profit = margin.get("gross_profit")
-    net_profit = round(gross_profit - spent_value, 2) if gross_profit is not None else None
-    net_margin_pct = round((net_profit / max(sales_value, 1)) * 100, 1) if net_profit is not None else None
-
-    prior_gross_profit = None
-    prior_net_profit = None
-    prior_net_margin_pct = None
-    try:
-        prior_gross_profit = await _gross_profit_total(db, rng["prior_utc_start"], rng["prior_utc_end"])
-        prior_spent = await _expense_total(db, date.fromisoformat(rng["prior_start"]), date.fromisoformat(rng["prior_end"]))
-        if prior_gross_profit is not None:
-            prior_net_profit = round(prior_gross_profit - prior_spent, 2)
-            prior_net_margin_pct = round((prior_net_profit / max(sales_prior, 1)) * 100, 1)
-    except Exception:
-        logger.error("dashboard_summary: prior net profit calc failed", exc_info=True)
-
     # B2B cash collected — debit on account 1000 for payment journals in range
     b2b_cash_value = 0.0
     try:
@@ -553,18 +536,6 @@ async def _build_numbers(db: AsyncSession, rng: dict[str, Any], user: User, erro
         "margin": margin,
         "alt_sales_today": {"value": round(sales_today_value, 2)},
         "b2b_cash": {"value": round(b2b_cash_value, 2)},
-        "profit": {
-            "gross_profit": gross_profit,
-            "gross_margin_pct": margin.get("value_pct"),
-            "operating_expenses": round(spent_value, 2),
-            "net_profit": net_profit,
-            "net_margin_pct": net_margin_pct,
-            "prior_gross_profit": prior_gross_profit,
-            "prior_net_profit": prior_net_profit,
-            "prior_net_margin_pct": prior_net_margin_pct,
-            "net_margin_delta_pts": round(net_margin_pct - prior_net_margin_pct, 1)
-                if net_margin_pct is not None and prior_net_margin_pct is not None else None,
-        },
     }
 
 
@@ -599,6 +570,44 @@ async def _top_products(db: AsyncSession, rng: dict[str, Any], metric: str) -> l
             "revenue": round(_safe_float(row.revenue), 2),
         }
         for row in rows.all()
+    ]
+
+
+async def _top_b2b_clients(db: AsyncSession, rng: dict[str, Any], user: Any, limit: int = 8) -> list[dict[str, Any]]:
+    from app.core.permissions import has_permission
+    if not has_permission(user, "page_b2b"):
+        return []
+
+    rows = await db.execute(
+        select(
+            B2BClient.id,
+            B2BClient.name,
+            B2BClient.payment_terms,
+            B2BClient.outstanding,
+            func.coalesce(func.sum(B2BInvoice.total), 0).label("revenue"),
+            func.count(B2BInvoice.id).label("invoice_count"),
+        )
+        .join(B2BInvoice, B2BInvoice.client_id == B2BClient.id)
+        .where(
+            B2BInvoice.created_at >= rng["utc_start"],
+            B2BInvoice.created_at <= rng["utc_end"],
+            B2BInvoice.status == "paid",
+            B2BClient.is_active == True,
+        )
+        .group_by(B2BClient.id, B2BClient.name, B2BClient.payment_terms, B2BClient.outstanding)
+        .order_by(func.sum(B2BInvoice.total).desc())
+        .limit(limit)
+    )
+    return [
+        {
+            "id": r.id,
+            "name": r.name,
+            "payment_terms": r.payment_terms or "immediate",
+            "revenue": round(float(r.revenue), 2),
+            "invoice_count": int(r.invoice_count),
+            "outstanding": round(float(r.outstanding or 0), 2),
+        }
+        for r in rows.all()
     ]
 
 
@@ -694,11 +703,12 @@ async def _recent_activity(db: AsyncSession, rng: dict[str, Any]) -> list[dict[s
     return activity[:10]
 
 
-async def _build_panels(db: AsyncSession, rng: dict[str, Any]) -> dict[str, Any]:
+async def _build_panels(db: AsyncSession, rng: dict[str, Any], user: Any) -> dict[str, Any]:
     return {
         "top_products_by_revenue": await _top_products(db, rng, "revenue"),
         "top_products_by_qty": await _top_products(db, rng, "qty"),
         "recent_activity": await _recent_activity(db, rng),
+        "top_b2b_clients": await _top_b2b_clients(db, rng, user),
     }
 
 
@@ -975,22 +985,11 @@ async def get_summary(
         "stock_alerts": {"value": 0, "out_count": 0, "low_count": 0},
         "margin": {"value_pct": None, "delta_pts": None, "gross_profit": None},
         "b2b_cash": {"value": 0.0},
-        "profit": {
-            "gross_profit": None,
-            "gross_margin_pct": None,
-            "operating_expenses": 0.0,
-            "net_profit": None,
-            "net_margin_pct": None,
-            "prior_gross_profit": None,
-            "prior_net_profit": None,
-            "prior_net_margin_pct": None,
-            "net_margin_delta_pts": None,
-        },
     }
     alt_sales_today = {"value": 0.0}
     try:
         number_payload = await _build_numbers(db, rng, user, errors)
-        numbers = {key: number_payload[key] for key in ("sales", "clients_owe", "spent", "stock_alerts", "margin", "b2b_cash", "profit")}
+        numbers = {key: number_payload[key] for key in ("sales", "clients_owe", "spent", "stock_alerts", "margin", "b2b_cash")}
         alt_sales_today = number_payload.get("alt_sales_today", {"value": 0.0})
     except Exception:
         logger.error("dashboard_summary: numbers section failed", exc_info=True)
@@ -1011,9 +1010,9 @@ async def get_summary(
             pass
         _append_error(errors, "chart")
 
-    panels: dict[str, Any] = {"top_products_by_revenue": [], "top_products_by_qty": [], "recent_activity": []}
+    panels: dict[str, Any] = {"top_products_by_revenue": [], "top_products_by_qty": [], "recent_activity": [], "top_b2b_clients": []}
     try:
-        panels = await _build_panels(db, rng)
+        panels = await _build_panels(db, rng, user)
     except Exception:
         logger.error("dashboard_summary: panels section failed", exc_info=True)
         try:

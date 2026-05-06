@@ -551,6 +551,27 @@ def dashboard_ui():
       </div>
     </section>
   </div>
+
+  <div class="panel-grid">
+    <section class="card panel-card" aria-label="Profit summary" id="profit-summary-card">
+      <div class="panel-head">
+        <h2>Profit summary</h2>
+      </div>
+      <div id="profit-summary" class="panel-body"></div>
+    </section>
+
+    <section class="card panel-card" aria-label="Top B2B clients" id="top-b2b-card">
+      <div class="panel-head">
+        <h2>Top B2B clients</h2>
+        <div class="panel-tabs" role="tablist" aria-label="B2B client sort">
+          <button type="button" class="tab-btn active" data-b2b-tab="revenue">Revenue</button>
+          <button type="button" class="tab-btn" data-b2b-tab="invoices">Invoices</button>
+          <button type="button" class="tab-btn" data-b2b-tab="outstanding">Outstanding</button>
+        </div>
+      </div>
+      <div id="top-b2b-list" class="panel-body"></div>
+    </section>
+  </div>
 </main>
 
 <div id="custom-range-modal" class="range-modal hidden" role="dialog" aria-modal="true" aria-labelledby="crm-title">
