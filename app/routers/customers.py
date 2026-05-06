@@ -405,6 +405,14 @@ tr.items-row td{{padding:0}}
 .items-table td.item-name{{color:var(--text)}}
 .items-table td.item-num{{font-family:var(--mono);text-align:right}}
 
+/* ── Monthly chart ── */
+.chart-wrap{{background:var(--card);border:1px solid var(--border);border-radius:14px;padding:20px 20px 12px}}
+.chart-header{{display:flex;align-items:center;justify-content:space-between;margin-bottom:16px}}
+.chart-legend{{display:flex;gap:14px;font-size:11px;color:var(--muted)}}
+.chart-legend-dot{{width:8px;height:8px;border-radius:2px;display:inline-block;margin-right:4px;flex-shrink:0}}
+.chart-canvas-wrap{{position:relative;width:100%;overflow-x:auto}}
+canvas#spend-chart{{display:block}}
+
 @media(max-width:700px){{
     .content{{padding:20px 16px}}
     .cust-name{{font-size:26px}}
@@ -519,6 +527,28 @@ function render(d){{
             </div>
         </div>
     </div>`;
+
+    // ── Monthly spending chart ──
+    if (d.orders.length) {{
+        pc.innerHTML += `
+        <div>
+            <div class="section-title">Monthly Spending</div>
+            <div class="chart-wrap">
+                <div class="chart-header">
+                    <span style="font-size:12px;color:var(--muted)">Last 12 months — paid invoices vs refunds</span>
+                    <div class="chart-legend">
+                        <span><span class="chart-legend-dot" style="background:var(--green2)"></span>Paid</span>
+                        <span><span class="chart-legend-dot" style="background:var(--rose)"></span>Refund</span>
+                    </div>
+                </div>
+                <div class="chart-canvas-wrap">
+                    <canvas id="spend-chart" height="180"></canvas>
+                </div>
+            </div>
+        </div>`;
+        // Defer so the canvas is in the DOM
+        setTimeout(() => drawSpendChart(d.orders), 0);
+    }}
 
     // ── Top products ──
     if (d.top_products.length) {{
@@ -649,6 +679,133 @@ function render(d){{
 }}
 
 load();
+
+function drawSpendChart(orders) {{
+    const canvas = document.getElementById("spend-chart");
+    if (!canvas) return;
+    const ctx = canvas.getContext("2d");
+
+    // Build last-12-months buckets
+    const now   = new Date();
+    const months = [];
+    for (let i = 11; i >= 0; i--) {{
+        const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
+        months.push({{
+            key:   d.getFullYear() + "-" + String(d.getMonth()+1).padStart(2,"0"),
+            label: d.toLocaleString("default", {{month:"short"}}),
+            paid:  0,
+            ref:   0,
+        }});
+    }}
+    const byKey = {{}};
+    months.forEach(m => byKey[m.key] = m);
+
+    orders.forEach(o => {{
+        const key = (o.created_at || "").slice(0, 7);
+        if (!byKey[key]) return;
+        if (o.type === "invoice" && o.status === "paid") byKey[key].paid += o.total;
+        if (o.type === "refund") byKey[key].ref += Math.abs(o.total);
+    }});
+
+    // Remove leading months with no activity
+    let firstActive = 0;
+    for (let i = 0; i < months.length; i++) {{
+        if (months[i].paid > 0 || months[i].ref > 0) {{ firstActive = i; break; }}
+        if (i === months.length - 1) firstActive = 0; // all zero — show last 3
+    }}
+    const visible = months.slice(Math.min(firstActive, months.length - 3));
+
+    const maxVal = Math.max(...visible.map(m => m.paid), 1);
+
+    // Layout
+    const isLight    = document.body.classList.contains("light");
+    const colorPaid  = isLight ? "#0f8a43" : "#a8d97a";
+    const colorRef   = isLight ? "#c97a7a" : "#c97a7a";
+    const colorMuted = isLight ? "#8a9080" : "#4a5040";
+    const colorGrid  = isLight ? "rgba(0,0,0,0.06)" : "rgba(255,255,255,0.06)";
+    const colorText  = isLight ? "#4a5040" : "#8a9080";
+
+    const PAD_L = 52, PAD_R = 16, PAD_T = 12, PAD_B = 40;
+    const barGap = 8;
+    const n = visible.length;
+    const minWidth = PAD_L + PAD_R + n * (28 + barGap);
+    const W = Math.max(canvas.parentElement.clientWidth || 600, minWidth);
+    const H = 180;
+    canvas.width  = W;
+    canvas.height = H;
+    const chartW = W - PAD_L - PAD_R;
+    const chartH = H - PAD_T - PAD_B;
+    const barW   = Math.min(40, (chartW / n) - barGap);
+
+    ctx.clearRect(0, 0, W, H);
+
+    // Grid lines + Y labels
+    const ticks = 4;
+    ctx.textAlign = "right";
+    ctx.font = "11px monospace";
+    ctx.fillStyle = colorText;
+    for (let t = 0; t <= ticks; t++) {{
+        const val = maxVal * t / ticks;
+        const y   = PAD_T + chartH - (chartH * t / ticks);
+        ctx.strokeStyle = colorGrid;
+        ctx.lineWidth   = 0.5;
+        ctx.beginPath(); ctx.moveTo(PAD_L, y); ctx.lineTo(W - PAD_R, y); ctx.stroke();
+        if (val >= 1000) ctx.fillText((val/1000).toFixed(val%1000===0?0:1)+"k", PAD_L - 6, y + 4);
+        else ctx.fillText(Math.round(val), PAD_L - 6, y + 4);
+    }}
+
+    // Bars
+    visible.forEach((m, i) => {{
+        const x = PAD_L + i * (chartW / n) + (chartW / n - barW) / 2;
+
+        // Paid bar
+        if (m.paid > 0) {{
+            const bh = Math.max(2, (m.paid / maxVal) * chartH);
+            const by = PAD_T + chartH - bh;
+            ctx.fillStyle = colorPaid;
+            ctx.beginPath();
+            ctx.roundRect(x, by, barW, bh, [3, 3, 0, 0]);
+            ctx.fill();
+        }}
+
+        // Refund overlay (red, inset slightly)
+        if (m.ref > 0) {{
+            const rh = Math.max(2, (m.ref / maxVal) * chartH);
+            const ry = PAD_T + chartH - rh;
+            ctx.fillStyle = colorRef;
+            ctx.globalAlpha = 0.75;
+            ctx.beginPath();
+            ctx.roundRect(x + 2, ry, barW - 4, rh, [2, 2, 0, 0]);
+            ctx.fill();
+            ctx.globalAlpha = 1;
+        }}
+
+        // Value label on tallest bar
+        if (m.paid > 0) {{
+            const bh  = (m.paid / maxVal) * chartH;
+            const by  = PAD_T + chartH - bh;
+            const lbl = m.paid >= 1000 ? (m.paid/1000).toFixed(1)+"k" : Math.round(m.paid).toString();
+            ctx.fillStyle  = colorMuted;
+            ctx.textAlign  = "center";
+            ctx.font = "10px monospace";
+            if (bh > 20) {{
+                // label inside bar
+                ctx.fillStyle = isLight ? "rgba(0,0,0,0.5)" : "rgba(255,255,255,0.55)";
+                ctx.fillText(lbl, x + barW/2, by + 14);
+            }} else {{
+                // label above bar
+                ctx.fillStyle = colorMuted;
+                ctx.fillText(lbl, x + barW/2, by - 4);
+            }}
+        }}
+
+        // Month label
+        ctx.fillStyle  = colorText;
+        ctx.textAlign  = "center";
+        ctx.font = "11px sans-serif";
+        ctx.fillText(m.label, x + barW/2, H - 10);
+    }});
+}}
 </script>
 </body>
 </html>"""
