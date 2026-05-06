@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import HTMLResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
-from sqlalchemy import func, select, asc, desc
+from sqlalchemy import case, func, select, asc, desc
 
 from app.database import get_async_session
 from app.core.permissions import get_current_user, require_permission
@@ -52,7 +52,11 @@ async def get_customers(
         .correlate(Customer)
         .scalar_subquery()
     )
-    net_spent_expr = func.greatest(inv_total_sq - ref_total_sq, 0)
+    net_spent_raw_expr = inv_total_sq - ref_total_sq
+    net_spent_expr = case(
+        (net_spent_raw_expr < 0, 0),
+        else_=net_spent_raw_expr,
+    )
 
     SORT_EXPRS = {
         "name":         Customer.name,
@@ -1293,13 +1297,52 @@ function escapeJsString(value){
         .split(newline).join(backslash + "n");
 }
 
+function escapeHtml(value){
+    return String(value == null ? "" : value)
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#39;");
+}
+
+function normalizeDash(value){
+    const text = String(value == null ? "" : value);
+    return text === "â€”" || text === "—" ? "" : text;
+}
+
+function displayText(value){
+    const text = normalizeDash(value);
+    return text ? escapeHtml(text) : "-";
+}
+
+function setTableMessage(message){
+    document.getElementById("table-body").innerHTML =
+        `<tr><td colspan="8" style="text-align:center;color:var(--muted);padding:40px">${escapeHtml(message)}</td></tr>`;
+}
+
+function handleLoadError(error){
+    console.error("Failed to load customers", error);
+    totalItems = 0;
+    document.getElementById("count-badge").innerText = "0 customers";
+    document.getElementById("page-info").innerText = "Unable to load customers";
+    document.getElementById("prev-btn").disabled = true;
+    document.getElementById("next-btn").disabled = true;
+    setTableMessage(error && error.message ? error.message : "Unable to load customers");
+}
+
 async function load(){
     let q   = document.getElementById("search").value.trim();
     let url = `/customers-mgmt/api/list?skip=${currentPage*pageSize}&limit=${pageSize}&sort_by=${sortBy}&sort_dir=${sortDir}`;
     if(q) url += `&q=${encodeURIComponent(q)}`;
 
-    let data = await (await fetch(url)).json();
-    totalItems = data.total;
+    let response = await fetch(url);
+    let data = await response.json();
+    if(!response.ok || data.detail || !Array.isArray(data.items)){
+        handleLoadError(new Error(data.detail || "Failed to load customers"));
+        return;
+    }
+    totalItems = Number(data.total || 0);
 
     document.getElementById("count-badge").innerText = `${totalItems} customers`;
     document.getElementById("page-info").innerText =
@@ -1309,23 +1352,22 @@ async function load(){
     document.getElementById("next-btn").disabled = (currentPage+1)*pageSize >= totalItems;
 
     if(!data.items.length){
-        document.getElementById("table-body").innerHTML =
-            `<tr><td colspan="8" style="text-align:center;color:var(--muted);padding:40px">No customers found</td></tr>`;
+        setTableMessage("No customers found");
         return;
     }
 
     document.getElementById("table-body").innerHTML = data.items.map(c => `
-        <tr onclick="openHistory(${c.id},'${escapeJsString(c.name)}',${c.invoices},${c.total_spent})">
-            <td class="name">${c.name}</td>
-            <td class="phone">${c.phone}</td>
-            <td style="font-size:12px">${c.email}</td>
-            <td class="mono" style="color:${c.discount_pct>0 ? "var(--warn)" : "var(--muted)"}">${c.discount_pct>0 ? c.discount_pct.toFixed(1) + "%" : "—"}</td>
-            <td style="font-size:12px">${c.address}</td>
-            <td style="font-family:var(--mono);color:var(--blue)">${c.invoices}</td>
-            <td class="mono">${c.total_spent.toFixed(2)}</td>
+        <tr onclick="openHistory(${c.id},'${escapeJsString(c.name)}',${Number(c.invoices || 0)},${Number(c.total_spent || 0)})">
+            <td class="name">${displayText(c.name)}</td>
+            <td class="phone">${displayText(c.phone)}</td>
+            <td style="font-size:12px">${displayText(c.email)}</td>
+            <td class="mono" style="color:${Number(c.discount_pct || 0)>0 ? "var(--warn)" : "var(--muted)"}">${Number(c.discount_pct || 0)>0 ? Number(c.discount_pct || 0).toFixed(1) + "%" : "-"}</td>
+            <td style="font-size:12px">${displayText(c.address)}</td>
+            <td style="font-family:var(--mono);color:var(--blue)">${Number(c.invoices || 0)}</td>
+            <td class="mono">${Number(c.total_spent || 0).toFixed(2)}</td>
             <td style="display:flex;gap:6px" onclick="event.stopPropagation()">
                 <a class="action-btn" href="/customers-mgmt/profile/${c.id}" style="text-decoration:none;display:inline-flex;align-items:center">Profile</a>
-                <button class="action-btn" onclick="openEditModal(${c.id},'${escapeJsString(c.name)}','${escapeJsString(c.phone)}','${escapeJsString(c.email)}','${escapeJsString(c.address)}',${c.discount_pct})">Edit</button>
+                <button class="action-btn" onclick="openEditModal(${c.id},'${escapeJsString(normalizeDash(c.name))}','${escapeJsString(normalizeDash(c.phone))}','${escapeJsString(normalizeDash(c.email))}','${escapeJsString(normalizeDash(c.address))}',${Number(c.discount_pct || 0)})">Edit</button>
                 <button class="action-btn danger" onclick="deleteCustomer(${c.id},'${escapeJsString(c.name)}')">Delete</button>
             </td>
         </tr>`).join("");
@@ -1366,7 +1408,7 @@ async function exportCSV(){
             c.total_spent.toFixed(2),
         ]);
 
-        const csv = [headers, ...rows].map(r => r.join(",")).join("\n");
+        const csv = [headers, ...rows].map(r => r.join(",")).join("\\n");
         const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
         const link = document.createElement("a");
         link.href  = URL.createObjectURL(blob);
@@ -1386,7 +1428,7 @@ async function exportCSV(){
 
 function csvCell(val) {
     const s = String(val ?? "");
-    return (s.includes(",") || s.includes('"') || s.includes("\n"))
+    return (s.includes(",") || s.includes('"') || s.includes("\\n"))
         ? `"${s.replace(/"/g, '""')}"` : s;
 }
 
@@ -1521,7 +1563,7 @@ function showToast(msg){
     toastTimer = setTimeout(()=>t.classList.remove("show"), 3000);
 }
 
-load();
+load().catch(handleLoadError);
 </script>
 </body>
 </html>
