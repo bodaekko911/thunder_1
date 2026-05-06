@@ -5,14 +5,16 @@ from sqlalchemy.orm import selectinload
 from sqlalchemy import func, select
 from typing import Optional, List
 from pydantic import BaseModel
-from datetime import date
+from datetime import date, datetime, timezone
 
 from app.database import get_async_session
 from app.core.permissions import get_current_user, require_permission
 from app.core.log import record
 from app.core.navigation import render_app_header
 from app.models.hr import Employee, Attendance, Payroll
+from app.models.farm import Farm
 from app.models.user import User
+from app.services.expense_service import create_payroll_expense
 
 ATTENDANCE_STATUS_PRESENT = "present"
 ATTENDANCE_STATUS_ABSENT = "absent"
@@ -34,6 +36,7 @@ class EmployeeCreate(BaseModel):
     department:  Optional[str]  = None
     hire_date:   Optional[str]  = None
     base_salary: float          = 0
+    farm_id:     Optional[int]  = None
 
 class EmployeeUpdate(BaseModel):
     name:        Optional[str]   = None
@@ -41,6 +44,7 @@ class EmployeeUpdate(BaseModel):
     position:    Optional[str]   = None
     department:  Optional[str]   = None
     base_salary: Optional[float] = None
+    farm_id:     Optional[int]   = None
     is_active:   Optional[bool]  = None
 
 class AttendanceCreate(BaseModel):
@@ -57,6 +61,9 @@ class PayrollUpdate(BaseModel):
     bonuses:    float = 0
     deductions: float = 0
     notes:      Optional[str] = None
+
+class PayrollPayRequest(BaseModel):
+    payment_method: Optional[str] = "cash"
 
 
 def _normalize_attendance_status(status: str) -> str:
@@ -120,10 +127,41 @@ async def _upsert_attendance_for_day(
     return attendance, False
 
 
+async def _get_active_farm_or_404(db: AsyncSession, farm_id: int | None) -> Farm | None:
+    if not farm_id:
+        return None
+    result = await db.execute(
+        select(Farm).where(Farm.id == farm_id, Farm.is_active == 1)
+    )
+    farm = result.scalar_one_or_none()
+    if not farm:
+        raise HTTPException(status_code=404, detail="Farm not found")
+    return farm
+
+
+def _employee_payload(employee: Employee) -> dict:
+    farm = getattr(employee, "farm", None)
+    return {
+        "id": employee.id,
+        "name": employee.name,
+        "phone": employee.phone or "—",
+        "position": employee.position or "—",
+        "department": employee.department or "—",
+        "hire_date": str(employee.hire_date) if employee.hire_date else "—",
+        "base_salary": float(employee.base_salary),
+        "is_active": employee.is_active,
+        "farm_id": employee.farm_id,
+        "farm_name": farm.name if farm else None,
+        "attendance_auto_status": _normalize_auto_attendance_status(
+            getattr(employee, "attendance_auto_status", None)
+        ),
+    }
+
+
 # ── EMPLOYEE API ───────────────────────────────────────
 @router.get("/api/employees")
 async def get_employees(q: str = "", db: AsyncSession = Depends(get_async_session)):
-    stmt = select(Employee).where(Employee.is_active == True)
+    stmt = select(Employee).options(selectinload(Employee.farm)).where(Employee.is_active == True)
     if q:
         stmt = stmt.where(
             Employee.name.ilike(f"%{q}%") |
@@ -133,51 +171,45 @@ async def get_employees(q: str = "", db: AsyncSession = Depends(get_async_sessio
     stmt = stmt.order_by(Employee.name)
     _r = await db.execute(stmt)
     emps = _r.scalars().all()
-    return [
-        {
-            "id":          e.id,
-            "name":        e.name,
-            "phone":       e.phone or "—",
-            "position":    e.position or "—",
-            "department":  e.department or "—",
-            "hire_date":   str(e.hire_date) if e.hire_date else "—",
-            "base_salary": float(e.base_salary),
-            "is_active":   e.is_active,
-            "attendance_auto_status": _normalize_auto_attendance_status(
-                getattr(e, "attendance_auto_status", None)
-            ),
-        }
-        for e in emps
-    ]
+    return [_employee_payload(e) for e in emps]
 
 @router.post("/api/employees")
 async def add_employee(data: EmployeeCreate, db: AsyncSession = Depends(get_async_session), current_user: User = Depends(get_current_user)):
     hire = date.fromisoformat(data.hire_date) if data.hire_date else None
+    farm = await _get_active_farm_or_404(db, data.farm_id)
     e = Employee(
         name=data.name, phone=data.phone,
         position=data.position, department=data.department,
         hire_date=hire, base_salary=data.base_salary,
+        farm_id=farm.id if farm else None,
     )
     db.add(e); await db.flush()
     record(db, "HR", "add_employee",
            f"Added employee: {e.name} — {e.position or ''} / {e.department or ''} — salary: {float(e.base_salary):.2f}",
            ref_type="employee", ref_id=e.id)
     await db.commit(); await db.refresh(e)
-    return {"id": e.id, "name": e.name}
+    if farm:
+        e.farm = farm
+    return _employee_payload(e)
 
 @router.put("/api/employees/{emp_id}")
 async def edit_employee(emp_id: int, data: EmployeeUpdate, db: AsyncSession = Depends(get_async_session), current_user: User = Depends(get_current_user)):
-    _r = await db.execute(select(Employee).where(Employee.id == emp_id))
+    _r = await db.execute(select(Employee).options(selectinload(Employee.farm)).where(Employee.id == emp_id))
     e = _r.scalar_one_or_none()
     if not e:
         raise HTTPException(status_code=404, detail="Employee not found")
-    for k, v in data.model_dump(exclude_unset=True).items():
+    payload = data.model_dump(exclude_unset=True)
+    if "farm_id" in payload:
+        farm = await _get_active_farm_or_404(db, payload["farm_id"])
+        payload["farm_id"] = farm.id if farm else None
+        e.farm = farm
+    for k, v in payload.items():
         setattr(e, k, v)
     record(db, "HR", "edit_employee",
            f"Edited employee: {e.name}",
            ref_type="employee", ref_id=emp_id)
     await db.commit()
-    return {"ok": True}
+    return {"ok": True, **_employee_payload(e)}
 
 @router.delete("/api/employees/{emp_id}")
 async def deactivate_employee(emp_id: int, db: AsyncSession = Depends(get_async_session), current_user: User = Depends(get_current_user)):
@@ -311,7 +343,7 @@ async def mark_present_today(data: AttendanceCreate, db: AsyncSession = Depends(
 # ── PAYROLL API ────────────────────────────────────────
 @router.get("/api/payroll")
 async def get_payroll(period: str = None, db: AsyncSession = Depends(get_async_session)):
-    stmt = select(Payroll).options(selectinload(Payroll.employee))
+    stmt = select(Payroll).options(selectinload(Payroll.employee).selectinload(Employee.farm))
     if period:
         stmt = stmt.where(Payroll.period == period)
     stmt = stmt.order_by(Payroll.period.desc(), Payroll.id)
@@ -322,6 +354,8 @@ async def get_payroll(period: str = None, db: AsyncSession = Depends(get_async_s
             "id":          r.id,
             "employee_id": r.employee_id,
             "employee":    r.employee.name if r.employee else "—",
+            "farm_id":     r.employee.farm_id if r.employee else None,
+            "farm_name":   r.employee.farm.name if r.employee and r.employee.farm else None,
             "period":      r.period,
             "base_salary": float(r.base_salary) if r.base_salary else 0,
             "days_worked": r.days_worked or 0,
@@ -500,19 +534,46 @@ async def update_payroll(payroll_id: int, data: PayrollUpdate, db: AsyncSession 
     return {"ok": True, "net_salary": float(p.net_salary)}
 
 @router.patch("/api/payroll/{payroll_id}/pay", dependencies=[Depends(require_permission("action_hr_mark_paid"))])
-async def mark_paid(payroll_id: int, db: AsyncSession = Depends(get_async_session), current_user: User = Depends(get_current_user)):
-    from datetime import datetime, timezone
-    _r = await db.execute(select(Payroll).where(Payroll.id == payroll_id))
+async def mark_paid(payroll_id: int, data: Optional[PayrollPayRequest] = None, db: AsyncSession = Depends(get_async_session), current_user: User = Depends(get_current_user)):
+    _r = await db.execute(
+        select(Payroll)
+        .options(selectinload(Payroll.employee).selectinload(Employee.farm))
+        .where(Payroll.id == payroll_id)
+    )
     p = _r.scalar_one_or_none()
     if not p:
         raise HTTPException(status_code=404, detail="Payroll record not found")
+    now = datetime.now(timezone.utc)
+    payment_method = (data.payment_method if data else "cash") or "cash"
+    expense = await create_payroll_expense(
+        db,
+        p,
+        current_user,
+        payment_method=payment_method,
+        paid_date=now.date(),
+    )
     p.paid    = True
-    p.paid_at = datetime.now(timezone.utc)
+    p.paid_at = now
     record(db, "HR", "mark_payroll_paid",
            f"Marked payroll #{payroll_id} as paid — net: {float(p.net_salary):.2f}",
-           ref_type="payroll", ref_id=payroll_id)
+           user=current_user, ref_type="payroll", ref_id=payroll_id)
     await db.commit()
-    return {"ok": True}
+    employee = p.employee
+    employee_farm = employee.farm if employee else None
+    expense_farm = getattr(expense, "farm", None)
+    response = {
+        "ok": True,
+        "payroll_id": p.id,
+        "expense_id": expense.id,
+        "expense_ref_number": expense.ref_number,
+        "category": expense.category.name if expense.category else "Salaries & Wages",
+        "farm_id": expense.farm_id,
+        "farm_name": expense_farm.name if expense_farm else (employee_farm.name if employee_farm and expense.farm_id == employee_farm.id else None),
+        "amount": float(expense.amount),
+    }
+    if expense.farm_id is None:
+        response["warning"] = "Employee has no farm assigned, so salary expense was not linked to a farm."
+    return response
 
 @router.get("/api/summary")
 async def hr_summary(db: AsyncSession = Depends(get_async_session)):
@@ -740,10 +801,11 @@ td.mono { font-family: var(--mono); color: var(--green); }
                 <input id="emp-search" placeholder="Search by name, position or department..." oninput="onEmpSearch()">
             </div>
         </div>
+        <div id="farm-load-error" style="display:none;margin-bottom:12px;padding:10px 12px;border:1px solid rgba(255,181,71,.25);border-radius:10px;background:rgba(255,181,71,.08);color:var(--warn);font-size:12px;font-weight:600"></div>
         <div class="table-wrap">
             <table>
-                <thead><tr><th>Name</th><th>Position</th><th>Department</th><th>Phone</th><th>Hire Date</th><th>Base Salary</th><th>Actions</th></tr></thead>
-                <tbody id="emp-body"><tr><td colspan="7" style="text-align:center;color:var(--muted);padding:40px">Loading...</td></tr></tbody>
+                <thead><tr><th>Name</th><th>Position</th><th>Department</th><th>Farm</th><th>Phone</th><th>Hire Date</th><th>Base Salary</th><th>Actions</th></tr></thead>
+                <tbody id="emp-body"><tr><td colspan="8" style="text-align:center;color:var(--muted);padding:40px">Loading...</td></tr></tbody>
             </table>
         </div>
     </div>
@@ -826,6 +888,7 @@ td.mono { font-family: var(--mono); color: var(--green); }
             <div class="fld span2"><label>Full Name *</label><input id="e-name" placeholder="Employee name"></div>
             <div class="fld"><label>Position</label><input id="e-position" placeholder="e.g. Cashier"></div>
             <div class="fld"><label>Department</label><input id="e-department" placeholder="e.g. Sales"></div>
+            <div class="fld"><label>Farm</label><select id="e-farm"><option value="">No farm selected</option></select></div>
             <div class="fld"><label>Phone</label><input id="e-phone" placeholder="+20 100 000 0000"></div>
             <div class="fld"><label>Hire Date</label><input id="e-hire" type="date"></div>
             <div class="fld span2"><label>Base Salary</label><input id="e-salary" type="number" placeholder="0.00" min="0"></div>
@@ -969,6 +1032,7 @@ async function logout(){
   initializeColorMode();
   initUser().then(u => { if(u) configureHRPermissions(u); });
   let employees    = [];
+let farms        = [];
 let editingEmpId = null;
 let editingPayId = null;
 let empSearchTimer = null;
@@ -1005,6 +1069,7 @@ async function init(){
     // Auto-mark all present today on page load
     await fetch("/hr/api/attendance/auto-today", {method:"POST"});
     await loadSummary();
+    await loadEmployeeFarms();
     await loadEmployees();
 }
 
@@ -1047,7 +1112,7 @@ async function loadEmployees(){
 
     if(!employees.length){
         document.getElementById("emp-body").innerHTML =
-            `<tr><td colspan="7" style="text-align:center;color:var(--muted);padding:40px">No employees found</td></tr>`;
+            `<tr><td colspan="8" style="text-align:center;color:var(--muted);padding:40px">No employees found</td></tr>`;
         return;
     }
 
@@ -1059,11 +1124,12 @@ async function loadEmployees(){
             <td class="name">${displayText(e.name)}</td>
             <td>${displayText(e.position)}</td>
             <td>${displayText(e.department)}</td>
+            <td>${displayText(e.farm_name)}</td>
             <td style="font-family:var(--mono);font-size:12px">${displayText(e.phone)}</td>
             <td style="font-size:12px;color:var(--muted)">${displayText(e.hire_date)}</td>
             <td class="mono">${money(salary)}</td>
             <td style="display:flex;gap:6px">
-                <button class="action-btn" onclick="openEditEmpFromButton(this)" data-id="${id}" data-name="${escapeHtml(normalizeDashFallback(e.name))}" data-position="${escapeHtml(normalizeDashFallback(e.position))}" data-department="${escapeHtml(normalizeDashFallback(e.department))}" data-phone="${escapeHtml(normalizeDashFallback(e.phone))}" data-salary="${salary}">Edit</button>
+                <button class="action-btn" onclick="openEditEmpFromButton(this)" data-id="${id}" data-name="${escapeHtml(normalizeDashFallback(e.name))}" data-position="${escapeHtml(normalizeDashFallback(e.position))}" data-department="${escapeHtml(normalizeDashFallback(e.department))}" data-phone="${escapeHtml(normalizeDashFallback(e.phone))}" data-salary="${salary}" data-farm-id="${e.farm_id || ""}">Edit</button>
                 ${hasPermission("action_hr_run_payroll")?`<button class="action-btn danger" onclick="deactivateEmployeeFromButton(this)" data-id="${id}" data-name="${escapeHtml(normalizeDashFallback(e.name))}">Remove</button>`:""}
             </td>
         </tr>`;
@@ -1077,7 +1143,8 @@ function openEditEmpFromButton(btn){
         btn.dataset.position || "",
         btn.dataset.department || "",
         btn.dataset.phone || "",
-        numberValue(btn.dataset.salary)
+        numberValue(btn.dataset.salary),
+        btn.dataset.farmId || ""
     );
 }
 
@@ -1090,10 +1157,11 @@ function openAddEmpModal(){
     document.getElementById("emp-modal-title").innerText = "Add Employee";
     ["e-name","e-position","e-department","e-phone","e-salary"].forEach(id=>document.getElementById(id).value="");
     document.getElementById("e-hire").value = "";
+    fillEmployeeFarmSelect("");
     document.getElementById("emp-modal").classList.add("open");
 }
 
-function openEditEmpModal(id,name,position,department,phone,salary){
+function openEditEmpModal(id,name,position,department,phone,salary,farmId){
     editingEmpId = id;
     document.getElementById("emp-modal-title").innerText = "Edit Employee";
     document.getElementById("e-name").value       = name;
@@ -1101,6 +1169,7 @@ function openEditEmpModal(id,name,position,department,phone,salary){
     document.getElementById("e-department").value = normalizeDashFallback(department);
     document.getElementById("e-phone").value      = normalizeDashFallback(phone);
     document.getElementById("e-salary").value     = salary;
+    fillEmployeeFarmSelect(farmId || "");
     document.getElementById("emp-modal").classList.add("open");
 }
 
@@ -1116,6 +1185,7 @@ async function saveEmployee(){
         phone:       document.getElementById("e-phone").value.trim()||null,
         hire_date:   document.getElementById("e-hire").value||null,
         base_salary: parseFloat(document.getElementById("e-salary").value)||0,
+        farm_id:     parseInt(document.getElementById("e-farm").value)||null,
     };
     let url    = editingEmpId ? `/hr/api/employees/${editingEmpId}` : "/hr/api/employees";
     let method = editingEmpId ? "PUT" : "POST";
@@ -1125,6 +1195,35 @@ async function saveEmployee(){
     closeEmpModal();
     showToast(editingEmpId?"Employee updated":"Employee added");
     loadEmployees(); loadSummary();
+}
+
+async function loadEmployeeFarms(){
+    const errorBox = document.getElementById("farm-load-error");
+    try{
+        let res = await fetch("/farm/api/farms");
+        if(!res.ok) throw new Error(`Farm API returned ${res.status}`);
+        let data = await res.json();
+        if(!Array.isArray(data)) throw new Error("Farm API returned an unexpected response");
+        farms = data;
+        if(errorBox){ errorBox.style.display = "none"; errorBox.innerText = ""; }
+        fillEmployeeFarmSelect("");
+    }catch(err){
+        farms = [];
+        if(errorBox){
+            errorBox.innerText = "Farm list could not be loaded. Employees can still be viewed, but farm selection is unavailable.";
+            errorBox.style.display = "";
+        }
+        fillEmployeeFarmSelect("");
+    }
+}
+
+function fillEmployeeFarmSelect(selectedFarmId){
+    const sel = document.getElementById("e-farm");
+    if(!sel) return;
+    const selected = String(selectedFarmId || "");
+    sel.innerHTML = `<option value="">No farm selected</option>` +
+        farms.map(f=>`<option value="${numberValue(f.id)}">${displayText(f.name || ("Farm #" + f.id))}</option>`).join("");
+    sel.value = selected;
 }
 
 async function deactivateEmployee(id,name){
@@ -1407,8 +1506,10 @@ async function savePayrollEdit(){
 
 async function markPaid(id){
     if(!confirm("Mark this payroll as paid?")) return;
-    await fetch(`/hr/api/payroll/${id}/pay`,{method:"PATCH"});
-    showToast("Marked as paid");
+    let res = await fetch(`/hr/api/payroll/${id}/pay`,{method:"PATCH"});
+    let data = await res.json();
+    if(data.detail){ showToast("Error: "+data.detail); return; }
+    showToast(data.warning || `Marked as paid - expense ${data.expense_ref_number || ""}`);
     loadPayrollRecords();
 }
 

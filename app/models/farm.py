@@ -16,6 +16,7 @@ class Farm(Base):
 
     deliveries   = relationship("FarmDelivery", back_populates="farm")
     weather_logs = relationship("WeatherLog", back_populates="farm")
+    employees    = relationship("Employee", back_populates="farm")
 
 
 class FarmDelivery(Base):

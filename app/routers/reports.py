@@ -22,8 +22,9 @@ from app.models.refund import RetailRefund
 from app.models.production import ProductionBatch, BatchInput, BatchOutput
 from app.models.accounting import Account, Journal, JournalEntry
 from app.models.receipt import ProductReceipt
-from app.models.expense import Expense
+from app.models.expense import Expense, ExpenseCategory
 from app.models.user import User
+from app.services.expense_service import SALARY_CATEGORY_NAME
 
 router = APIRouter(
     prefix="/reports",
@@ -1061,9 +1062,26 @@ async def _build_farm_intake_report(
     deliveries = delivery_res.scalars().all()
     farm_summary = {}
     detail_rows = []
+
+    def get_summary(farm_id: int, farm_name: str) -> dict:
+        return farm_summary.setdefault(
+            farm_id,
+            {
+                "farm_id": farm_id,
+                "farm": farm_name,
+                "delivery_count": 0,
+                "line_count": 0,
+                "total_qty": 0.0,
+                "products": defaultdict(float),
+                "salary_cost": 0.0,
+                "labor_cost": 0.0,
+                "expense_count": 0,
+            },
+        )
+
     for delivery in deliveries:
         farm_name = delivery.farm.name if delivery.farm and delivery.farm.name else f"Farm {delivery.farm_id}"
-        summary = farm_summary.setdefault(farm_name, {"farm": farm_name, "delivery_count": 0, "line_count": 0, "total_qty": 0.0, "products": defaultdict(float)})
+        summary = get_summary(delivery.farm_id, farm_name)
         summary["delivery_count"] += 1
         for item in delivery.items:
             product = item.product
@@ -1086,18 +1104,41 @@ async def _build_farm_intake_report(
                 "user_name": delivery.user.name if delivery.user else "—",
                 "notes": item.notes or delivery.notes or "",
             })
+    salary_res = await db.execute(
+        select(Expense)
+        .join(ExpenseCategory, Expense.category_id == ExpenseCategory.id)
+        .options(selectinload(Expense.farm))
+        .where(
+            ExpenseCategory.name == SALARY_CATEGORY_NAME,
+            Expense.farm_id.is_not(None),
+            Expense.expense_date >= d_from.date(),
+            Expense.expense_date <= d_to.date(),
+        )
+    )
+    for expense in salary_res.scalars().all():
+        farm_name = expense.farm.name if expense.farm and expense.farm.name else f"Farm {expense.farm_id}"
+        summary = get_summary(expense.farm_id, farm_name)
+        amount = _num(expense.amount)
+        # Salary & Wages is exposed as labor cost here; it is not added to harvest quantity totals.
+        summary["salary_cost"] += amount
+        summary["labor_cost"] += amount
+        summary["expense_count"] += 1
+
     summary_rows = []
-    for farm_name, summary in sorted(farm_summary.items()):
+    for _farm_id, summary in sorted(farm_summary.items(), key=lambda item: item[1]["farm"]):
         top_product = ""
         if summary["products"]:
             top_key, top_qty = max(summary["products"].items(), key=lambda x: x[1])
             _, top_name, top_unit = top_key.split("|")
             top_product = f"{top_name} ({round(top_qty, 2)} {top_unit})"
         summary_rows.append({
-            "farm": farm_name,
+            "farm": summary["farm"],
             "delivery_count": summary["delivery_count"],
             "line_count": summary["line_count"],
             "total_qty": round(summary["total_qty"], 2),
+            "salary_cost": round(summary["salary_cost"], 2),
+            "labor_cost": round(summary["labor_cost"], 2),
+            "expense_count": summary["expense_count"],
             "top_product": top_product or "—",
         })
     return {
@@ -1109,6 +1150,9 @@ async def _build_farm_intake_report(
             "delivery_count": len(deliveries),
             "line_count": len(detail_rows),
             "total_qty": round(sum(r["qty"] for r in detail_rows), 2),
+            "salary_cost": round(sum(r["salary_cost"] for r in summary_rows), 2),
+            "labor_cost": round(sum(r["labor_cost"] for r in summary_rows), 2),
+            "salary_expense_count": sum(r["expense_count"] for r in summary_rows),
             "farm_count": len(summary_rows),
         },
     }
@@ -1171,16 +1215,17 @@ async def export_farm(date_from: str = None, date_to: str = None, db: AsyncSessi
         {
             "sheet_name": "Farm Intake Summary",
             "report_title": "Farm Intake Summary",
-            "headers": ["Farm", "Deliveries", "Line Items", "Total Qty", "Top Product"],
-            "rows": [[row["farm"], row["delivery_count"], row["line_count"], row["total_qty"], row["top_product"]] for row in data["summary"]],
+            "headers": ["Farm", "Deliveries", "Line Items", "Total Qty", "Salary & Wages", "Labor Cost", "Top Product"],
+            "rows": [[row["farm"], row["delivery_count"], row["line_count"], row["total_qty"], row["salary_cost"], row["labor_cost"], row["top_product"]] for row in data["summary"]],
             "metadata": [
                 ("Date Range", f"{data['date_from']} to {data['date_to']}"),
                 ("Farms", data["totals"]["farm_count"]),
                 ("Deliveries", data["totals"]["delivery_count"]),
                 ("Line Items", data["totals"]["line_count"]),
                 ("Total Qty", data["totals"]["total_qty"]),
+                ("Salary & Wages", data["totals"]["salary_cost"]),
             ],
-            "column_formats": {"Deliveries": "int", "Line Items": "int", "Total Qty": "qty"},
+            "column_formats": {"Deliveries": "int", "Line Items": "int", "Total Qty": "qty", "Salary & Wages": "money", "Labor Cost": "money"},
             "tab_color": "70AD47",
         },
         {
@@ -3014,9 +3059,11 @@ async function loadFarm(){
             <td class="mono">${row.delivery_count}</td>
             <td class="mono">${row.line_count}</td>
             <td class="mono" style="color:var(--green)">${row.total_qty.toFixed(2)}</td>
+            <td class="mono" style="color:var(--orange)">${Number(row.salary_cost || 0).toFixed(2)}</td>
+            <td class="mono" style="color:var(--orange)">${Number(row.labor_cost || 0).toFixed(2)}</td>
             <td>${row.top_product}</td>
           </tr>`).join("")
-        : `<tr><td colspan="5" style="text-align:center;color:var(--muted);padding:24px">No farm intake summary in this period</td></tr>`;
+        : `<tr><td colspan="7" style="text-align:center;color:var(--muted);padding:24px">No farm intake summary in this period</td></tr>`;
     const detailRows = data.detail.length
         ? data.detail.map(row=>`<tr>
             <td class="name">${row.farm}</td>
@@ -3036,10 +3083,11 @@ async function loadFarm(){
             <div class="stat-card sc-green"><div class="stat-label">Deliveries</div><div class="stat-value sv-green">${data.totals.delivery_count}</div></div>
             <div class="stat-card sc-orange"><div class="stat-label">Line Items</div><div class="stat-value sv-orange">${data.totals.line_count}</div></div>
             <div class="stat-card sc-green"><div class="stat-label">Total Qty</div><div class="stat-value sv-green">${data.totals.total_qty.toFixed(2)}</div></div>
+            <div class="stat-card sc-orange"><div class="stat-label">Salary & Wages</div><div class="stat-value sv-orange">${Number(data.totals.salary_cost || 0).toFixed(2)}</div></div>
         </div>
         <div class="table-wrap" style="margin-bottom:18px">
             <div class="table-title">Farm Intake Summary</div>
-            <table><thead><tr><th>Farm</th><th>Deliveries</th><th>Line Items</th><th>Total Qty</th><th>Top Product</th></tr></thead><tbody>${summaryRows}</tbody></table>
+            <table><thead><tr><th>Farm</th><th>Deliveries</th><th>Line Items</th><th>Total Qty</th><th>Salary & Wages</th><th>Labor Cost</th><th>Top Product</th></tr></thead><tbody>${summaryRows}</tbody></table>
         </div>
         <div class="table-wrap">
             <div class="table-title">Farm Intake Detail</div>

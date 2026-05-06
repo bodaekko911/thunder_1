@@ -14,12 +14,14 @@ class Employee(Base):
     department  = Column(String(100))
     hire_date   = Column(Date)
     base_salary = Column(Numeric(12, 2), default=0)
+    farm_id     = Column(Integer, ForeignKey("farms.id"), nullable=True, index=True)
     is_active   = Column(Boolean, default=True)
     attendance_auto_status = Column(String(20), nullable=False, default="present", server_default="present")
     created_at  = Column(DateTime(timezone=True), server_default=func.now())
 
     attendance = relationship("Attendance", back_populates="employee")
     payrolls   = relationship("Payroll", back_populates="employee")
+    farm       = relationship("Farm", back_populates="employees")
 
 
 class Attendance(Base):

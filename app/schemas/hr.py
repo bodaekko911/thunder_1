@@ -9,6 +9,7 @@ class EmployeeCreate(BaseModel):
     department:  Optional[str] = Field(None, max_length=150)
     hire_date:   Optional[str] = None
     base_salary: float = Field(0, ge=0)
+    farm_id:     Optional[int] = None
 
 
 class EmployeeUpdate(BaseModel):
@@ -17,6 +18,7 @@ class EmployeeUpdate(BaseModel):
     position:    Optional[str] = Field(None, max_length=150)
     department:  Optional[str] = Field(None, max_length=150)
     base_salary: Optional[float] = Field(None, ge=0)
+    farm_id:     Optional[int] = None
     is_active:   Optional[bool] = None
 
 

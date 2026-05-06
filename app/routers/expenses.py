@@ -947,6 +947,7 @@ nav {
                         <tr>
                             <th>Ref</th>
                             <th>Category</th>
+                            <th>Farm</th>
                             <th>Date</th>
                             <th>Vendor</th>
                             <th>Method</th>
@@ -955,7 +956,7 @@ nav {
                         </tr>
                     </thead>
                     <tbody id="exp-tbody">
-                        <tr class="empty-row"><td colspan="7">Loading…</td></tr>
+                        <tr class="empty-row"><td colspan="8">Loading…</td></tr>
                     </tbody>
                 </table>
             </div>
@@ -1304,7 +1305,7 @@ async function loadExpenses() {
     if (dateTo) params.set("date_to", dateTo);
     const url = `/expenses/api/list${params.toString() ? "?" + params.toString() : ""}`;
     const tbody = document.getElementById("exp-tbody");
-    tbody.innerHTML = `<tr class="empty-row"><td colspan="7">Loading…</td></tr>`;
+    tbody.innerHTML = `<tr class="empty-row"><td colspan="8">Loading…</td></tr>`;
     try {
         const response = await fetch(url);
         const body = await response.text();
@@ -1313,7 +1314,7 @@ async function loadExpenses() {
             data = body ? JSON.parse(body) : null;
         } catch(parseErr) {
             console.error("Failed to parse expenses JSON", { url, status: response.status, body });
-            tbody.innerHTML = `<tr class="empty-row"><td colspan="7">Could not load expenses (${response.status}): response was not valid JSON.</td></tr>`;
+            tbody.innerHTML = `<tr class="empty-row"><td colspan="8">Could not load expenses (${response.status}): response was not valid JSON.</td></tr>`;
             return;
         }
         if (!response.ok) {
@@ -1325,7 +1326,7 @@ async function loadExpenses() {
                 body,
                 data
             });
-            tbody.innerHTML = `<tr class="empty-row"><td colspan="7">Could not load expenses (${response.status}): ${escapeHtml(String(message))}</td></tr>`;
+            tbody.innerHTML = `<tr class="empty-row"><td colspan="8">Could not load expenses (${response.status}): ${escapeHtml(String(message))}</td></tr>`;
             return;
         }
         console.log("Loading expenses page data: expenses response", {
@@ -1334,7 +1335,7 @@ async function loadExpenses() {
         });
         if (!Array.isArray(data)) {
             console.error("Expenses API returned non-array JSON", { url, status: response.status, data });
-            tbody.innerHTML = `<tr class="empty-row"><td colspan="7">Could not load expenses: API returned an unexpected response shape.</td></tr>`;
+            tbody.innerHTML = `<tr class="empty-row"><td colspan="8">Could not load expenses: API returned an unexpected response shape.</td></tr>`;
             return;
         }
         console.debug("Loaded expenses", {
@@ -1344,7 +1345,7 @@ async function loadExpenses() {
             firstRow: data[0] || null
         });
         if (!data.length) {
-            tbody.innerHTML = `<tr class="empty-row"><td colspan="7">No expenses found in this database.</td></tr>`;
+            tbody.innerHTML = `<tr class="empty-row"><td colspan="8">No expenses found in this database.</td></tr>`;
             return;
         }
         tbody.innerHTML = data.map(e => {
@@ -1356,6 +1357,7 @@ async function loadExpenses() {
             const category = e.category || "—";
             const expenseDate = e.expense_date || "—";
             const vendor = e.vendor || "";
+            const farmName = e.farm_name || "-";
             const farmBadge = e.farm_name ? ` <span style="font-size:10px;padding:1px 7px;border-radius:10px;background:rgba(132,204,22,.1);color:#84cc16;font-weight:700">${escapeHtml(String(e.farm_name))}</span>` : "";
             const rowJson = JSON.stringify(e).replace(/"/g,'&quot;');
             return `
@@ -1365,6 +1367,7 @@ async function loadExpenses() {
                     <div class="exp-cat">${escapeHtml(String(category))}</div>
                     <div class="exp-vendor">${escapeHtml(String(vendor))}${farmBadge}</div>
                 </td>
+                <td><div class="exp-vendor">${escapeHtml(String(farmName))}</div></td>
                 <td><div class="exp-date">${escapeHtml(String(expenseDate))}</div></td>
                 <td><div class="exp-vendor">${escapeHtml(String(vendor || "—"))}</div></td>
                 <td><span class="method-pill method-${methodClass}">${escapeHtml(paymentMethod.replace(/_/g, " "))}</span></td>
@@ -1380,7 +1383,7 @@ async function loadExpenses() {
         }).join("");
     } catch(err) {
         console.error("Failed to load expenses", err);
-        tbody.innerHTML = `<tr class="empty-row"><td colspan="7">Could not load expenses. Check the console for details.</td></tr>`;
+        tbody.innerHTML = `<tr class="empty-row"><td colspan="8">Could not load expenses. Check the console for details.</td></tr>`;
     }
 }
 

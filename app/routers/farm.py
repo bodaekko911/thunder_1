@@ -1522,6 +1522,8 @@ async function loadSeasonAnalysis(){
             showToast("Error: " + getErrorMessage(data));
             return;
         }
+        const costCategories = Array.isArray(data.cost_by_category) ? data.cost_by_category : [];
+        const products = Array.isArray(data.products) ? data.products : [];
 
         document.getElementById("season-empty").style.display  = "none";
         document.getElementById("season-result").style.display = "";
@@ -1529,19 +1531,21 @@ async function loadSeasonAnalysis(){
         // Summary cards
         document.getElementById("season-summary-cards").innerHTML = `
             <div class="stat-card" style="border-top:2px solid var(--blue)"><div class="stat-label">Scope</div><div class="stat-value" style="font-size:20px;color:var(--blue)">${data.farm_scope_label || data.farm_name}</div></div>
-            <div class="stat-card green"><div class="stat-label">Total Farm Costs</div><div class="stat-value green" style="font-size:20px">${data.total_cost.toLocaleString(undefined,{minimumFractionDigits:2})} EGP</div></div>
-            <div class="stat-card lime"><div class="stat-label">Total Harvested</div><div class="stat-value lime" style="font-size:20px">${data.total_qty.toFixed(1)} units</div></div>
-            <div class="stat-card teal"><div class="stat-label">Expenses Tagged</div><div class="stat-value teal" style="font-size:20px">${data.expense_count}</div></div>
-            <div class="stat-card" style="border-top:2px solid var(--orange)"><div class="stat-label">Deliveries</div><div class="stat-value" style="font-size:20px;color:var(--orange)">${data.delivery_count}</div></div>
+            <div class="stat-card green"><div class="stat-label">Total Farm Costs</div><div class="stat-value green" style="font-size:20px">${Number(data.total_cost || 0).toLocaleString(undefined,{minimumFractionDigits:2})} EGP</div></div>
+            <div class="stat-card" style="border-top:2px solid var(--orange)"><div class="stat-label">Salary & Wages</div><div class="stat-value" style="font-size:20px;color:var(--orange)">${Number(data.salary_cost || 0).toLocaleString(undefined,{minimumFractionDigits:2})} EGP</div></div>
+            <div class="stat-card" style="border-top:2px solid var(--warn)"><div class="stat-label">Labor Cost</div><div class="stat-value" style="font-size:20px;color:var(--warn)">${Number(data.labor_cost || 0).toLocaleString(undefined,{minimumFractionDigits:2})} EGP</div></div>
+            <div class="stat-card lime"><div class="stat-label">Total Harvested</div><div class="stat-value lime" style="font-size:20px">${Number(data.total_qty || 0).toFixed(1)} units</div></div>
+            <div class="stat-card teal"><div class="stat-label">Expenses Tagged</div><div class="stat-value teal" style="font-size:20px">${Number(data.expense_count || 0)}</div></div>
+            <div class="stat-card" style="border-top:2px solid var(--orange)"><div class="stat-label">Deliveries</div><div class="stat-value" style="font-size:20px;color:var(--orange)">${Number(data.delivery_count || 0)}</div></div>
         `;
 
         // Cost breakdown chart
-        let maxCost = data.cost_by_category.length ? data.cost_by_category[0].amount : 1;
+        let maxCost = costCategories.length ? costCategories[0].amount : 1;
         document.getElementById("season-cost-breakdown").innerHTML = `
             <div class="history-title">Cost Breakdown by Category</div>
-            ${data.cost_by_category.length === 0
+            ${costCategories.length === 0
                 ? `<div style="color:var(--muted);font-size:13px">No expenses tagged to ${data.farm_scope_label || data.farm_name} for this period.<br>Go to <a href="/expenses/" style="color:var(--lime)">Expenses</a> and tag expenses to the relevant farm.</div>`
-                : data.cost_by_category.map(c=>`
+                : costCategories.map(c=>`
                     <div class="history-bar-row">
                         <div class="history-bar-label">${c.name}</div>
                         <div class="history-bar-track"><div class="history-bar-fill" style="width:${(c.amount/maxCost*100).toFixed(1)}%;background:linear-gradient(90deg,var(--orange),var(--warn))"></div></div>
@@ -1550,12 +1554,12 @@ async function loadSeasonAnalysis(){
         `;
 
         // Product harvest chart
-        let maxQty = data.products.length ? data.products[0].total_qty : 1;
+        let maxQty = products.length ? products[0].total_qty : 1;
         document.getElementById("season-product-chart").innerHTML = `
             <div class="history-title">Harvest by Product</div>
-            ${data.products.length === 0
+            ${products.length === 0
                 ? `<div style="color:var(--muted);font-size:13px">No deliveries from ${data.farm_scope_label || data.farm_name} in this period.</div>`
-                : data.products.map(p=>`
+                : products.map(p=>`
                     <div class="history-bar-row">
                         <div class="history-bar-label">${p.product_name}</div>
                         <div class="history-bar-track"><div class="history-bar-fill" style="width:${(p.total_qty/maxQty*100).toFixed(1)}%;background:linear-gradient(90deg,var(--lime),var(--green))"></div></div>
@@ -1564,11 +1568,11 @@ async function loadSeasonAnalysis(){
         `;
 
         // Products table
-        if(!data.products.length){
+        if(!products.length){
             document.getElementById("season-body").innerHTML =
                 `<tr><td colspan="8" style="text-align:center;color:var(--muted);padding:40px">No deliveries recorded for ${data.farm_scope_label || data.farm_name} in this period.</td></tr>`;
         } else {
-            document.getElementById("season-body").innerHTML = data.products.map(p=>{
+            document.getElementById("season-body").innerHTML = products.map(p=>{
                 let marginColor = p.profit_margin_pct >= 30 ? "var(--green)" : p.profit_margin_pct >= 0 ? "var(--warn)" : "var(--danger)";
                 let profitColor = p.profit_per_unit >= 0 ? "var(--green)" : "var(--danger)";
                 return `<tr>

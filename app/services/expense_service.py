@@ -4,7 +4,7 @@ from decimal import Decimal
 from typing import Optional
 
 from fastapi import HTTPException
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -14,6 +14,9 @@ from app.models.expense import Expense, ExpenseCategory
 from app.models.farm import Farm, FarmDelivery, FarmDeliveryItem
 from app.models.user import User
 from app.schemas.expense import ExpenseCategoryCreate, ExpenseCreate, ExpenseUpdate
+
+SALARY_CATEGORY_NAME = "Salaries & Wages"
+SALARY_ACCOUNT_CODE = "5006"
 
 
 def _clean_text(value: Optional[str]) -> Optional[str]:
@@ -145,24 +148,24 @@ async def _get_active_category(db: AsyncSession, category_id: int) -> ExpenseCat
 async def _get_or_create_salary_category(db: AsyncSession) -> ExpenseCategory:
     account = await _get_or_create_account(
         db,
-        "5006",
-        account_name="Salaries & Wages",
+        SALARY_ACCOUNT_CODE,
+        account_name=SALARY_CATEGORY_NAME,
     )
     account.type = "expense"
-    account.name = account.name or "Salaries & Wages"
+    account.name = account.name or SALARY_CATEGORY_NAME
 
     result = await db.execute(
-        select(ExpenseCategory).where(ExpenseCategory.name == "Salaries & Wages")
+        select(ExpenseCategory).where(ExpenseCategory.name == SALARY_CATEGORY_NAME)
     )
     category = result.scalar_one_or_none()
     if category:
-        category.account_code = "5006"
+        category.account_code = SALARY_ACCOUNT_CODE
         category.is_active = "1"
         return category
 
     category = ExpenseCategory(
-        name="Salaries & Wages",
-        account_code="5006",
+        name=SALARY_CATEGORY_NAME,
+        account_code=SALARY_ACCOUNT_CODE,
         description="Payroll salary payments",
         is_active="1",
     )
@@ -419,7 +422,7 @@ async def create_payroll_expense(
 
     existing_result = await db.execute(
         select(Expense)
-        .options(selectinload(Expense.category))
+        .options(selectinload(Expense.category), selectinload(Expense.farm))
         .where(Expense.payroll_id == payroll.id)
     )
     existing = existing_result.scalar_one_or_none()
@@ -429,6 +432,7 @@ async def create_payroll_expense(
     category = await _get_or_create_salary_category(db)
     employee = getattr(payroll, "employee", None)
     employee_name = getattr(employee, "name", None) or f"Employee #{payroll.employee_id}"
+    farm_id = getattr(employee, "farm_id", None) or None
     payment_date = paid_date or date_type.today()
     reference_number = await _next_expense_reference(db)
     description = f"Salary payment - {employee_name} - {payroll.period} - payroll #{payroll.id}"
@@ -445,6 +449,7 @@ async def create_payroll_expense(
     expense = Expense(
         ref_number=reference_number,
         category_id=category.id,
+        category=category,
         user_id=current_user.id,
         expense_date=payment_date,
         amount=amount,
@@ -453,6 +458,7 @@ async def create_payroll_expense(
         description=description,
         journal_id=journal.id,
         payroll_id=payroll.id,
+        farm_id=farm_id,
     )
     db.add(expense)
     await db.flush()
@@ -460,7 +466,7 @@ async def create_payroll_expense(
         db,
         "Expenses",
         "add_payroll_expense",
-        f"Salaries & Wages - {reference_number} - {amount:.2f} - payroll #{payroll.id}",
+        f"{SALARY_CATEGORY_NAME} - {reference_number} - {amount:.2f} - payroll #{payroll.id}",
         user=current_user,
         ref_type="expense",
         ref_id=expense.id or 0,
@@ -581,6 +587,7 @@ async def get_cost_allocation(
     farm_selector = str(farm_id).strip().lower()
     selected_farm_ids: list[int]
     farm_scope_label: str
+    include_unassigned_salary = False
     if farm_selector == "both":
         farms_result = await db.execute(
             select(Farm).where(Farm.is_active == 1).order_by(Farm.name)
@@ -590,6 +597,7 @@ async def get_cost_allocation(
             raise HTTPException(status_code=404, detail="No active farms found")
         selected_farm_ids = [farm.id for farm in farms]
         farm_scope_label = "Both Farms"
+        include_unassigned_salary = True
     else:
         try:
             single_farm_id = int(farm_selector)
@@ -603,11 +611,19 @@ async def get_cost_allocation(
         selected_farm_ids = [farm.id]
         farm_scope_label = farm.name
 
+    expense_scope = Expense.farm_id.in_(selected_farm_ids)
+    if include_unassigned_salary:
+        expense_scope = or_(
+            expense_scope,
+            (Expense.farm_id.is_(None)) & (ExpenseCategory.name == SALARY_CATEGORY_NAME),
+        )
+
     expenses_result = await db.execute(
         select(Expense)
+        .join(ExpenseCategory, Expense.category_id == ExpenseCategory.id)
         .options(selectinload(Expense.category))
         .where(
-            Expense.farm_id.in_(selected_farm_ids),
+            expense_scope,
             Expense.expense_date >= start_date,
             Expense.expense_date <= end_date,
         )
@@ -616,9 +632,16 @@ async def get_cost_allocation(
     total_cost = sum(float(expense.amount) for expense in expenses)
 
     cost_by_category: dict[str, float] = {}
+    salary_cost = 0.0
+    unassigned_salary_cost = 0.0
     for expense in expenses:
         category_name = expense.category.name if expense.category else "Other"
-        cost_by_category[category_name] = cost_by_category.get(category_name, 0) + float(expense.amount)
+        amount = float(expense.amount)
+        cost_by_category[category_name] = cost_by_category.get(category_name, 0) + amount
+        if category_name == SALARY_CATEGORY_NAME:
+            salary_cost += amount
+            if expense.farm_id is None:
+                unassigned_salary_cost += amount
 
     deliveries_result = await db.execute(
         select(FarmDelivery)
@@ -646,9 +669,13 @@ async def get_cost_allocation(
             quantity_by_product[item.product_id]["total_qty"] += float(item.qty)
 
     total_quantity = sum(item["total_qty"] for item in quantity_by_product.values())
+    estimated_revenue = sum(
+        info["total_qty"] * info["sale_price"] for info in quantity_by_product.values()
+    )
     products = []
     for product_id, info in quantity_by_product.items():
         share = info["total_qty"] / total_quantity if total_quantity > 0 else 0
+        # Salary & Wages expenses are already included in total_cost above; do not add them again.
         allocated_cost = total_cost * share
         cost_per_unit = allocated_cost / info["total_qty"] if info["total_qty"] > 0 else 0
         profit_per_unit = info["sale_price"] - cost_per_unit
@@ -679,6 +706,12 @@ async def get_cost_allocation(
         "date_from": date_from,
         "date_to": date_to,
         "total_cost": round(total_cost, 2),
+        "total_expenses": round(total_cost, 2),
+        "salary_cost": round(salary_cost, 2),
+        "labor_cost": round(salary_cost, 2),
+        "unassigned_salary_cost": round(unassigned_salary_cost, 2),
+        "estimated_revenue": round(estimated_revenue, 2),
+        "net_profit": round(estimated_revenue - total_cost, 2),
         "total_qty": round(total_quantity, 3),
         "cost_by_category": [
             {"name": name, "amount": round(amount, 2)}
