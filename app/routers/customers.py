@@ -1366,7 +1366,7 @@ async function exportCSV(){
             c.total_spent.toFixed(2),
         ]);
 
-        const csv = [headers, ...rows].map(r => r.join(",")).join("\n");
+        const csv = [headers, ...rows].map(r => r.join(",")).join("\\n");
         const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
         const link = document.createElement("a");
         link.href  = URL.createObjectURL(blob);
@@ -1386,7 +1386,7 @@ async function exportCSV(){
 
 function csvCell(val) {
     const s = String(val ?? "");
-    return (s.includes(",") || s.includes('"') || s.includes("\n"))
+    return (s.includes(",") || s.includes('"') || s.includes("\\n"))
         ? `"${s.replace(/"/g, '""')}"` : s;
 }
 
