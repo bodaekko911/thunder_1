@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import HTMLResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
-from sqlalchemy import func, select, asc, desc, asc, desc
+from sqlalchemy import func, select, asc, desc
 
 from app.database import get_async_session
 from app.core.permissions import get_current_user, require_permission
@@ -52,7 +52,7 @@ async def get_customers(
         .correlate(Customer)
         .scalar_subquery()
     )
-    net_spent_expr = func.max(inv_total_sq - ref_total_sq, 0)
+    net_spent_expr = func.greatest(inv_total_sq - ref_total_sq, 0)
 
     SORT_EXPRS = {
         "name":         Customer.name,
