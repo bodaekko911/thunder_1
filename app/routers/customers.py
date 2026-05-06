@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import HTMLResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
-from sqlalchemy import func, select
+from sqlalchemy import func, select, asc, desc, asc, desc
 
 from app.database import get_async_session
 from app.core.permissions import get_current_user, require_permission
@@ -26,11 +26,22 @@ router = APIRouter(
 # ── API ────────────────────────────────────────────────
 @router.get("/api/list")
 async def get_customers(
-    q:     str = "",
-    skip:  int = 0,
-    limit: int = 50,
+    q:        str = "",
+    skip:     int = 0,
+    limit:    int = 50,
+    sort_by:  str = "name",
+    sort_dir: str = "asc",
     db: AsyncSession = Depends(get_async_session),
 ):
+    # Columns sortable directly in SQL (on the Customer model)
+    SQL_SORT_COLUMNS = {
+        "name":         Customer.name,
+        "discount_pct": Customer.discount_pct,
+        "created_at":   Customer.created_at,
+    }
+    # Columns computed per-row — sorted in Python after fetching
+    PYTHON_SORT_COLUMNS = {"invoices", "total_spent"}
+
     conditions = []
     if q:
         conditions.append(
@@ -44,9 +55,21 @@ async def get_customers(
     )
     total = cnt_result.scalar()
 
-    cust_result = await db.execute(
-        select(Customer).where(*conditions).order_by(Customer.name).offset(skip).limit(limit)
-    )
+    # Build ORDER BY — SQL for model columns, Python sort for computed ones
+    if sort_by in SQL_SORT_COLUMNS:
+        sort_col = SQL_SORT_COLUMNS[sort_by]
+        order_clause = desc(sort_col) if sort_dir == "desc" else asc(sort_col)
+    else:
+        order_clause = asc(Customer.name)  # stable secondary sort
+
+    # Computed-column sorts need all matching rows before slicing
+    fetch_all = sort_by in PYTHON_SORT_COLUMNS
+
+    query = select(Customer).where(*conditions).order_by(order_clause)
+    if not fetch_all:
+        query = query.offset(skip).limit(limit)
+
+    cust_result = await db.execute(query)
     items = cust_result.scalars().all()
 
     result = []
@@ -79,6 +102,12 @@ async def get_customers(
             "total_spent": max(0.0, float(inv_total) - float(ref_total)),
             "ref_total":   float(ref_total),
         })
+
+    # Python-side sort + slice for computed columns
+    if sort_by in PYTHON_SORT_COLUMNS:
+        reverse = sort_dir == "desc"
+        result.sort(key=lambda x: x[sort_by], reverse=reverse)
+        result = result[skip: skip + limit]
 
     return {"total": total, "items": result}
 
@@ -882,6 +911,23 @@ td.phone { font-family: var(--mono); font-size: 12px; }
 
 ::-webkit-scrollbar { width: 4px; }
 ::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 4px; }
+th.sortable {
+    cursor: pointer;
+    user-select: none;
+    white-space: nowrap;
+    transition: color .15s;
+}
+th.sortable:hover { color: var(--text); }
+th.sortable.active { color: var(--green); }
+.sort-arrow {
+    display: inline-block;
+    margin-left: 5px;
+    font-size: 10px;
+    opacity: 0.5;
+    transition: opacity .15s, transform .15s;
+}
+th.sortable.active .sort-arrow { opacity: 1; }
+th.sortable.active.desc .sort-arrow { transform: rotate(180deg); }
 </style>
     <script src="/static/auth-guard.js"></script>
 </head>
@@ -909,14 +955,14 @@ td.phone { font-family: var(--mono); font-size: 12px; }
     <div class="table-wrap">
         <table>
             <thead>
-                <tr>
-                    <th>Name</th>
+                <tr id="table-head">
+                    <th class="sortable active" data-col="name" onclick="setSort('name')">Name <span class="sort-arrow">▲</span></th>
                     <th>Phone</th>
                     <th>Email</th>
-                    <th>Discount</th>
+                    <th class="sortable" data-col="discount_pct" onclick="setSort('discount_pct')">Discount <span class="sort-arrow">▲</span></th>
                     <th>Address</th>
-                    <th>Invoices</th>
-                    <th>Total Spent</th>
+                    <th class="sortable" data-col="invoices" onclick="setSort('invoices')">Invoices <span class="sort-arrow">▲</span></th>
+                    <th class="sortable" data-col="total_spent" onclick="setSort('total_spent')">Total Spent <span class="sort-arrow">▲</span></th>
                     <th>Actions</th>
                 </tr>
             </thead>
@@ -1046,6 +1092,25 @@ let pageSize    = 50;
 let totalItems  = 0;
 let searchTimer = null;
 let editingId   = null;
+let sortBy      = "name";
+let sortDir     = "asc";
+
+function setSort(col) {
+    if (sortBy === col) {
+        sortDir = sortDir === "asc" ? "desc" : "asc";
+    } else {
+        sortBy  = col;
+        sortDir = "asc";
+    }
+    // Update header visual state
+    document.querySelectorAll("th.sortable").forEach(th => {
+        const isActive = th.dataset.col === sortBy;
+        th.classList.toggle("active", isActive);
+        th.classList.toggle("desc", isActive && sortDir === "desc");
+    });
+    currentPage = 0;
+    load();
+}
 
 function escapeJsString(value){
     const text = String(value == null ? "" : value);
@@ -1062,7 +1127,7 @@ function escapeJsString(value){
 
 async function load(){
     let q   = document.getElementById("search").value.trim();
-    let url = `/customers-mgmt/api/list?skip=${currentPage*pageSize}&limit=${pageSize}`;
+    let url = `/customers-mgmt/api/list?skip=${currentPage*pageSize}&limit=${pageSize}&sort_by=${sortBy}&sort_dir=${sortDir}`;
     if(q) url += `&q=${encodeURIComponent(q)}`;
 
     let data = await (await fetch(url)).json();
