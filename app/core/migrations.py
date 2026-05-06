@@ -47,8 +47,27 @@ _RUNTIME_SCHEMA_PATCHES: tuple[dict[str, str], ...] = (
         "definition": "VARCHAR(64)",
         "backfill": "SELECT 1",
     },
+    {
+        "table": "employees",
+        "column": "attendance_auto_status",
+        "definition": "VARCHAR(20) NOT NULL DEFAULT 'present'",
+        "backfill": (
+            "UPDATE employees SET attendance_auto_status = 'present' "
+            "WHERE attendance_auto_status IS NULL "
+            "OR attendance_auto_status NOT IN ('present', 'absent')"
+        ),
+    },
+    {
+        "table": "employees",
+        "column": "farm_id",
+        "definition": "INTEGER",
+        "backfill": "SELECT 1",
+    },
 )
 _CRITICAL_AUTH_TABLES = {"users", "refresh_tokens", "activity_logs"}
+_REQUIRED_SCHEMA_COLUMNS = {
+    "employees": {"attendance_auto_status", "farm_id"},
+}
 
 
 def _alembic_config() -> Config:
@@ -80,7 +99,7 @@ def _format_migration_status(payload: dict[str, Any]) -> str:
     if payload["status"] == "pending":
         return "Database migrations are pending"
     if payload["status"] == "schema_incomplete":
-        return "Database schema is missing required tables for the current Alembic revision"
+        return "Database schema is missing required tables or columns for the current Alembic revision"
     if payload["status"] == "multiple_heads":
         return "Multiple Alembic heads detected"
     return "Database migration status could not be determined"
@@ -115,9 +134,15 @@ async def check_migration_status() -> dict[str, Any]:
                 rows = sync_conn.execute(text("SELECT version_num FROM alembic_version"))
                 raw_version_rows.extend(sorted(row[0] for row in rows))
             user_tables = sorted(name for name in table_names if name != "alembic_version")
-            return current_revisions, raw_version_rows, user_tables
+            required_columns: dict[str, set[str]] = {}
+            for table_name in _REQUIRED_SCHEMA_COLUMNS:
+                if table_name in table_names:
+                    required_columns[table_name] = {
+                        column["name"] for column in db_inspector.get_columns(table_name)
+                    }
+            return current_revisions, raw_version_rows, user_tables, required_columns
 
-        current_revisions, raw_version_rows, user_tables = await conn.run_sync(inspect_db)
+        current_revisions, raw_version_rows, user_tables, required_columns = await conn.run_sync(inspect_db)
 
     if not current_revisions:
         if user_tables:
@@ -145,13 +170,20 @@ async def check_migration_status() -> dict[str, Any]:
             "database_url": _masked_database_url(),
         }
     missing_tables = sorted(_CRITICAL_AUTH_TABLES - set(user_tables))
-    if missing_tables:
+    missing_columns = sorted(
+        f"{table_name}.{column_name}"
+        for table_name, column_names in _REQUIRED_SCHEMA_COLUMNS.items()
+        if table_name in set(user_tables)
+        for column_name in column_names - required_columns.get(table_name, set())
+    )
+    if missing_tables or missing_columns:
         return {
             "status": "schema_incomplete",
             "heads": heads,
             "current_revisions": current_revisions,
             "raw_version_rows": raw_version_rows,
             "missing_tables": missing_tables,
+            "missing_columns": missing_columns,
             "database_url": _masked_database_url(),
         }
     return {

@@ -78,6 +78,21 @@ def _normalize_auto_attendance_status(status: str | None) -> str:
     return normalized if normalized in ATTENDANCE_AUTO_STATUSES else ATTENDANCE_STATUS_PRESENT
 
 
+def _parse_optional_iso_date(value: str | None, field_name: str) -> date | None:
+    if value is None:
+        return None
+    normalized = value.strip()
+    if not normalized:
+        return None
+    try:
+        return date.fromisoformat(normalized)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid {field_name}. Use YYYY-MM-DD.",
+        ) from exc
+
+
 async def _get_employee_or_404(db: AsyncSession, employee_id: int) -> Employee:
     result = await db.execute(select(Employee).where(Employee.id == employee_id))
     employee = result.scalar_one_or_none()
@@ -128,8 +143,10 @@ async def _upsert_attendance_for_day(
 
 
 async def _get_active_farm_or_404(db: AsyncSession, farm_id: int | None) -> Farm | None:
-    if not farm_id:
+    if farm_id is None:
         return None
+    if farm_id <= 0:
+        raise HTTPException(status_code=400, detail="Invalid farm_id")
     result = await db.execute(
         select(Farm).where(Farm.id == farm_id, Farm.is_active == 1)
     )
@@ -175,7 +192,7 @@ async def get_employees(q: str = "", db: AsyncSession = Depends(get_async_sessio
 
 @router.post("/api/employees")
 async def add_employee(data: EmployeeCreate, db: AsyncSession = Depends(get_async_session), current_user: User = Depends(get_current_user)):
-    hire = date.fromisoformat(data.hire_date) if data.hire_date else None
+    hire = _parse_optional_iso_date(data.hire_date, "hire_date")
     farm = await _get_active_farm_or_404(db, data.farm_id)
     e = Employee(
         name=data.name, phone=data.phone,
@@ -1175,6 +1192,38 @@ function openEditEmpModal(id,name,position,department,phone,salary,farmId){
 
 function closeEmpModal(){ document.getElementById("emp-modal").classList.remove("open"); }
 
+function formatApiDetail(detail){
+    if(Array.isArray(detail)){
+        return detail.map(item => item && item.msg ? item.msg : String(item)).join("; ");
+    }
+    if(detail && typeof detail === "object") return JSON.stringify(detail);
+    return detail ? String(detail) : "";
+}
+
+function compactApiText(text){
+    const trimmed = (text || "").trim();
+    if(!trimmed || trimmed.startsWith("<")) return "";
+    return trimmed.length > 180 ? trimmed.slice(0, 180) + "..." : trimmed;
+}
+
+async function readApiResponse(res){
+    const contentType = res.headers.get("content-type") || "";
+    let data = null;
+    let raw = "";
+    if(contentType.includes("application/json")){
+        try{ data = await res.json(); }
+        catch(err){ raw = "Response was not valid JSON"; }
+    }else{
+        raw = await res.text();
+    }
+    if(!res.ok){
+        const detail = formatApiDetail(data && data.detail) || compactApiText(raw) || res.statusText || "Request failed";
+        throw new Error(`${detail} (${res.status})`);
+    }
+    if(data && data.detail) throw new Error(formatApiDetail(data.detail));
+    return data || {};
+}
+
 async function saveEmployee(){
     let name = document.getElementById("e-name").value.trim();
     if(!name){ showToast("Name is required"); return; }
@@ -1189,12 +1238,15 @@ async function saveEmployee(){
     };
     let url    = editingEmpId ? `/hr/api/employees/${editingEmpId}` : "/hr/api/employees";
     let method = editingEmpId ? "PUT" : "POST";
-    let res    = await fetch(url,{method,headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
-    let data   = await res.json();
-    if(data.detail){ showToast("Error: "+data.detail); return; }
-    closeEmpModal();
-    showToast(editingEmpId?"Employee updated":"Employee added");
-    loadEmployees(); loadSummary();
+    try{
+        let res = await fetch(url,{method,headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
+        await readApiResponse(res);
+        closeEmpModal();
+        showToast(editingEmpId?"Employee updated":"Employee added");
+        loadEmployees(); loadSummary();
+    }catch(err){
+        showToast("Error: " + (err.message || "Could not save employee"));
+    }
 }
 
 async function loadEmployeeFarms(){

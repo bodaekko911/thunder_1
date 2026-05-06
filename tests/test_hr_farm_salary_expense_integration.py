@@ -2,6 +2,7 @@ import asyncio
 from datetime import date, datetime, timezone
 from decimal import Decimal
 
+import pytest
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import sessionmaker
 
@@ -79,6 +80,30 @@ def make_user(session):
     return user
 
 
+def test_employee_create_without_farm_returns_unassigned_payload():
+    with make_session() as session:
+        db = AsyncSessionAdapter(session)
+        user = make_user(session)
+
+        created = run(
+            hr.add_employee(
+                hr.EmployeeCreate(
+                    name="Unassigned Employee",
+                    hire_date="2026-05-06",
+                    base_salary=750,
+                ),
+                db=db,
+                current_user=user,
+            )
+        )
+
+        employee = session.execute(select(Employee).where(Employee.id == created["id"])).scalar_one()
+        assert employee.farm_id is None
+        assert created["farm_id"] is None
+        assert created["farm_name"] is None
+        assert created["attendance_auto_status"] == "present"
+
+
 def test_employee_create_edit_and_response_include_farm():
     with make_session() as session:
         db = AsyncSessionAdapter(session)
@@ -123,6 +148,50 @@ def test_employee_create_edit_and_response_include_farm():
         employees = run(hr.get_employees(db=db))
         assert employees[0]["farm_id"] == south.id
         assert employees[0]["farm_name"] == "South Farm"
+
+
+def test_employee_create_with_invalid_farm_id_returns_clean_error():
+    with make_session() as session:
+        db = AsyncSessionAdapter(session)
+        user = make_user(session)
+
+        with pytest.raises(hr.HTTPException) as exc_info:
+            run(
+                hr.add_employee(
+                    hr.EmployeeCreate(
+                        name="Missing Farm Employee",
+                        base_salary=500,
+                        farm_id=999,
+                    ),
+                    db=db,
+                    current_user=user,
+                )
+            )
+
+        assert exc_info.value.status_code == 404
+        assert exc_info.value.detail == "Farm not found"
+
+
+def test_employee_create_with_invalid_hire_date_returns_clean_error():
+    with make_session() as session:
+        db = AsyncSessionAdapter(session)
+        user = make_user(session)
+
+        with pytest.raises(hr.HTTPException) as exc_info:
+            run(
+                hr.add_employee(
+                    hr.EmployeeCreate(
+                        name="Bad Date Employee",
+                        hire_date="06/05/2026",
+                        base_salary=500,
+                    ),
+                    db=db,
+                    current_user=user,
+                )
+            )
+
+        assert exc_info.value.status_code == 400
+        assert exc_info.value.detail == "Invalid hire_date. Use YYYY-MM-DD."
 
 
 def test_mark_payroll_paid_creates_one_salary_expense_linked_to_employee_farm():

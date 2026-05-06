@@ -151,5 +151,5 @@ def test_format_migration_status_reports_schema_incomplete() -> None:
 
     assert (
         migrations._format_migration_status(payload)
-        == "Database schema is missing required tables for the current Alembic revision"
+        == "Database schema is missing required tables or columns for the current Alembic revision"
     )
