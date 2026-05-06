@@ -1280,9 +1280,14 @@ function fillEmployeeFarmSelect(selectedFarmId){
 
 async function deactivateEmployee(id,name){
     if(!confirm(`Remove "${name}" from active employees?`)) return;
-    await fetch(`/hr/api/employees/${id}`,{method:"DELETE"});
-    showToast("Employee removed");
-    loadEmployees(); loadSummary();
+    try{
+        const res = await fetch(`/hr/api/employees/${id}`,{method:"DELETE"});
+        await readApiResponse(res);
+        showToast("Employee removed from active employees");
+        loadEmployees(); loadSummary();
+    }catch(err){
+        showToast("Error: " + (err.message || "Could not remove employee"));
+    }
 }
 
 /* ── ATTENDANCE ── */
