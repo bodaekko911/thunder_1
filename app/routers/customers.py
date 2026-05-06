@@ -33,14 +33,33 @@ async def get_customers(
     sort_dir: str = "asc",
     db: AsyncSession = Depends(get_async_session),
 ):
-    # Columns sortable directly in SQL (on the Customer model)
-    SQL_SORT_COLUMNS = {
+    # Correlated subqueries — computed once per row in a single SQL round-trip
+    inv_count_sq = (
+        select(func.count(Invoice.id))
+        .where(Invoice.customer_id == Customer.id)
+        .correlate(Customer)
+        .scalar_subquery()
+    )
+    inv_total_sq = (
+        select(func.coalesce(func.sum(Invoice.total), 0))
+        .where(Invoice.customer_id == Customer.id, Invoice.status == "paid")
+        .correlate(Customer)
+        .scalar_subquery()
+    )
+    ref_total_sq = (
+        select(func.coalesce(func.sum(RetailRefund.total), 0))
+        .where(RetailRefund.customer_id == Customer.id)
+        .correlate(Customer)
+        .scalar_subquery()
+    )
+    net_spent_expr = func.max(inv_total_sq - ref_total_sq, 0)
+
+    SORT_EXPRS = {
         "name":         Customer.name,
         "discount_pct": Customer.discount_pct,
-        "created_at":   Customer.created_at,
+        "invoices":     inv_count_sq,
+        "total_spent":  net_spent_expr,
     }
-    # Columns computed per-row — sorted in Python after fetching
-    PYTHON_SORT_COLUMNS = {"invoices", "total_spent"}
 
     conditions = []
     if q:
@@ -55,59 +74,37 @@ async def get_customers(
     )
     total = cnt_result.scalar()
 
-    # Build ORDER BY — SQL for model columns, Python sort for computed ones
-    if sort_by in SQL_SORT_COLUMNS:
-        sort_col = SQL_SORT_COLUMNS[sort_by]
-        order_clause = desc(sort_col) if sort_dir == "desc" else asc(sort_col)
-    else:
-        order_clause = asc(Customer.name)  # stable secondary sort
+    sort_expr = SORT_EXPRS.get(sort_by, Customer.name)
+    order_clause = desc(sort_expr) if sort_dir == "desc" else asc(sort_expr)
 
-    # Computed-column sorts need all matching rows before slicing
-    fetch_all = sort_by in PYTHON_SORT_COLUMNS
-
-    query = select(Customer).where(*conditions).order_by(order_clause)
-    if not fetch_all:
-        query = query.offset(skip).limit(limit)
-
-    cust_result = await db.execute(query)
-    items = cust_result.scalars().all()
+    rows = await db.execute(
+        select(
+            Customer,
+            inv_count_sq.label("inv_count"),
+            inv_total_sq.label("inv_total"),
+            ref_total_sq.label("ref_total"),
+        )
+        .where(*conditions)
+        .order_by(order_clause, asc(Customer.name))
+        .offset(skip)
+        .limit(limit)
+    )
 
     result = []
-    for c in items:
-        inv_cnt_res = await db.execute(
-            select(func.count(Invoice.id)).where(Invoice.customer_id == c.id)
-        )
-        inv_count = inv_cnt_res.scalar() or 0
-
-        inv_sum_res = await db.execute(
-            select(func.sum(Invoice.total)).where(
-                Invoice.customer_id == c.id, Invoice.status == "paid"
-            )
-        )
-        inv_total = inv_sum_res.scalar() or 0
-
-        ref_sum_res = await db.execute(
-            select(func.sum(RetailRefund.total)).where(RetailRefund.customer_id == c.id)
-        )
-        ref_total = ref_sum_res.scalar() or 0
-
+    for c, inv_count, inv_total, ref_total in rows:
+        inv_total  = float(inv_total  or 0)
+        ref_total  = float(ref_total  or 0)
         result.append({
-            "id":          c.id,
-            "name":        c.name,
-            "phone":       c.phone or "—",
-            "email":       c.email or "—",
-            "address":     c.address or "—",
+            "id":           c.id,
+            "name":         c.name,
+            "phone":        c.phone or "—",
+            "email":        c.email or "—",
+            "address":      c.address or "—",
             "discount_pct": float(c.discount_pct or 0),
-            "invoices":    inv_count,
-            "total_spent": max(0.0, float(inv_total) - float(ref_total)),
-            "ref_total":   float(ref_total),
+            "invoices":     int(inv_count or 0),
+            "total_spent":  max(0.0, inv_total - ref_total),
+            "ref_total":    ref_total,
         })
-
-    # Python-side sort + slice for computed columns
-    if sort_by in PYTHON_SORT_COLUMNS:
-        reverse = sort_dir == "desc"
-        result.sort(key=lambda x: x[sort_by], reverse=reverse)
-        result = result[skip: skip + limit]
 
     return {"total": total, "items": result}
 
@@ -909,6 +906,15 @@ td.phone { font-family: var(--mono); font-size: 12px; }
 }
 .toast.show { opacity:1; transform: translateX(-50%) translateY(0); }
 
+.btn-export {
+    background: var(--card2); border: 1px solid var(--border2);
+    color: var(--sub); display: flex; align-items: center; gap: 7px;
+    padding: 10px 15px; border-radius: var(--r);
+    font-family: var(--sans); font-size: 13px; font-weight: 600;
+    cursor: pointer; transition: all .2s; white-space: nowrap;
+}
+.btn-export:hover { border-color: var(--green); color: var(--green); }
+.btn-export:disabled { opacity: .5; cursor: not-allowed; }
 ::-webkit-scrollbar { width: 4px; }
 ::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 4px; }
 th.sortable {
@@ -928,6 +934,7 @@ th.sortable.active { color: var(--green); }
 }
 th.sortable.active .sort-arrow { opacity: 1; }
 th.sortable.active.desc .sort-arrow { transform: rotate(180deg); }
+@keyframes spin { to { transform: rotate(360deg); } }
 </style>
     <script src="/static/auth-guard.js"></script>
 </head>
@@ -949,6 +956,10 @@ th.sortable.active.desc .sort-arrow { transform: rotate(180deg); }
             <input id="search" placeholder="Search by name, phone or email…" oninput="onSearch()">
         </div>
         <span class="count-badge" id="count-badge">— customers</span>
+        <button class="btn btn-export" id="export-btn" onclick="exportCSV()" title="Export current filtered list as CSV">
+            <svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2" viewBox="0 0 24 24" style="flex-shrink:0"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+            Export CSV
+        </button>
         <button class="btn btn-green" onclick="openAddModal()">+ Add Customer</button>
     </div>
 
@@ -1169,6 +1180,58 @@ function onSearch(){
 }
 function prevPage(){ if(currentPage>0){ currentPage--; load(); } }
 function nextPage(){ if((currentPage+1)*pageSize<totalItems){ currentPage++; load(); } }
+
+/* ── CSV EXPORT ── */
+async function exportCSV(){
+    const btn = document.getElementById("export-btn");
+    btn.disabled = true;
+    btn.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" style="animation:spin .8s linear infinite;flex-shrink:0"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg> Exporting…`;
+
+    try {
+        const q   = document.getElementById("search").value.trim();
+        let url   = `/customers-mgmt/api/list?skip=0&limit=10000&sort_by=${sortBy}&sort_dir=${sortDir}`;
+        if (q) url += `&q=${encodeURIComponent(q)}`;
+
+        const data  = await (await fetch(url)).json();
+        const items = data.items;
+
+        if (!items.length) { showToast("No customers to export"); return; }
+
+        const headers = ["ID","Name","Phone","Email","Address","Discount %","Invoices","Total Spent"];
+        const rows    = items.map(c => [
+            c.id,
+            csvCell(c.name),
+            csvCell(c.phone === "—" ? "" : c.phone),
+            csvCell(c.email === "—" ? "" : c.email),
+            csvCell(c.address === "—" ? "" : c.address),
+            c.discount_pct.toFixed(2),
+            c.invoices,
+            c.total_spent.toFixed(2),
+        ]);
+
+        const csv = [headers, ...rows].map(r => r.join(",")).join("\n");
+        const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+        const link = document.createElement("a");
+        link.href  = URL.createObjectURL(blob);
+
+        const dateStr = new Date().toISOString().slice(0,10);
+        const label   = q ? `_${q.replace(/[^a-z0-9]/gi,"_")}` : "";
+        link.download = `customers${label}_${dateStr}.csv`;
+        link.click();
+        URL.revokeObjectURL(link.href);
+
+        showToast(`Exported ${items.length} customers ✓`);
+    } finally {
+        btn.disabled = false;
+        btn.innerHTML = `<svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2" viewBox="0 0 24 24" style="flex-shrink:0"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg> Export CSV`;
+    }
+}
+
+function csvCell(val) {
+    const s = String(val ?? "");
+    return (s.includes(",") || s.includes('"') || s.includes("\n"))
+        ? `"${s.replace(/"/g, '""')}"` : s;
+}
 
 /* ── ADD/EDIT MODAL ── */
 function openAddModal(){
