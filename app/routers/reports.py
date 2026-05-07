@@ -2345,7 +2345,7 @@ td.mono{font-family:var(--mono);}
         <button class="tab"        onclick="switchTab('farm')">🌾 Farm Intake</button>
         <button class="tab"        onclick="switchTab('spoilage')">🗑 Spoilage</button>
         <button class="tab"        onclick="switchTab('production')">⚙️ Production</button>
-        <button class="tab"        onclick="switchTab('hr')">HR</button>
+        <button class="tab"        onclick="switchTab('hr')">👥 HR</button>
         <button class="tab"        onclick="switchTab('pl')">💰 P&amp;L</button>
     </div>
 
