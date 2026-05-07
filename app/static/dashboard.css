@@ -840,12 +840,88 @@ a { color: inherit; text-decoration: none; }
 
   .updated-pill { display: none; }
 }
-/* ── Stale-while-revalidate indicator ── */
-#last-updated.last-updated-stale {
-  opacity: 0.6;
-  font-style: italic;
+/* ── Error banner ── */
+#error-banner {
+  margin-bottom: 12px;
 }
-#last-updated.last-updated-stale::before {
-  content: "⟳ ";
-  font-style: normal;
+#error-banner:empty {
+  display: none;
+}
+.error-banner {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px 14px;
+  border-radius: var(--border-radius-md);
+  border: 0.5px solid var(--warn, #d97706);
+  background: var(--warn-bg, rgba(217, 119, 6, 0.08));
+  animation: banner-in 0.2s ease;
+}
+.error-banner-hiding {
+  animation: banner-out 0.25s ease forwards;
+}
+@keyframes banner-in {
+  from { opacity: 0; transform: translateY(-4px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+@keyframes banner-out {
+  to { opacity: 0; transform: translateY(-4px); }
+}
+.error-banner-icon {
+  font-size: 14px;
+  flex-shrink: 0;
+  margin-top: 1px;
+  color: var(--warn, #d97706);
+}
+.error-banner-body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.error-banner-title {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--warn, #d97706);
+}
+.error-banner-detail {
+  font-size: 12px;
+  color: var(--warn, #d97706);
+  opacity: 0.85;
+}
+.error-banner-text {
+  flex: 1;
+  font-size: 13px;
+  color: var(--warn, #d97706);
+}
+.error-banner-chips {
+  display: flex;
+  gap: 5px;
+  flex-wrap: wrap;
+  margin-top: 5px;
+}
+.error-banner-chip {
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 10px;
+  background: var(--color-background-secondary);
+  color: var(--color-text-secondary);
+  border: 0.5px solid var(--color-border-secondary);
+}
+.error-banner-close {
+  background: none;
+  border: none;
+  cursor: pointer;
+  font-size: 13px;
+  color: var(--warn, #d97706);
+  opacity: 0.7;
+  padding: 2px 4px;
+  flex-shrink: 0;
+  line-height: 1;
+  border-radius: 3px;
+}
+.error-banner-close:hover {
+  opacity: 1;
+  background: var(--color-background-secondary);
 }

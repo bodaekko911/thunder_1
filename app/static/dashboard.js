@@ -12,38 +12,7 @@ let currentUser = null;
 let dashboardAbortController = null;
 let dashboardRequestId = 0;
 let dashboardHasLoaded = false;
-let dashboardIsStale = false;
-
-// ── Stale-while-revalidate cache ─────────────────────────────────────────────
-const SWR_MAX_AGE_MS = 5 * 60 * 1000; // 5 minutes
-
-function swrKey(range) {
-  return `dash:swr:${range}`;
-}
-
-function swrRead(range) {
-  try {
-    const raw = localStorage.getItem(swrKey(range));
-    if (!raw) return null;
-    const { ts, data } = JSON.parse(raw);
-    if (Date.now() - ts > SWR_MAX_AGE_MS) return null;
-    return data;
-  } catch {
-    return null;
-  }
-}
-
-function swrWrite(range, data) {
-  try {
-    localStorage.setItem(swrKey(range), JSON.stringify({ ts: Date.now(), data }));
-  } catch {
-    // QuotaExceededError or private browsing — silently skip
-  }
-}
-
-function swrInvalidate(range) {
-  try { localStorage.removeItem(swrKey(range)); } catch {}
-}
+let errorBannerDismissed = false;
 
 function escHtml(value) {
   return String(value || "").replace(/[&<>"']/g, (char) => (
@@ -159,22 +128,15 @@ function applyCustomRange() {
   loadDashboard();
 }
 
-function markUpdated(stale = false) {
+function markUpdated() {
   clearInterval(elapsedTimer);
   lastUpdatedAt = Date.now();
   const node = document.getElementById("last-updated");
-  if (node) {
-    node.classList.remove("last-updated-error");
-    node.classList.toggle("last-updated-stale", stale);
-  }
+  if (node) node.classList.remove("last-updated-error");
   const tick = () => {
     if (!node) return;
-    if (dashboardIsStale) {
-      node.textContent = "cached · refreshing…";
-      return;
-    }
     const seconds = Math.max(0, Math.round((Date.now() - lastUpdatedAt) / 1000));
-    node.textContent = seconds < 10 ? "just now" : `Updated ${seconds}s ago`;
+    node.textContent = `Updated ${seconds}s ago`;
   };
   tick();
   elapsedTimer = setInterval(tick, 5000);
@@ -486,6 +448,72 @@ function renderRecentActivity() {
   });
 }
 
+const SECTION_LABELS = {
+  "numbers":            "Summary numbers",
+  "numbers.margin":     "Profit margin",
+  "numbers.b2b_cash":   "B2B cash collected",
+  "chart":              "Sales chart",
+  "top_products":       "Best-sellers",
+  "briefing":           "Daily briefing",
+  "insights":           "Insights",
+  "insights.overdue":   "Overdue insight",
+  "insights.stockout":  "Stock insight",
+  "insights.pace":      "Sales pace insight",
+  "insights.margin":    "Margin insight",
+  "insights.weekday":   "Day-of-week insight",
+};
+
+function renderErrorBanner() {
+  const el = document.getElementById("error-banner");
+  if (!el) return;
+
+  const errors = dashboardData?._errors;
+  if (!errors || errors.length === 0 || errorBannerDismissed) {
+    el.innerHTML = "";
+    el.classList.remove("error-banner-visible");
+    return;
+  }
+
+  const labels = errors.map((e) => SECTION_LABELS[e.section] || e.section);
+  const unique = [...new Set(labels)];
+
+  let html;
+  if (unique.length === 1) {
+    html = `
+      <div class="error-banner error-banner-single" role="alert" aria-live="polite">
+        <span class="error-banner-icon" aria-hidden="true">⚠</span>
+        <span class="error-banner-text">${escHtml(unique[0])} couldn't load — other sections are unaffected.</span>
+        <button class="error-banner-close" aria-label="Dismiss warning" onclick="dismissErrorBanner()">✕</button>
+      </div>`;
+  } else {
+    const chips = unique.map((l) => `<span class="error-banner-chip">${escHtml(l)}</span>`).join("");
+    html = `
+      <div class="error-banner error-banner-multi" role="alert" aria-live="polite">
+        <span class="error-banner-icon" aria-hidden="true">⚠</span>
+        <div class="error-banner-body">
+          <span class="error-banner-title">Some data couldn't load</span>
+          <span class="error-banner-detail">The figures below may be incomplete. Other sections loaded normally.</span>
+          <div class="error-banner-chips">${chips}</div>
+        </div>
+        <button class="error-banner-close" aria-label="Dismiss warning" onclick="dismissErrorBanner()">✕</button>
+      </div>`;
+  }
+
+  el.innerHTML = html;
+  el.classList.add("error-banner-visible");
+}
+
+function dismissErrorBanner() {
+  errorBannerDismissed = true;
+  const el = document.getElementById("error-banner");
+  if (!el) return;
+  el.classList.add("error-banner-hiding");
+  setTimeout(() => {
+    el.innerHTML = "";
+    el.classList.remove("error-banner-visible", "error-banner-hiding");
+  }, 250);
+}
+
 function showErrorState(message) {
   if (dashboardHasLoaded) {
     const node = document.getElementById("last-updated");
@@ -499,33 +527,10 @@ function showErrorState(message) {
   document.getElementById("loading").innerHTML = `<div class="load-error">${escHtml(message)}</div>`;
 }
 
-function renderAll() {
-  try { renderBriefing(); }      catch(e) { console.error("renderBriefing", e); }
-  try { renderNumbers(); }       catch(e) { console.error("renderNumbers", e); }
-  try { renderChart(); }         catch(e) { console.error("renderChart", e); }
-  try { renderTopProducts(); }   catch(e) { console.error("renderTopProducts", e); }
-  try { renderRecentActivity(); } catch(e) { console.error("renderRecentActivity", e); }
-  try { renderProfitSummary(); } catch(e) { console.error("renderProfitSummary", e); }
-  try { renderTopB2BClients(); } catch(e) { console.error("renderTopB2BClients", e); }
-}
-
 async function loadDashboard() {
   if (dashboardAbortController) dashboardAbortController.abort();
   dashboardAbortController = new AbortController();
   const requestId = ++dashboardRequestId;
-
-  // ── Stale-while-revalidate: render cached data immediately ──
-  const rangeKey = currentRange === "custom" ? `custom:${customStart}:${customEnd}` : currentRange;
-  const cached = swrRead(rangeKey);
-  if (cached && !dashboardHasLoaded) {
-    dashboardData = cached;
-    dashboardIsStale = true;
-    document.getElementById("loading").classList.add("hidden");
-    dashboardHasLoaded = true;
-    renderAll();
-    markUpdated(true);
-  }
-
   let url = `/dashboard/summary?range=${currentRange}&_=${Date.now()}`;
   if (currentRange === "custom" && customStart && customEnd) {
     url += `&start=${customStart}&end=${customEnd}`;
@@ -538,31 +543,23 @@ async function loadDashboard() {
     if (!response.ok) throw new Error(`Dashboard request failed (${response.status})`);
     const nextData = await response.json();
     if (requestId !== dashboardRequestId) return;
-
     dashboardData = nextData;
-    dashboardIsStale = false;
-
     if (!dashboardHasLoaded) {
       document.getElementById("loading").classList.add("hidden");
       dashboardHasLoaded = true;
     }
-
-    renderAll();
-    markUpdated(false);
-    swrWrite(rangeKey, nextData);
+    try { renderBriefing(); }      catch(e) { console.error("renderBriefing", e); }
+    try { renderNumbers(); }       catch(e) { console.error("renderNumbers", e); }
+    try { renderChart(); }         catch(e) { console.error("renderChart", e); }
+    try { renderTopProducts(); }   catch(e) { console.error("renderTopProducts", e); }
+    try { renderRecentActivity(); } catch(e) { console.error("renderRecentActivity", e); }
+    try { renderProfitSummary(); } catch(e) { console.error("renderProfitSummary", e); }
+    try { renderTopB2BClients(); } catch(e) { console.error("renderTopB2BClients", e); }
+    try { renderErrorBanner(); }   catch(e) { console.error("renderErrorBanner", e); }
+    errorBannerDismissed = false;
+    markUpdated();
   } catch (error) {
     if (error.name === "AbortError") return;
-    // If we have stale data showing, keep it visible and just mark the error
-    if (dashboardHasLoaded) {
-      dashboardIsStale = false;
-      const node = document.getElementById("last-updated");
-      if (node) {
-        node.classList.add("last-updated-error");
-        node.textContent = "refresh failed";
-      }
-      clearInterval(elapsedTimer);
-      return;
-    }
     showErrorState(error.message);
   }
 }

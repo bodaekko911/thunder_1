@@ -361,163 +361,48 @@ async def dashboard_summary(
     current_user: User   = Depends(get_current_user),
 ):
     import json
+    try:
+        import redis.asyncio as aioredis
+        redis_client = aioredis.from_url(
+            settings.REDIS_URL,
+            socket_connect_timeout=settings.REDIS_SOCKET_CONNECT_TIMEOUT,
+            socket_timeout=settings.REDIS_SOCKET_TIMEOUT,
+            decode_responses=True,
+        )
+        cache_key = f"dash_summary:{current_user.id}:{range_param}:{start}:{end}"
+        cached = await redis_client.get(cache_key)
+        if cached:
+            await redis_client.aclose()
+            return json.loads(cached)
+    except Exception:
+        redis_client = None
+        cache_key    = None
+
+    from app.core.log import logger
+    from app.services.dashboard_summary_service import get_summary
+    try:
+        data = await get_summary(db, range_param, start, end, current_user)
+    except Exception:
+        logger.exception("dashboard_summary service failed")
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "error": "dashboard_summary_failed",
+                "message": "Internal server error loading dashboard summary",
+                "hint": "Check server logs for full traceback",
+            },
+        )
+
+    if redis_client and cache_key:
+        try:
+            await redis_client.setex(cache_key, 10, json.dumps(data, default=str))
+            await redis_client.aclose()
+        except Exception:
+            pass
+
     from fastapi.responses import JSONResponse
     from fastapi.encoders import jsonable_encoder
-    from app.core.log import logger
-    from app.core.cache import get_redis, dash_cache_get_many, dash_cache_set_many, SECTION_TTLS
-    from app.services.dashboard_summary_service import get_summary
-
-    # Build a stable cache key from the range parameters
-    range_key = f"{range_param}:{start}:{end}"
-    redis = get_redis()
-
-    # ── 1. Batch-fetch all cacheable sections in one pipeline round-trip ──
-    all_sections = list(SECTION_TTLS.keys())
-    cached_sections = await dash_cache_get_many(redis, current_user.id, range_key, all_sections)
-
-    # ── 2. Determine which sections still need to be computed ──
-    # A section is a cache miss if it's absent from cached_sections OR has TTL 0 (bypass).
-    # We map dashboard data keys to cache section names where they differ.
-    SECTION_DATA_KEYS = {
-        "sales":            "sales",
-        "clients_owe":      "clients_owe",
-        "spent":            "spent",
-        "stock_alerts":     "stock_alerts",
-        "margin":           "margin",
-        "alt_sales_today":  "alt_sales_today",
-        "b2b_cash":         "b2b_cash",
-        "profit":           "profit",
-        "chart":            "chart",
-        "briefing":         "briefing",
-        "insights":         "insights",
-    }
-    PANEL_SECTION_KEYS = {
-        "top_products":     ["top_products_by_revenue", "top_products_by_qty"],
-        "recent_activity":  ["recent_activity"],
-        "top_b2b_clients":  ["top_b2b_clients"],
-    }
-
-    # Check if everything is already cached
-    numbers_cached = all(
-        k in cached_sections
-        for k in ["sales", "clients_owe", "spent", "stock_alerts", "margin",
-                  "alt_sales_today", "b2b_cash", "profit"]
-        if SECTION_TTLS.get(k, 0) > 0
-    )
-    panels_cached = all(
-        k in cached_sections
-        for k in ["top_products", "top_b2b_clients"]
-        if SECTION_TTLS.get(k, 0) > 0
-    )
-
-    # ── 3. If nothing useful is cached, run the full service (common path) ──
-    # Partial cache hits where some sections are missing fall through to a full
-    # recompute — simpler than patching together partial results and avoids
-    # stale data from mixed-age sections.
-    if not cached_sections:
-        try:
-            data = await get_summary(db, range_param, start, end, current_user)
-        except Exception:
-            logger.exception("dashboard_summary service failed")
-            raise HTTPException(
-                status_code=500,
-                detail={
-                    "error": "dashboard_summary_failed",
-                    "message": "Internal server error loading dashboard summary",
-                    "hint": "Check server logs for full traceback",
-                },
-            )
-
-        # Write each section to cache with its own TTL
-        write_payload: dict = {}
-        numbers = data.get("numbers", {})
-        for section_key in ["sales", "clients_owe", "spent", "stock_alerts", "margin",
-                             "alt_sales_today", "b2b_cash", "profit"]:
-            if section_key in numbers:
-                write_payload[section_key] = numbers[section_key]
-
-        panels = data.get("panels", {})
-        # Pack both top-products lists under one cache key to keep them in sync
-        if "top_products_by_revenue" in panels or "top_products_by_qty" in panels:
-            write_payload["top_products"] = {
-                "top_products_by_revenue": panels.get("top_products_by_revenue", []),
-                "top_products_by_qty":     panels.get("top_products_by_qty", []),
-            }
-        if "recent_activity" in panels:
-            write_payload["recent_activity"] = panels["recent_activity"]
-        if "top_b2b_clients" in panels:
-            write_payload["top_b2b_clients"] = panels["top_b2b_clients"]
-
-        if "chart" in data:
-            write_payload["chart"] = data["chart"]
-        if "briefing" in data:
-            write_payload["briefing"] = data["briefing"]
-        if "insights" in data:
-            write_payload["insights"] = data["insights"]
-
-        await dash_cache_set_many(redis, current_user.id, range_key, write_payload)
-
-    else:
-        # ── 4. Assemble response from cached sections + recompute bypassed ones ──
-        # Re-run the full service only for sections that are bypassed (TTL 0) or missed.
-        # This ensures stock_alerts and recent_activity are always fresh.
-        try:
-            fresh = await get_summary(db, range_param, start, end, current_user)
-        except Exception:
-            logger.exception("dashboard_summary service failed (partial cache path)")
-            raise HTTPException(
-                status_code=500,
-                detail={
-                    "error": "dashboard_summary_failed",
-                    "message": "Internal server error loading dashboard summary",
-                    "hint": "Check server logs for full traceback",
-                },
-            )
-
-        data = fresh
-
-        # Overwrite with cached values where available — these are fresher than
-        # what might have just been recomputed for a section that hasn't expired yet.
-        numbers = data.setdefault("numbers", {})
-        for section_key in ["sales", "clients_owe", "spent", "margin",
-                             "alt_sales_today", "b2b_cash", "profit"]:
-            if section_key in cached_sections:
-                numbers[section_key] = cached_sections[section_key]
-
-        panels = data.setdefault("panels", {})
-        if "top_products" in cached_sections:
-            tp = cached_sections["top_products"]
-            panels["top_products_by_revenue"] = tp.get("top_products_by_revenue", [])
-            panels["top_products_by_qty"]     = tp.get("top_products_by_qty", [])
-        if "top_b2b_clients" in cached_sections:
-            panels["top_b2b_clients"] = cached_sections["top_b2b_clients"]
-        if "chart" in cached_sections:
-            data["chart"] = cached_sections["chart"]
-        if "briefing" in cached_sections:
-            data["briefing"] = cached_sections["briefing"]
-        if "insights" in cached_sections:
-            data["insights"] = cached_sections["insights"]
-
-        # Write any newly-recomputed sections back to cache
-        new_write: dict = {}
-        fresh_numbers = fresh.get("numbers", {})
-        fresh_panels  = fresh.get("panels", {})
-        for section_key in ["sales", "clients_owe", "spent", "margin",
-                             "alt_sales_today", "b2b_cash", "profit"]:
-            if section_key not in cached_sections and section_key in fresh_numbers:
-                new_write[section_key] = fresh_numbers[section_key]
-        if "top_products" not in cached_sections:
-            new_write["top_products"] = {
-                "top_products_by_revenue": fresh_panels.get("top_products_by_revenue", []),
-                "top_products_by_qty":     fresh_panels.get("top_products_by_qty", []),
-            }
-        if "top_b2b_clients" not in cached_sections and "top_b2b_clients" in fresh_panels:
-            new_write["top_b2b_clients"] = fresh_panels["top_b2b_clients"]
-        if "chart" not in cached_sections and "chart" in fresh:
-            new_write["chart"] = fresh["chart"]
-        if new_write:
-            await dash_cache_set_many(redis, current_user.id, range_key, new_write)
-
+    import json
     return JSONResponse(
         content=json.loads(json.dumps(jsonable_encoder(data), default=str)),
         headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
@@ -616,6 +501,8 @@ def dashboard_ui():
       <span class="updated-pill" id="last-updated">Updated just now</span>
     </div>
   </header>
+
+  <div id="error-banner" aria-live="polite"></div>
 
   <article class="card briefing-card" aria-label="Today's briefing">
     <p class="briefing-lead" id="briefing-lead">Loading today’s briefing…</p>
