@@ -142,3 +142,19 @@ def test_permission_catalog_role_mappings_include_split_modules() -> None:
     assert "manager" in receive_update["roles"]
     assert "manager" in receive_delete["roles"]
     assert "manager" in receive_export["roles"]
+
+
+def test_hr_clear_data_permission_is_admin_only_by_default() -> None:
+    catalog = get_permission_catalog()
+    hr_entry = next(item for item in catalog["matrix"] if item["module"] == "hr")
+    clear_action = next(action for action in hr_entry["actions"] if action["key"] == "action_hr_clear_data")
+
+    assert clear_action["action"] == "clear_hr_data"
+    assert clear_action["label"] == "Clear all HR data"
+    assert "admin" in clear_action["roles"]
+    assert "hr" not in clear_action["roles"]
+    assert "manager" not in clear_action["roles"]
+    assert "accountant" not in clear_action["roles"]
+    assert "viewer" not in clear_action["roles"]
+    assert has_permission(SimpleNamespace(role="admin", permissions=""), "action_hr_clear_data") is True
+    assert has_permission(SimpleNamespace(role="hr", permissions=""), "action_hr_clear_data") is False

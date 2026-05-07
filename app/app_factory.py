@@ -150,6 +150,7 @@ def create_app() -> FastAPI:
         exempt_urls=[
             re.compile(r"^/auth/.*"),
             re.compile(r".*/api/.*"),
+            re.compile(r"^/hr/clear-data$"),
             re.compile(r"^/import/.*"),
             re.compile(r"^/invoice.*"),
             re.compile(r"^/health.*"),

@@ -141,6 +141,7 @@ PERMISSION_MATRIX = [
             {"action": "view_payroll", "key": "tab_hr_payroll", "label": "Payroll tab"},
             {"action": "approve", "key": "action_hr_run_payroll", "label": "Run payroll"},
             {"action": "mark_paid", "key": "action_hr_mark_paid", "label": "Mark payroll paid"},
+            {"action": "clear_hr_data", "key": "action_hr_clear_data", "label": "Clear all HR data"},
         ],
     },
     {

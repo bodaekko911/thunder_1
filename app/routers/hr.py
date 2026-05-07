@@ -2,7 +2,7 @@
 from fastapi.responses import HTMLResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from typing import Optional, List
 from pydantic import BaseModel
 from datetime import date, datetime, timezone
@@ -11,6 +11,8 @@ from app.database import get_async_session
 from app.core.permissions import get_current_user, require_permission
 from app.core.log import record
 from app.core.navigation import render_app_header
+from app.models.accounting import Account, Journal, JournalEntry
+from app.models.expense import Expense
 from app.models.hr import Employee, Attendance, Payroll
 from app.models.farm import Farm
 from app.models.user import User
@@ -64,6 +66,13 @@ class PayrollUpdate(BaseModel):
 
 class PayrollPayRequest(BaseModel):
     payment_method: Optional[str] = "cash"
+
+
+class ClearHRDataRequest(BaseModel):
+    confirmation: Optional[str] = None
+
+
+CLEAR_HR_DATA_CONFIRMATION = "CLEAR HR DATA"
 
 
 def _normalize_attendance_status(status: str) -> str:
@@ -173,6 +182,111 @@ def _employee_payload(employee: Employee) -> dict:
             getattr(employee, "attendance_auto_status", None)
         ),
     }
+
+
+async def _count_records(db: AsyncSession, model) -> int:
+    result = await db.execute(select(func.count(model.id)))
+    return int(result.scalar() or 0)
+
+
+async def _remove_journal_balances(db: AsyncSession, journal_ids: list[int]) -> None:
+    if not journal_ids:
+        return
+
+    entries_result = await db.execute(
+        select(JournalEntry.account_id, JournalEntry.debit, JournalEntry.credit)
+        .where(JournalEntry.journal_id.in_(journal_ids))
+    )
+    deltas_by_account = {}
+    for account_id, debit, credit in entries_result.all():
+        if account_id is None:
+            continue
+        deltas_by_account[account_id] = deltas_by_account.get(account_id, 0) + (
+            (debit or 0) - (credit or 0)
+        )
+
+    if not deltas_by_account:
+        return
+
+    accounts_result = await db.execute(
+        select(Account).where(Account.id.in_(deltas_by_account.keys()))
+    )
+    for account in accounts_result.scalars().all():
+        account.balance = (account.balance or 0) - deltas_by_account.get(account.id, 0)
+
+
+async def _clear_hr_data(db: AsyncSession, current_user: User) -> dict:
+    deleted = {
+        "attendance": await _count_records(db, Attendance),
+        "payroll": await _count_records(db, Payroll),
+        "employees": await _count_records(db, Employee),
+        "hr_expenses": 0,
+    }
+
+    expense_result = await db.execute(
+        select(Expense.id, Expense.journal_id).where(Expense.payroll_id.is_not(None))
+    )
+    hr_expense_rows = expense_result.all()
+    hr_expense_ids = [row[0] for row in hr_expense_rows]
+    hr_journal_ids = sorted({row[1] for row in hr_expense_rows if row[1] is not None})
+    if hr_journal_ids:
+        shared_journal_result = await db.execute(
+            select(Expense.journal_id)
+            .where(
+                Expense.journal_id.in_(hr_journal_ids),
+                Expense.payroll_id.is_(None),
+            )
+        )
+        shared_journal_ids = {
+            journal_id
+            for journal_id in shared_journal_result.scalars().all()
+            if journal_id is not None
+        }
+        hr_journal_ids = [
+            journal_id for journal_id in hr_journal_ids if journal_id not in shared_journal_ids
+        ]
+    deleted["hr_expenses"] = len(hr_expense_ids)
+
+    await db.execute(delete(Attendance).execution_options(synchronize_session=False))
+
+    await _remove_journal_balances(db, hr_journal_ids)
+    if hr_journal_ids:
+        await db.execute(
+            delete(JournalEntry)
+            .where(JournalEntry.journal_id.in_(hr_journal_ids))
+            .execution_options(synchronize_session=False)
+        )
+    if hr_expense_ids:
+        await db.execute(
+            delete(Expense)
+            .where(Expense.id.in_(hr_expense_ids))
+            .execution_options(synchronize_session=False)
+        )
+    if hr_journal_ids:
+        await db.execute(
+            delete(Journal)
+            .where(Journal.id.in_(hr_journal_ids))
+            .execution_options(synchronize_session=False)
+        )
+
+    await db.execute(delete(Payroll).execution_options(synchronize_session=False))
+    await db.execute(delete(Employee).execution_options(synchronize_session=False))
+    record(
+        db,
+        "HR",
+        "clear_hr_data",
+        (
+            "Cleared HR data: "
+            f"{deleted['employees']} employees, "
+            f"{deleted['attendance']} attendance records, "
+            f"{deleted['payroll']} payroll records, "
+            f"{deleted['hr_expenses']} payroll expenses"
+        ),
+        user=current_user,
+        ref_type="hr_clear_data",
+        ref_id="all",
+    )
+    return {"ok": True, "deleted": deleted}
 
 
 # ── EMPLOYEE API ───────────────────────────────────────
@@ -592,6 +706,31 @@ async def mark_paid(payroll_id: int, data: Optional[PayrollPayRequest] = None, d
         response["warning"] = "Employee has no farm assigned, so salary expense was not linked to a farm."
     return response
 
+
+@router.post("/clear-data", dependencies=[Depends(require_permission("action_hr_clear_data"))])
+async def clear_hr_data(
+    data: Optional[ClearHRDataRequest] = None,
+    db: AsyncSession = Depends(get_async_session),
+    current_user: User = Depends(get_current_user),
+):
+    if data is None or data.confirmation != CLEAR_HR_DATA_CONFIRMATION:
+        raise HTTPException(status_code=400, detail='Type "CLEAR HR DATA" to confirm.')
+
+    try:
+        result = await _clear_hr_data(db, current_user)
+        await db.commit()
+        return result
+    except HTTPException:
+        await db.rollback()
+        raise
+    except Exception as exc:
+        await db.rollback()
+        raise HTTPException(
+            status_code=500,
+            detail="Could not clear HR data. No records were deleted.",
+        ) from exc
+
+
 @router.get("/api/summary")
 async def hr_summary(db: AsyncSession = Depends(get_async_session)):
     _te = await db.execute(select(func.count(Employee.id)).where(Employee.is_active == True))
@@ -728,6 +867,9 @@ nav {
 .btn-blue:hover { filter: brightness(1.1); transform: translateY(-1px); }
 .btn-purple { background: linear-gradient(135deg,var(--purple),#e879f9); color: white; }
 .btn-purple:hover { filter: brightness(1.1); transform: translateY(-1px); }
+.btn-danger { background: linear-gradient(135deg,var(--danger),#ef4444); color: white; }
+.btn-danger:hover { filter: brightness(1.08); transform: translateY(-1px); }
+.btn-danger:disabled { opacity: .45; cursor: not-allowed; filter: none; transform: none; }
 .table-wrap { background: var(--card); border: 1px solid var(--border); border-radius: var(--r); overflow: hidden; }
 table { width: 100%; border-collapse: collapse; }
 thead { background: var(--card2); }
@@ -752,6 +894,9 @@ td.mono { font-family: var(--mono); color: var(--green); }
 .modal { background: var(--card); border: 1px solid var(--border2); border-radius: 16px; padding: 28px; width: 500px; max-width: 95vw; max-height: 90vh; overflow-y: auto; animation: modalIn .2s ease; }
 @keyframes modalIn { from{opacity:0;transform:scale(.95)} to{opacity:1;transform:scale(1)} }
 .modal-title { font-size: 18px; font-weight: 800; margin-bottom: 20px; }
+.modal-title.danger { color: var(--danger); }
+.danger-note { border:1px solid rgba(255,77,109,.28); background:rgba(255,77,109,.08); border-radius:12px; padding:12px 14px; color:var(--sub); font-size:13px; line-height:1.45; margin-bottom:16px; }
+.confirm-token { font-family:var(--mono); color:var(--danger); font-weight:800; }
 .form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
 .fld { display: flex; flex-direction: column; gap: 6px; margin-bottom: 14px; }
 .fld.span2 { grid-column: span 2; }
@@ -807,6 +952,7 @@ td.mono { font-family: var(--mono); color: var(--green); }
         <div style="display:flex;gap:10px;" id="tab-actions">
             <button class="btn btn-green"  id="btn-add-emp"  onclick="openAddEmpModal()">+ Add Employee</button>
             <button class="btn btn-blue"   id="btn-log-att"  onclick="openLogAttModal()" style="display:none">+ Log Attendance</button>
+            <button class="btn btn-danger" id="btn-clear-hr-data" onclick="openClearHRDataModal()" style="display:none">Clear HR Data</button>
         </div>
     </div>
 
@@ -969,6 +1115,24 @@ td.mono { font-family: var(--mono); color: var(--green); }
     </div>
 </div>
 
+<!-- CLEAR HR DATA MODAL -->
+<div class="modal-bg" id="clear-hr-modal">
+    <div class="modal">
+        <div class="modal-title danger">Clear HR Data</div>
+        <div class="danger-note">
+            This permanently deletes employees, attendance, payroll, and payroll-linked salary expenses. Other business data is not cleared.
+        </div>
+        <div class="fld">
+            <label>Type <span class="confirm-token">CLEAR HR DATA</span> to confirm</label>
+            <input id="clear-hr-confirmation" autocomplete="off" oninput="updateClearHRDataConfirmState()">
+        </div>
+        <div class="modal-actions">
+            <button class="btn-cancel" onclick="closeClearHRDataModal()">Cancel</button>
+            <button class="btn btn-danger" id="btn-confirm-clear-hr" onclick="confirmClearHRData()" disabled>Clear HR Data</button>
+        </div>
+    </div>
+</div>
+
 <div class="toast" id="toast"></div>
 
 <script>
@@ -1022,9 +1186,17 @@ async function logout(){
     window.location.href = "/";
 }
   let currentUser = null;
+  function permissionSet(u = currentUser){
+      const raw = u ? (u.permissions || []) : [];
+      if(Array.isArray(raw)) return new Set(raw);
+      if(typeof raw === "string"){
+          return new Set(raw.split(",").map(v => v.trim()).filter(Boolean));
+      }
+      return new Set();
+  }
   function hasPermission(permission, u = currentUser){
       const role = u ? (u.role || "") : "";
-      const perms = new Set(u ? (u.permissions || []) : []);
+      const perms = permissionSet(u);
       return role === "admin" || perms.has(permission);
   }
   function configureHRPermissions(u){
@@ -1045,6 +1217,8 @@ async function logout(){
           }
       });
       if(firstAllowed) setTimeout(() => switchTab(firstAllowed), 0);
+      const clearBtn = document.getElementById("btn-clear-hr-data");
+      if(clearBtn) clearBtn.style.display = hasPermission("action_hr_clear_data", u) ? "" : "none";
   }
   initializeColorMode();
   initUser().then(u => { if(u) configureHRPermissions(u); });
@@ -1570,10 +1744,99 @@ async function markPaid(id){
     loadPayrollRecords();
 }
 
+/* ── CLEAR HR DATA ── */
+function openClearHRDataModal(){
+    if(!hasPermission("action_hr_clear_data")){
+        showToast("Permission denied: action_hr_clear_data");
+        return;
+    }
+    const input = document.getElementById("clear-hr-confirmation");
+    if(input) input.value = "";
+    updateClearHRDataConfirmState();
+    document.getElementById("clear-hr-modal").classList.add("open");
+    if(input) input.focus();
+}
+
+function closeClearHRDataModal(){
+    document.getElementById("clear-hr-modal").classList.remove("open");
+    const input = document.getElementById("clear-hr-confirmation");
+    if(input) input.value = "";
+    updateClearHRDataConfirmState();
+}
+
+function updateClearHRDataConfirmState(){
+    const input = document.getElementById("clear-hr-confirmation");
+    const btn = document.getElementById("btn-confirm-clear-hr");
+    if(!btn || !input) return;
+    btn.disabled = input.value !== "CLEAR HR DATA";
+}
+
+function clearHRForms(){
+    editingEmpId = null;
+    editingPayId = null;
+    ["e-name","e-position","e-department","e-phone","e-salary","e-hire","a-note","ep-bonuses","ep-deductions","ep-notes"].forEach(id => {
+        const el = document.getElementById(id);
+        if(el) el.value = "";
+    });
+    fillEmployeeFarmSelect("");
+    const today = new Date().toISOString().split("T")[0];
+    const aDate = document.getElementById("a-date");
+    if(aDate) aDate.value = today;
+}
+
+function activeHRTab(){
+    if(document.getElementById("tab-att").classList.contains("active")) return "attendance";
+    if(document.getElementById("tab-pay").classList.contains("active")) return "payroll";
+    return "employees";
+}
+
+async function refreshHRDataAfterClear(){
+    clearHRForms();
+    employees = [];
+    await loadSummary();
+    await loadEmployeeFarms();
+    await loadEmployees();
+    const active = activeHRTab();
+    if(active === "attendance" && hasPermission("tab_hr_attendance")) initAttendanceTab();
+    if(active === "payroll" && hasPermission("tab_hr_payroll")) initPayrollTab();
+}
+
+async function confirmClearHRData(){
+    if(!hasPermission("action_hr_clear_data")){
+        showToast("Permission denied: action_hr_clear_data");
+        return;
+    }
+    const input = document.getElementById("clear-hr-confirmation");
+    const btn = document.getElementById("btn-confirm-clear-hr");
+    if(!input || input.value !== "CLEAR HR DATA"){
+        showToast("Type CLEAR HR DATA to confirm");
+        updateClearHRDataConfirmState();
+        return;
+    }
+    btn.disabled = true;
+    try{
+        const res = await fetch("/hr/clear-data", {
+            method: "POST",
+            headers: {"Content-Type":"application/json"},
+            body: JSON.stringify({confirmation: input.value}),
+        });
+        const data = await readApiResponse(res);
+        closeClearHRDataModal();
+        await refreshHRDataAfterClear();
+        const d = data.deleted || {};
+        showToast(`HR data cleared - ${numberValue(d.employees)} employees, ${numberValue(d.attendance)} attendance, ${numberValue(d.payroll)} payroll, ${numberValue(d.hr_expenses)} payroll expenses`);
+    }catch(err){
+        showToast("Error: " + (err.message || "Could not clear HR data"));
+        updateClearHRDataConfirmState();
+    }
+}
+
 /* ── MODAL CLOSE ON BG ── */
-["emp-modal","att-modal","pay-run-modal","edit-pay-modal"].forEach(id=>{
+["emp-modal","att-modal","pay-run-modal","edit-pay-modal","clear-hr-modal"].forEach(id=>{
     document.getElementById(id).addEventListener("click",function(e){
-        if(e.target===this) this.classList.remove("open");
+        if(e.target!==this) return;
+        if(id === "clear-hr-modal") closeClearHRDataModal();
+        else this.classList.remove("open");
     });
 });
 
