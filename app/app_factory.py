@@ -110,7 +110,10 @@ async def lifespan(_: FastAPI):
     configure_monitoring()
     await verify_migration_status()
     await seed_chart_of_accounts()
+    from app.core.cache import init_redis_pool, close_redis_pool
+    await init_redis_pool()
     yield
+    await close_redis_pool()
 
 
 def create_app() -> FastAPI:
