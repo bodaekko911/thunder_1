@@ -1005,6 +1005,7 @@ const LEGACY_PAGE_TREE = [
         {value:"tab_reports_pl",         label:"P&L tab"},
         {value:"tab_reports_inventory",  label:"Inventory tab"},
         {value:"tab_reports_transactions",label:"Transactions tab"},
+        {value:"tab_reports_hr",         label:"HR report tab"},
         {value:"action_export_excel",    label:"Export to Excel"},
     ]},
     { page: "page_pos",        icon: "🛒", label: "POS",         children: [

@@ -29,6 +29,7 @@ PERMISSION_MATRIX = [
             {"action": "view_farm", "key": "tab_reports_farm", "label": "Farm Intake tab"},
             {"action": "view_spoilage", "key": "tab_reports_spoilage", "label": "Spoilage tab"},
             {"action": "view_production", "key": "tab_reports_production", "label": "Production tab"},
+            {"action": "view_hr", "key": "tab_reports_hr", "label": "HR tab"},
             {"action": "export", "key": "action_export_excel", "label": "Export to Excel"},
         ],
     },
@@ -298,6 +299,8 @@ ROLE_DEFINITIONS = {
         "description": "People operations role for workforce administration. Includes dashboard visibility plus employee records, attendance, payroll processing, and payroll payment actions. Excludes sales, accounting, stock operations, and user management by default.",
         "permissions": {
             "page_dashboard",
+            "page_reports",
+            "tab_reports_hr",
             "page_hr",
             "tab_hr_employees",
             "tab_hr_attendance",

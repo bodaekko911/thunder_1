@@ -23,6 +23,7 @@ from app.models.production import ProductionBatch, BatchInput, BatchOutput
 from app.models.accounting import Account, Journal, JournalEntry
 from app.models.receipt import ProductReceipt
 from app.models.expense import Expense, ExpenseCategory
+from app.models.hr import Attendance, Employee, Payroll
 from app.models.user import User
 from app.services.expense_service import SALARY_CATEGORY_NAME
 
@@ -1826,6 +1827,358 @@ async def export_transactions(date_from: str = None, date_to: str = None, source
         headers={"Content-Disposition": f"attachment; filename=transactions_{date.today()}.xlsx"})
 
 
+def _hr_periods_for_range(start_date: date, end_date: date) -> list[str]:
+    periods = []
+    year = start_date.year
+    month = start_date.month
+    while (year, month) <= (end_date.year, end_date.month):
+        periods.append(f"{year:04d}-{month:02d}")
+        month += 1
+        if month > 12:
+            year += 1
+            month = 1
+    return periods
+
+
+def _valid_hr_period(period: Optional[str]) -> Optional[str]:
+    if not period:
+        return None
+    if not re.fullmatch(r"\d{4}-\d{2}", period):
+        raise HTTPException(status_code=400, detail="Invalid period. Use YYYY-MM.")
+    month = int(period[5:7])
+    if month < 1 or month > 12:
+        raise HTTPException(status_code=400, detail="Invalid period. Use YYYY-MM.")
+    return period
+
+
+def _attendance_rate(present_days: int, attendance_records: int) -> float:
+    if attendance_records <= 0:
+        return 0.0
+    return round((present_days / attendance_records) * 100, 2)
+
+
+def _hr_group_bucket(**extra):
+    bucket = {
+        "employees": 0,
+        "base_salary": 0.0,
+        "present_days": 0,
+        "absent_days": 0,
+        "late_days": 0,
+        "leave_days": 0,
+        "net_salary": 0.0,
+    }
+    bucket.update(extra)
+    return bucket
+
+
+async def _build_hr_report(
+    db: AsyncSession,
+    *,
+    d_from: datetime,
+    d_to: datetime,
+    period: Optional[str] = None,
+    department: Optional[str] = None,
+    farm_id: Optional[int] = None,
+    skip: int = 0,
+    limit: int = 100,
+    include_all: bool = False,
+):
+    normalized_period = _valid_hr_period(period)
+    periods = [normalized_period] if normalized_period else _hr_periods_for_range(d_from.date(), d_to.date())
+    department_filter = (department or "").strip()
+
+    employee_stmt = select(Employee).options(selectinload(Employee.farm))
+    if department_filter:
+        employee_stmt = employee_stmt.where(func.lower(Employee.department).like(f"%{department_filter.lower()}%"))
+    if farm_id is not None:
+        employee_stmt = employee_stmt.where(Employee.farm_id == farm_id)
+    employee_stmt = employee_stmt.order_by(Employee.name)
+    employees_res = await db.execute(employee_stmt)
+    employee_map = {employee.id: employee for employee in employees_res.scalars().all()}
+    filtered_employee_ids = set(employee_map)
+    has_employee_filter = bool(department_filter) or farm_id is not None
+
+    attendance_records = []
+    if not has_employee_filter or filtered_employee_ids:
+        attendance_stmt = select(Attendance).where(
+            Attendance.date >= d_from.date(),
+            Attendance.date <= d_to.date(),
+        )
+        if has_employee_filter:
+            attendance_stmt = attendance_stmt.where(Attendance.employee_id.in_(filtered_employee_ids))
+        attendance_res = await db.execute(attendance_stmt)
+        attendance_records = attendance_res.scalars().all()
+
+    payroll_records = []
+    if periods and (not has_employee_filter or filtered_employee_ids):
+        payroll_stmt = select(Payroll).where(Payroll.period.in_(periods))
+        if has_employee_filter:
+            payroll_stmt = payroll_stmt.where(Payroll.employee_id.in_(filtered_employee_ids))
+        payroll_res = await db.execute(payroll_stmt)
+        payroll_records = payroll_res.scalars().all()
+
+    active_ids = {employee.id for employee in employee_map.values() if employee.is_active}
+    attendance_employee_ids = {record.employee_id for record in attendance_records}
+    payroll_employee_ids = {record.employee_id for record in payroll_records}
+    included_ids = active_ids | attendance_employee_ids | payroll_employee_ids
+    included_ids &= filtered_employee_ids
+
+    attendance_by_employee = defaultdict(lambda: {"present": 0, "absent": 0, "late": 0, "leave": 0, "records": 0})
+    for record in attendance_records:
+        if record.employee_id not in included_ids:
+            continue
+        status = (record.status or "").lower()
+        stats = attendance_by_employee[record.employee_id]
+        stats["records"] += 1
+        if status in {"present", "absent", "late", "leave"}:
+            stats[status] += 1
+
+    payroll_by_employee = defaultdict(list)
+    for record in payroll_records:
+        if record.employee_id in included_ids:
+            payroll_by_employee[record.employee_id].append(record)
+
+    employee_rows = []
+    departments = {}
+    farms = {}
+    active_count = 0
+    inactive_count = 0
+    total_base_salary = 0.0
+
+    for employee in sorted((employee_map[employee_id] for employee_id in included_ids), key=lambda item: (item.name or "", item.id or 0)):
+        is_active = bool(employee.is_active)
+        if is_active:
+            active_count += 1
+        else:
+            inactive_count += 1
+
+        base_salary = _num(employee.base_salary)
+        total_base_salary += base_salary
+        att = attendance_by_employee[employee.id]
+        payrolls = sorted(payroll_by_employee.get(employee.id, []), key=lambda item: item.period or "", reverse=True)
+        payroll_period = payrolls[0].period if payrolls else "—"
+        days_worked = sum(int(payroll.days_worked or 0) for payroll in payrolls)
+        working_days = sum(int(payroll.working_days or 0) for payroll in payrolls)
+        bonuses = round(sum(_num(payroll.bonuses) for payroll in payrolls), 2)
+        deductions = round(sum(_num(payroll.deductions) for payroll in payrolls), 2)
+        net_salary = round(sum(_num(payroll.net_salary) for payroll in payrolls), 2)
+        paid = bool(payrolls) and all(bool(payroll.paid) for payroll in payrolls)
+        farm = getattr(employee, "farm", None)
+        farm_name = farm.name if farm else "Unassigned"
+        department_name = employee.department or "Unassigned"
+
+        row = {
+            "employee_id": employee.id,
+            "employee": employee.name or "—",
+            "phone": employee.phone or "—",
+            "position": employee.position or "—",
+            "department": department_name,
+            "farm_name": farm_name,
+            "hire_date": employee.hire_date.isoformat() if employee.hire_date else "—",
+            "base_salary": round(base_salary, 2),
+            "present_days": att["present"],
+            "absent_days": att["absent"],
+            "late_days": att["late"],
+            "leave_days": att["leave"],
+            "attendance_records": att["records"],
+            "attendance_rate": _attendance_rate(att["present"], att["records"]),
+            "payroll_period": payroll_period,
+            "days_worked": days_worked,
+            "working_days": working_days,
+            "bonuses": bonuses,
+            "deductions": deductions,
+            "net_salary": net_salary,
+            "paid": paid,
+        }
+        employee_rows.append(row)
+
+        dept_bucket = departments.setdefault(department_name, _hr_group_bucket(department=department_name))
+        dept_bucket["employees"] += 1
+        dept_bucket["base_salary"] += base_salary
+        dept_bucket["present_days"] += att["present"]
+        dept_bucket["absent_days"] += att["absent"]
+        dept_bucket["late_days"] += att["late"]
+        dept_bucket["leave_days"] += att["leave"]
+        dept_bucket["net_salary"] += net_salary
+
+        farm_bucket = farms.setdefault(employee.farm_id, _hr_group_bucket(farm_id=employee.farm_id, farm_name=farm_name))
+        farm_bucket["employees"] += 1
+        farm_bucket["base_salary"] += base_salary
+        farm_bucket["present_days"] += att["present"]
+        farm_bucket["absent_days"] += att["absent"]
+        farm_bucket["late_days"] += att["late"]
+        farm_bucket["leave_days"] += att["leave"]
+        farm_bucket["net_salary"] += net_salary
+
+    by_department = sorted(
+        (
+            {
+                **bucket,
+                "base_salary": round(bucket["base_salary"], 2),
+                "net_salary": round(bucket["net_salary"], 2),
+            }
+            for bucket in departments.values()
+        ),
+        key=lambda item: item["department"],
+    )
+    by_farm = sorted(
+        (
+            {
+                **bucket,
+                "base_salary": round(bucket["base_salary"], 2),
+                "net_salary": round(bucket["net_salary"], 2),
+            }
+            for bucket in farms.values()
+        ),
+        key=lambda item: (item["farm_name"], item["farm_id"] or 0),
+    )
+
+    total_attendance_records = sum(row["attendance_records"] for row in employee_rows)
+    present_days = sum(row["present_days"] for row in employee_rows)
+    absent_days = sum(row["absent_days"] for row in employee_rows)
+    late_days = sum(row["late_days"] for row in employee_rows)
+    leave_days = sum(row["leave_days"] for row in employee_rows)
+    gross_salary = round(sum(_num(payroll.base_salary) for payroll in payroll_records if payroll.employee_id in included_ids), 2)
+    bonuses_total = round(sum(_num(payroll.bonuses) for payroll in payroll_records if payroll.employee_id in included_ids), 2)
+    deductions_total = round(sum(_num(payroll.deductions) for payroll in payroll_records if payroll.employee_id in included_ids), 2)
+    net_salary_total = round(sum(_num(payroll.net_salary) for payroll in payroll_records if payroll.employee_id in included_ids), 2)
+    paid_salary = round(sum(_num(payroll.net_salary) for payroll in payroll_records if payroll.employee_id in included_ids and payroll.paid), 2)
+
+    return {
+        "date_from": d_from.strftime("%Y-%m-%d"),
+        "date_to": d_to.strftime("%Y-%m-%d"),
+        "period": normalized_period,
+        "summary": {
+            "active_employees": active_count,
+            "inactive_employees": inactive_count,
+            "total_base_salary": round(total_base_salary, 2),
+            "attendance_records": total_attendance_records,
+            "present_days": present_days,
+            "absent_days": absent_days,
+            "late_days": late_days,
+            "leave_days": leave_days,
+            "attendance_rate": _attendance_rate(present_days, total_attendance_records),
+            "payroll_records": len([payroll for payroll in payroll_records if payroll.employee_id in included_ids]),
+            "gross_salary": gross_salary,
+            "bonuses": bonuses_total,
+            "deductions": deductions_total,
+            "net_salary": net_salary_total,
+            "paid_salary": paid_salary,
+            "unpaid_salary": round(net_salary_total - paid_salary, 2),
+        },
+        "by_department": by_department,
+        "by_farm": by_farm,
+        "employees": _paginate_rows(employee_rows, skip, limit, include_all=include_all),
+        "total_rows": len(employee_rows),
+    }
+
+
+@router.get("/api/hr")
+async def hr_report(
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+    period: Optional[str] = None,
+    department: Optional[str] = None,
+    farm_id: Optional[int] = None,
+    skip: int = 0,
+    limit: int = Query(default=100, le=500),
+    db: AsyncSession = Depends(get_async_session),
+    _=Depends(require_permission("tab_reports_hr")),
+):
+    d_from, d_to = parse_dates(date_from, date_to)
+    skip, limit = _resolve_pagination(skip, limit)
+    return await _build_hr_report(
+        db,
+        d_from=d_from,
+        d_to=d_to,
+        period=period,
+        department=department,
+        farm_id=farm_id,
+        skip=skip,
+        limit=limit,
+    )
+
+
+@router.get("/export/hr", dependencies=[Depends(require_permission("action_export_excel"))])
+async def export_hr(
+    date_from: str = None,
+    date_to: str = None,
+    period: str = None,
+    department: str = None,
+    farm_id: Optional[int] = None,
+    db: AsyncSession = Depends(get_async_session),
+    _=Depends(require_permission("tab_reports_hr")),
+):
+    d_from, d_to = parse_dates(date_from, date_to)
+    data = await _build_hr_report(
+        db,
+        d_from=d_from,
+        d_to=d_to,
+        period=period,
+        department=department,
+        farm_id=farm_id,
+        include_all=True,
+    )
+    summary = data["summary"]
+    wb = build_report_workbook([
+        {
+            "sheet_name": "HR Summary",
+            "report_title": "HR Report Summary",
+            "headers": ["Metric", "Value"],
+            "rows": [
+                ["Active Employees", summary["active_employees"]],
+                ["Inactive Employees", summary["inactive_employees"]],
+                ["Total Base Salary", summary["total_base_salary"]],
+                ["Attendance Records", summary["attendance_records"]],
+                ["Present Days", summary["present_days"]],
+                ["Absent Days", summary["absent_days"]],
+                ["Late Days", summary["late_days"]],
+                ["Leave Days", summary["leave_days"]],
+                ["Attendance Rate", summary["attendance_rate"]],
+                ["Payroll Records", summary["payroll_records"]],
+                ["Gross Salary", summary["gross_salary"]],
+                ["Bonuses", summary["bonuses"]],
+                ["Deductions", summary["deductions"]],
+                ["Net Salary", summary["net_salary"]],
+                ["Paid Salary", summary["paid_salary"]],
+                ["Unpaid Salary", summary["unpaid_salary"]],
+            ],
+            "metadata": [("Date Range", f"{data['date_from']} to {data['date_to']}"), ("Payroll Period", data["period"] or "Range months")],
+            "tab_color": "1F4E78",
+        },
+        {
+            "sheet_name": "By Department",
+            "report_title": "HR By Department",
+            "headers": ["Department", "Employees", "Base Salary", "Present Days", "Absent Days", "Late Days", "Leave Days", "Net Salary"],
+            "rows": [[row["department"], row["employees"], row["base_salary"], row["present_days"], row["absent_days"], row["late_days"], row["leave_days"], row["net_salary"]] for row in data["by_department"]],
+            "metadata": [("Date Range", f"{data['date_from']} to {data['date_to']}"), ("Rows", len(data["by_department"]))],
+            "column_formats": {"Employees": "int", "Base Salary": "money", "Present Days": "int", "Absent Days": "int", "Late Days": "int", "Leave Days": "int", "Net Salary": "money"},
+            "tab_color": "2F6F4F",
+        },
+        {
+            "sheet_name": "By Farm",
+            "report_title": "HR By Farm",
+            "headers": ["Farm ID", "Farm", "Employees", "Base Salary", "Present Days", "Absent Days", "Late Days", "Leave Days", "Net Salary"],
+            "rows": [[row["farm_id"], row["farm_name"], row["employees"], row["base_salary"], row["present_days"], row["absent_days"], row["late_days"], row["leave_days"], row["net_salary"]] for row in data["by_farm"]],
+            "metadata": [("Date Range", f"{data['date_from']} to {data['date_to']}"), ("Rows", len(data["by_farm"]))],
+            "column_formats": {"Employees": "int", "Base Salary": "money", "Present Days": "int", "Absent Days": "int", "Late Days": "int", "Leave Days": "int", "Net Salary": "money"},
+            "tab_color": "5B7F95",
+        },
+        {
+            "sheet_name": "Employees",
+            "report_title": "HR Employee Detail",
+            "headers": ["Employee ID", "Employee", "Phone", "Position", "Department", "Farm", "Hire Date", "Base Salary", "Present Days", "Absent Days", "Late Days", "Leave Days", "Attendance Records", "Attendance Rate", "Payroll Period", "Days Worked", "Working Days", "Bonuses", "Deductions", "Net Salary", "Paid"],
+            "rows": [[row["employee_id"], row["employee"], row["phone"], row["position"], row["department"], row["farm_name"], row["hire_date"], row["base_salary"], row["present_days"], row["absent_days"], row["late_days"], row["leave_days"], row["attendance_records"], row["attendance_rate"], row["payroll_period"], row["days_worked"], row["working_days"], row["bonuses"], row["deductions"], row["net_salary"], "Yes" if row["paid"] else "No"] for row in data["employees"]],
+            "metadata": [("Date Range", f"{data['date_from']} to {data['date_to']}"), ("Payroll Period", data["period"] or "Range months"), ("Rows", data["total_rows"])],
+            "column_formats": {"Employee ID": "int", "Hire Date": "date", "Base Salary": "money", "Present Days": "int", "Absent Days": "int", "Late Days": "int", "Leave Days": "int", "Attendance Records": "int", "Attendance Rate": "percent_value", "Days Worked": "int", "Working Days": "int", "Bonuses": "money", "Deductions": "money", "Net Salary": "money"},
+            "tab_color": "7C3AED",
+        },
+    ])
+    buf = workbook_to_buffer(wb)
+    return StreamingResponse(buf, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f"attachment; filename=hr_report_{date.today()}.xlsx"})
+
+
 # ── UI ─────────────────────────────────────────────────
 @router.get("/", response_class=HTMLResponse)
 def reports_ui(current_user: User = Depends(require_permission("page_reports"))):
@@ -1878,8 +2231,8 @@ nav{position:sticky;top:0;z-index:100;display:flex;align-items:center;gap:8px;pa
 /* FILTER BAR */
 .filter-bar{display:flex;align-items:center;gap:8px;flex-wrap:wrap;background:var(--card);border:1px solid var(--border);border-radius:var(--r);padding:12px 16px;}
 .filter-bar label{font-size:11px;font-weight:700;letter-spacing:1px;text-transform:uppercase;color:var(--muted);white-space:nowrap;}
-.filter-bar input[type=date]{background:var(--card2);border:1px solid var(--border2);border-radius:8px;padding:7px 11px;color:var(--text);font-family:var(--sans);font-size:13px;outline:none;}
-.filter-bar input[type=date]:focus{border-color:var(--lime);}
+.filter-bar input[type=date],.filter-bar input[type=month],.filter-bar input[type=text],.filter-bar input[type=number],.filter-bar select{background:var(--card2);border:1px solid var(--border2);border-radius:8px;padding:7px 11px;color:var(--text);font-family:var(--sans);font-size:13px;outline:none;}
+.filter-bar input[type=date]:focus,.filter-bar input[type=month]:focus,.filter-bar input[type=text]:focus,.filter-bar input[type=number]:focus,.filter-bar select:focus{border-color:var(--lime);}
 .filter-sep{width:1px;height:24px;background:var(--border2);margin:0 4px;}
 .btn{display:inline-flex;align-items:center;gap:6px;padding:8px 14px;border-radius:var(--r);font-family:var(--sans);font-size:12px;font-weight:700;cursor:pointer;border:none;transition:all .2s;white-space:nowrap;}
 .btn-lime {background:linear-gradient(135deg,var(--lime),var(--green));color:#0a1a00;}
@@ -1992,6 +2345,7 @@ td.mono{font-family:var(--mono);}
         <button class="tab"        onclick="switchTab('farm')">🌾 Farm Intake</button>
         <button class="tab"        onclick="switchTab('spoilage')">🗑 Spoilage</button>
         <button class="tab"        onclick="switchTab('production')">⚙️ Production</button>
+        <button class="tab"        onclick="switchTab('hr')">HR</button>
         <button class="tab"        onclick="switchTab('pl')">💰 P&amp;L</button>
     </div>
 
@@ -2261,6 +2615,61 @@ td.mono{font-family:var(--mono);}
         </div>
     </div>
 
+    <!-- ──────────── HR ──────────── -->
+    <div id="section-hr" class="section">
+        <div class="print-header">
+            <div style="display:flex;align-items:center;gap:14px">
+                <img src="/static/Logo.png" style="height:120px;object-fit:contain">
+                <div>
+                    <div style="font-size:16px;font-weight:900;color:#2a7a2a">Habiba Organic Farm</div>
+                    <div style="font-size:11px;color:#666;margin-top:2px">Commercial registry: 126278 &nbsp;|&nbsp; Tax ID: 560042604</div>
+                </div>
+            </div>
+            <div style="text-align:right">
+                <div style="font-size:18px;font-weight:800;color:#2a7a2a">HR Report</div>
+                <div style="font-size:12px;color:#666;margin-top:4px" id="ph-hr-dates"></div>
+            </div>
+        </div>
+        <div class="filter-bar no-print">
+            <label>From</label><input type="date" id="hr-from">
+            <label>To</label><input type="date" id="hr-to">
+            <label>Period</label><input type="month" id="hr-period">
+            <label>Department</label><input type="text" id="hr-department" placeholder="All departments">
+            <label>Farm ID</label><input type="number" id="hr-farm-id" min="1" placeholder="All farms">
+            <div class="filter-sep"></div>
+            <button class="btn btn-lime" onclick="loadHR()">Apply</button>
+            <button class="btn btn-excel" onclick="exportSection('hr')">⬇ Excel</button>
+            <button class="btn btn-print" onclick="window.print()">🖨 Print</button>
+        </div>
+        <div class="stats-row">
+            <div class="stat-card sc-blue"><div class="stat-label">Active Employees</div><div class="stat-value sv-blue" id="hr-active">—</div></div>
+            <div class="stat-card sc-green"><div class="stat-label">Attendance Rate</div><div class="stat-value sv-green" id="hr-rate">—</div></div>
+            <div class="stat-card sc-teal"><div class="stat-label">Present Days</div><div class="stat-value sv-teal" id="hr-present">—</div></div>
+            <div class="stat-card sc-danger"><div class="stat-label">Absent Days</div><div class="stat-value sv-danger" id="hr-absent">—</div></div>
+            <div class="stat-card sc-green"><div class="stat-label">Net Salary</div><div class="stat-value sv-green" id="hr-net">—</div></div>
+            <div class="stat-card sc-orange"><div class="stat-label">Unpaid Salary</div><div class="stat-value sv-orange" id="hr-unpaid">—</div></div>
+        </div>
+        <div class="two-col">
+            <div class="table-wrap">
+                <div class="table-title">Department Summary</div>
+                <table><thead><tr><th>Department</th><th>Employees</th><th>Present</th><th>Absent</th><th>Late</th><th>Leave</th><th>Net Salary</th></tr></thead>
+                <tbody id="hr-dept-body"></tbody></table>
+            </div>
+            <div class="table-wrap">
+                <div class="table-title">Farm Summary</div>
+                <table><thead><tr><th>Farm</th><th>Employees</th><th>Present</th><th>Absent</th><th>Late</th><th>Leave</th><th>Net Salary</th></tr></thead>
+                <tbody id="hr-farm-body"></tbody></table>
+            </div>
+        </div>
+        <div class="table-wrap">
+            <div class="table-title">Employee Detail</div>
+            <div style="overflow-x:auto">
+            <table><thead><tr><th>Employee</th><th>Phone</th><th>Position</th><th>Department</th><th>Farm</th><th>Hire Date</th><th>Base Salary</th><th>Attendance</th><th>Rate</th><th>Payroll</th><th>Worked</th><th>Net Salary</th><th>Paid</th></tr></thead>
+            <tbody id="hr-emp-body"></tbody></table>
+            </div>
+        </div>
+    </div>
+
     <!-- ──────────── P&L ──────────── -->
     <div id="section-pl" class="section">
         <div class="print-header">
@@ -2363,7 +2772,7 @@ function switchTab(tab){
     const section = document.getElementById("section-"+tab);
     if(!section) return;
     section.classList.add("active");
-    const loaders = {sales:loadSales, transactions:loadTransactions, b2b:loadB2B, inventory:loadInventory, farm:loadFarm, spoilage:loadSpoilage, production:loadProduction, pl:loadPL};
+    const loaders = {sales:loadSales, transactions:loadTransactions, b2b:loadB2B, inventory:loadInventory, farm:loadFarm, spoilage:loadSpoilage, production:loadProduction, hr:loadHR, pl:loadPL};
     if(loaders[tab]){
         loaders[tab]();
     } else {
@@ -2383,7 +2792,7 @@ function showToast(msg){
     clearTimeout(toastTimer); toastTimer=setTimeout(()=>t.classList.remove("show"),3000);
 }
 
-const REPORT_TAB_ORDER = ["sales","transactions","b2b","inventory","farm","spoilage","production","pl"];
+const REPORT_TAB_ORDER = ["sales","transactions","b2b","inventory","farm","spoilage","production","hr","pl"];
 const REPORT_TAB_PERMISSIONS = {
     sales: "tab_reports_sales",
     transactions: "tab_reports_transactions",
@@ -2392,6 +2801,7 @@ const REPORT_TAB_PERMISSIONS = {
     farm: "tab_reports_farm",
     spoilage: "tab_reports_spoilage",
     production: "tab_reports_production",
+    hr: "tab_reports_hr",
     pl: "tab_reports_pl",
 };
 
@@ -2503,6 +2913,7 @@ async function exportSection(tab){
         farm:       ()=>{ let r=getRange("farm-from","farm-to");   return `/reports/export/farm-intake?date_from=${r.from}&date_to=${r.to}`; },
         spoilage:   ()=>{ let r=getRange("spl-from","spl-to");     return `/reports/export/spoilage?date_from=${r.from}&date_to=${r.to}`; },
         production: ()=>{ let r=getRange("prod-from","prod-to");   return `/reports/export/production?date_from=${r.from}&date_to=${r.to}`; },
+        hr:         ()=>{ let r=getRange("hr-from","hr-to"); let p=document.getElementById("hr-period").value; let d=document.getElementById("hr-department").value.trim(); let f=document.getElementById("hr-farm-id").value; return `/reports/export/hr?date_from=${r.from}&date_to=${r.to}${p?"&period="+encodeURIComponent(p):""}${d?"&department="+encodeURIComponent(d):""}${f?"&farm_id="+encodeURIComponent(f):""}`; },
         pl:           ()=>{ let r=getRange("pl-from","pl-to");   return `/reports/export/pl?date_from=${r.from}&date_to=${r.to}`; },
         transactions: ()=>{ let r=getRange("tx-from","tx-to"); let s=document.getElementById("tx-source").value; return `/reports/export/transactions?date_from=${r.from}&date_to=${r.to}${s?"&source="+s:""}`; },
     };
@@ -3031,6 +3442,70 @@ async function loadProduction(){
 }
 
 
+/* ── HR ── */
+async function loadHR(){
+    let r = getRange("hr-from","hr-to");
+    let period = document.getElementById("hr-period").value;
+    let department = document.getElementById("hr-department").value.trim();
+    let farmId = document.getElementById("hr-farm-id").value;
+    let params = new URLSearchParams({date_from:r.from, date_to:r.to});
+    if(period) params.set("period", period);
+    if(department) params.set("department", department);
+    if(farmId) params.set("farm_id", farmId);
+    let data = await fetchReportJson(`/reports/api/hr?${params.toString()}`);
+    let summary = data.summary;
+    setPrintDates("ph-hr-dates", data.date_from, data.date_to);
+    document.getElementById("hr-active").innerText = summary.active_employees;
+    document.getElementById("hr-rate").innerText = Number(summary.attendance_rate || 0).toFixed(1) + "%";
+    document.getElementById("hr-present").innerText = summary.present_days;
+    document.getElementById("hr-absent").innerText = summary.absent_days;
+    document.getElementById("hr-net").innerText = Number(summary.net_salary || 0).toFixed(2);
+    document.getElementById("hr-unpaid").innerText = Number(summary.unpaid_salary || 0).toFixed(2);
+
+    document.getElementById("hr-dept-body").innerHTML = data.by_department.length
+        ? data.by_department.map(row=>`<tr>
+            <td class="name">${row.department}</td>
+            <td class="mono">${row.employees}</td>
+            <td class="mono">${row.present_days}</td>
+            <td class="mono" style="color:var(--danger)">${row.absent_days}</td>
+            <td class="mono" style="color:var(--warn)">${row.late_days}</td>
+            <td class="mono" style="color:var(--blue)">${row.leave_days}</td>
+            <td class="mono" style="color:var(--green)">${Number(row.net_salary || 0).toFixed(2)}</td>
+          </tr>`).join("")
+        : `<tr><td colspan="7" style="text-align:center;color:var(--muted);padding:24px">No department records in this period</td></tr>`;
+
+    document.getElementById("hr-farm-body").innerHTML = data.by_farm.length
+        ? data.by_farm.map(row=>`<tr>
+            <td class="name">${row.farm_name}</td>
+            <td class="mono">${row.employees}</td>
+            <td class="mono">${row.present_days}</td>
+            <td class="mono" style="color:var(--danger)">${row.absent_days}</td>
+            <td class="mono" style="color:var(--warn)">${row.late_days}</td>
+            <td class="mono" style="color:var(--blue)">${row.leave_days}</td>
+            <td class="mono" style="color:var(--green)">${Number(row.net_salary || 0).toFixed(2)}</td>
+          </tr>`).join("")
+        : `<tr><td colspan="7" style="text-align:center;color:var(--muted);padding:24px">No farm records in this period</td></tr>`;
+
+    document.getElementById("hr-emp-body").innerHTML = data.employees.length
+        ? data.employees.map(row=>`<tr>
+            <td class="name">${row.employee}</td>
+            <td>${row.phone}</td>
+            <td>${row.position}</td>
+            <td>${row.department}</td>
+            <td>${row.farm_name}</td>
+            <td class="mono">${row.hire_date}</td>
+            <td class="mono">${Number(row.base_salary || 0).toFixed(2)}</td>
+            <td class="mono">${row.present_days}/${row.attendance_records} present</td>
+            <td class="mono">${Number(row.attendance_rate || 0).toFixed(1)}%</td>
+            <td class="mono">${row.payroll_period}</td>
+            <td class="mono">${row.days_worked}/${row.working_days}</td>
+            <td class="mono" style="color:var(--green)">${Number(row.net_salary || 0).toFixed(2)}</td>
+            <td><span class="badge ${row.paid?"badge-ok":"badge-low"}">${row.paid?"Paid":"Unpaid"}</span></td>
+          </tr>`).join("")
+        : `<tr><td colspan="13" style="text-align:center;color:var(--muted);padding:30px">No employee rows in this period</td></tr>`;
+}
+
+
 /* ── P&L ── */
 async function loadPL(){
     let r = getRange("pl-from","pl-to");
@@ -3113,6 +3588,7 @@ const __rawReportLoaders = {
     farm: loadFarm,
     spoilage: loadSpoilage,
     production: loadProduction,
+    hr: loadHR,
     pl: loadPL,
 };
 
@@ -3123,6 +3599,7 @@ loadInventory = () => runReportLoader("inventory", __rawReportLoaders.inventory)
 loadFarm = () => runReportLoader("farm", __rawReportLoaders.farm);
 loadSpoilage = () => runReportLoader("spoilage", __rawReportLoaders.spoilage);
 loadProduction = () => runReportLoader("production", __rawReportLoaders.production);
+loadHR = () => runReportLoader("hr", __rawReportLoaders.hr);
 loadPL = () => runReportLoader("pl", __rawReportLoaders.pl);
 
 function togglePLDetail(id){
@@ -3143,6 +3620,8 @@ function togglePLDetail(id){
     setEl("farm-from",  m); setEl("farm-to",   t);
     setEl("spl-from",   m); setEl("spl-to",    t);
     setEl("prod-from",  m); setEl("prod-to",   t);
+    setEl("hr-from",    m); setEl("hr-to",     t);
+    setEl("hr-period",  t.slice(0,7));
     setEl("pl-from",    y); setEl("pl-to",     t);
     const invMode = document.getElementById("inv-mode");
     const invFrom = document.getElementById("inv-from");
