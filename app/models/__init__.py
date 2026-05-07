@@ -14,7 +14,14 @@ from app.models.b2b import (
 from app.models.customer import Customer
 from app.models.expense import Expense, ExpenseCategory
 from app.models.farm import Farm, FarmDelivery, FarmDeliveryItem, WeatherLog
-from app.models.hr import Attendance, Employee, Payroll
+from app.models.hr import (
+    Attendance,
+    Employee,
+    EmployeeLoan,
+    EmployeeLoanRepayment,
+    EmployeePayrollDeduction,
+    Payroll,
+)
 from app.models.inventory import LocationStock, StockLocation, StockMove, StockTransfer
 from app.models.invoice import Invoice, InvoiceItem
 from app.models.product import Product
@@ -48,6 +55,9 @@ __all__ = [
     "ConsignmentItem",
     "Customer",
     "Employee",
+    "EmployeeLoan",
+    "EmployeeLoanRepayment",
+    "EmployeePayrollDeduction",
     "Expense",
     "ExpenseCategory",
     "Farm",

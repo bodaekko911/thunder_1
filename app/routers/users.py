@@ -1041,6 +1041,10 @@ const LEGACY_PAGE_TREE = [
         {value:"tab_hr_payroll",       label:"Payroll tab"},
         {value:"action_hr_run_payroll",label:"Run payroll"},
         {value:"action_hr_mark_paid",  label:"Mark payroll paid"},
+        {value:"action_hr_view_loans", label:"View employee loans"},
+        {value:"action_hr_manage_loans", label:"Manage employee loans"},
+        {value:"action_hr_view_deductions", label:"View payroll deductions"},
+        {value:"action_hr_manage_deductions", label:"Manage payroll deductions"},
         {value:"action_hr_clear_data", label:"Clear all HR data"},
     ]},
     { page: "page_accounting", icon: "📒", label: "Accounting",  children: [

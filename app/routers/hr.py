@@ -1,19 +1,29 @@
 ﻿from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import HTMLResponse
+import re
+from decimal import Decimal, ROUND_HALF_UP
+
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 from sqlalchemy import delete, func, select
 from typing import Optional, List
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from datetime import date, datetime, timezone
 
 from app.database import get_async_session
-from app.core.permissions import get_current_user, require_permission
+from app.core.permissions import get_current_user, has_permission, require_permission
 from app.core.log import record
 from app.core.navigation import render_app_header
 from app.models.accounting import Account, Journal, JournalEntry
 from app.models.expense import Expense
-from app.models.hr import Employee, Attendance, Payroll
+from app.models.hr import (
+    Employee,
+    Attendance,
+    EmployeeLoan,
+    EmployeeLoanRepayment,
+    EmployeePayrollDeduction,
+    Payroll,
+)
 from app.models.farm import Farm
 from app.models.user import User
 from app.services.expense_service import create_payroll_expense
@@ -58,14 +68,42 @@ class AttendanceCreate(BaseModel):
 class PayrollRun(BaseModel):
     period:  str  # "2025-01"
     emp_ids: Optional[List[int]] = None  # None = all employees
+    bonuses: Optional[dict[int, Decimal]] = None
+    loan_repayments: Optional[dict[int, Decimal]] = None
 
 class PayrollUpdate(BaseModel):
-    bonuses:    float = 0
-    deductions: float = 0
+    bonuses:    Decimal = Decimal("0")
+    deductions: Decimal = Decimal("0")
     notes:      Optional[str] = None
 
 class PayrollPayRequest(BaseModel):
     payment_method: Optional[str] = "cash"
+
+
+class EmployeeLoanCreate(BaseModel):
+    loan_date: str
+    amount: Decimal = Field(gt=0)
+    description: Optional[str] = None
+
+
+class LoanRepaymentCreate(BaseModel):
+    repayment_date: str
+    amount: Decimal = Field(gt=0)
+    note: Optional[str] = None
+
+
+class DayDeductionCreate(BaseModel):
+    period: str
+    deduction_date: str
+    days: Decimal = Field(gt=0)
+    working_days: Decimal = Field(gt=0)
+    note: Optional[str] = None
+
+
+class ManualDeductionCreate(BaseModel):
+    period: str
+    amount: Decimal = Field(gt=0)
+    note: Optional[str] = None
 
 
 class ClearHRDataRequest(BaseModel):
@@ -73,6 +111,11 @@ class ClearHRDataRequest(BaseModel):
 
 
 CLEAR_HR_DATA_CONFIRMATION = "CLEAR HR DATA"
+LOAN_STATUSES = {"open", "paid", "cancelled"}
+DEDUCTION_TYPES = {"loan_repayment", "day_deduction", "manual"}
+PERIOD_RE = re.compile(r"^\d{4}-\d{2}$")
+MONEY_QUANT = Decimal("0.01")
+DAY_QUANT = Decimal("0.01")
 
 
 def _normalize_attendance_status(status: str) -> str:
@@ -100,6 +143,45 @@ def _parse_optional_iso_date(value: str | None, field_name: str) -> date | None:
             status_code=400,
             detail=f"Invalid {field_name}. Use YYYY-MM-DD.",
         ) from exc
+
+
+def _parse_required_iso_date(value: str | None, field_name: str) -> date:
+    parsed = _parse_optional_iso_date(value, field_name)
+    if parsed is None:
+        raise HTTPException(status_code=400, detail=f"{field_name} is required")
+    return parsed
+
+
+def _validate_period(period: str | None) -> str:
+    normalized = (period or "").strip()
+    if not PERIOD_RE.match(normalized):
+        raise HTTPException(status_code=400, detail="Invalid period. Use YYYY-MM.")
+    month = int(normalized[5:7])
+    if month < 1 or month > 12:
+        raise HTTPException(status_code=400, detail="Invalid period. Use YYYY-MM.")
+    return normalized
+
+
+def _dec(value, default: str = "0") -> Decimal:
+    if value is None:
+        return Decimal(default)
+    return Decimal(str(value))
+
+
+def _money(value) -> Decimal:
+    return _dec(value).quantize(MONEY_QUANT, rounding=ROUND_HALF_UP)
+
+
+def _days(value) -> Decimal:
+    return _dec(value).quantize(DAY_QUANT, rounding=ROUND_HALF_UP)
+
+
+def _as_float(value) -> float:
+    return float(_money(value))
+
+
+def _as_day_float(value) -> float:
+    return float(_days(value))
 
 
 async def _get_employee_or_404(db: AsyncSession, employee_id: int) -> Employee:
@@ -184,6 +266,131 @@ def _employee_payload(employee: Employee) -> dict:
     }
 
 
+async def _loan_repaid_amounts(db: AsyncSession, loan_ids: list[int]) -> dict[int, Decimal]:
+    if not loan_ids:
+        return {}
+    result = await db.execute(
+        select(
+            EmployeeLoanRepayment.loan_id,
+            func.coalesce(func.sum(EmployeeLoanRepayment.amount), 0),
+        )
+        .where(EmployeeLoanRepayment.loan_id.in_(loan_ids))
+        .group_by(EmployeeLoanRepayment.loan_id)
+    )
+    return {loan_id: _money(total) for loan_id, total in result.all()}
+
+
+async def _employee_loan_balance(db: AsyncSession, employee_id: int) -> Decimal:
+    loans_result = await db.execute(
+        select(EmployeeLoan).where(
+            EmployeeLoan.employee_id == employee_id,
+            EmployeeLoan.status != "cancelled",
+        )
+    )
+    loans = loans_result.scalars().all()
+    repaid = await _loan_repaid_amounts(db, [loan.id for loan in loans])
+    return _money(sum((_money(loan.amount) - repaid.get(loan.id, Decimal("0"))) for loan in loans))
+
+
+async def _loan_balance(db: AsyncSession, loan: EmployeeLoan) -> Decimal:
+    repaid = await _loan_repaid_amounts(db, [loan.id])
+    return _money(_money(loan.amount) - repaid.get(loan.id, Decimal("0")))
+
+
+def _loan_payload(loan: EmployeeLoan, repaid: Decimal) -> dict:
+    amount = _money(loan.amount)
+    balance = Decimal("0") if loan.status == "cancelled" else _money(amount - repaid)
+    return {
+        "id": loan.id,
+        "employee_id": loan.employee_id,
+        "loan_date": loan.loan_date.isoformat(),
+        "amount": _as_float(amount),
+        "repaid_amount": _as_float(repaid),
+        "balance": _as_float(balance),
+        "status": loan.status,
+        "description": loan.description or "",
+        "created_at": str(loan.created_at) if loan.created_at else None,
+        "updated_at": str(loan.updated_at) if loan.updated_at else None,
+    }
+
+
+def _deduction_payload(deduction: EmployeePayrollDeduction) -> dict:
+    payroll = getattr(deduction, "payroll", None)
+    return {
+        "id": deduction.id,
+        "employee_id": deduction.employee_id,
+        "payroll_id": deduction.payroll_id,
+        "payroll_period": payroll.period if payroll else deduction.period,
+        "period": deduction.period,
+        "deduction_date": deduction.deduction_date.isoformat() if deduction.deduction_date else None,
+        "type": deduction.type,
+        "days": _as_day_float(deduction.days) if deduction.days is not None else None,
+        "daily_rate": _as_float(deduction.daily_rate) if deduction.daily_rate is not None else None,
+        "amount": _as_float(deduction.amount),
+        "note": deduction.note or "",
+        "created_at": str(deduction.created_at) if deduction.created_at else None,
+    }
+
+
+async def _update_loan_status(db: AsyncSession, loan: EmployeeLoan) -> Decimal:
+    if loan.status == "cancelled":
+        return Decimal("0")
+    balance = await _loan_balance(db, loan)
+    loan.status = "paid" if balance <= 0 else "open"
+    return max(balance, Decimal("0"))
+
+
+async def _apply_loan_repayment_to_oldest_loans(
+    db: AsyncSession,
+    *,
+    employee_id: int,
+    amount: Decimal,
+    repayment_date: date,
+    payroll_id: int | None,
+    note: str,
+    current_user: User,
+) -> Decimal:
+    amount = _money(amount)
+    if amount <= 0:
+        return Decimal("0")
+
+    outstanding = await _employee_loan_balance(db, employee_id)
+    if amount > outstanding:
+        raise HTTPException(status_code=400, detail="Loan repayment exceeds outstanding balance")
+
+    loans_result = await db.execute(
+        select(EmployeeLoan)
+        .where(EmployeeLoan.employee_id == employee_id, EmployeeLoan.status == "open")
+        .order_by(EmployeeLoan.loan_date, EmployeeLoan.id)
+    )
+    loans = loans_result.scalars().all()
+    remaining = amount
+    for loan in loans:
+        if remaining <= 0:
+            break
+        loan_balance = await _loan_balance(db, loan)
+        if loan_balance <= 0:
+            loan.status = "paid"
+            continue
+        applied = min(remaining, loan_balance)
+        db.add(
+            EmployeeLoanRepayment(
+                loan_id=loan.id,
+                employee_id=employee_id,
+                payroll_id=payroll_id,
+                repayment_date=repayment_date,
+                amount=applied,
+                note=note,
+                created_by_user_id=current_user.id,
+            )
+        )
+        remaining = _money(remaining - applied)
+        if _money(loan_balance - applied) <= 0:
+            loan.status = "paid"
+
+    return amount
+
+
 async def _count_records(db: AsyncSession, model) -> int:
     result = await db.execute(select(func.count(model.id)))
     return int(result.scalar() or 0)
@@ -220,6 +427,9 @@ async def _clear_hr_data(db: AsyncSession, current_user: User) -> dict:
         "attendance": await _count_records(db, Attendance),
         "payroll": await _count_records(db, Payroll),
         "employees": await _count_records(db, Employee),
+        "loans": await _count_records(db, EmployeeLoan),
+        "loan_repayments": await _count_records(db, EmployeeLoanRepayment),
+        "payroll_deductions": await _count_records(db, EmployeePayrollDeduction),
         "hr_expenses": 0,
     }
 
@@ -248,6 +458,9 @@ async def _clear_hr_data(db: AsyncSession, current_user: User) -> dict:
     deleted["hr_expenses"] = len(hr_expense_ids)
 
     await db.execute(delete(Attendance).execution_options(synchronize_session=False))
+    await db.execute(delete(EmployeePayrollDeduction).execution_options(synchronize_session=False))
+    await db.execute(delete(EmployeeLoanRepayment).execution_options(synchronize_session=False))
+    await db.execute(delete(EmployeeLoan).execution_options(synchronize_session=False))
 
     await _remove_journal_balances(db, hr_journal_ids)
     if hr_journal_ids:
@@ -280,6 +493,9 @@ async def _clear_hr_data(db: AsyncSession, current_user: User) -> dict:
             f"{deleted['employees']} employees, "
             f"{deleted['attendance']} attendance records, "
             f"{deleted['payroll']} payroll records, "
+            f"{deleted['loans']} loans, "
+            f"{deleted['loan_repayments']} loan repayments, "
+            f"{deleted['payroll_deductions']} payroll deductions, "
             f"{deleted['hr_expenses']} payroll expenses"
         ),
         user=current_user,
@@ -354,6 +570,323 @@ async def deactivate_employee(emp_id: int, db: AsyncSession = Depends(get_async_
            ref_type="employee", ref_id=emp_id)
     await db.commit()
     return {"ok": True}
+
+
+# ── LOANS & DEDUCTIONS API ─────────────────────────────
+@router.get("/api/employees/{employee_id}/loans", dependencies=[Depends(require_permission("action_hr_view_loans"))])
+async def get_employee_loans(employee_id: int, db: AsyncSession = Depends(get_async_session)):
+    await _get_employee_or_404(db, employee_id)
+    result = await db.execute(
+        select(EmployeeLoan)
+        .where(EmployeeLoan.employee_id == employee_id)
+        .order_by(EmployeeLoan.loan_date.desc(), EmployeeLoan.id.desc())
+    )
+    loans = result.scalars().all()
+    repaid = await _loan_repaid_amounts(db, [loan.id for loan in loans])
+    return [_loan_payload(loan, repaid.get(loan.id, Decimal("0"))) for loan in loans]
+
+
+@router.post("/api/employees/{employee_id}/loans", dependencies=[Depends(require_permission("action_hr_manage_loans"))])
+async def create_employee_loan(
+    employee_id: int,
+    data: EmployeeLoanCreate,
+    db: AsyncSession = Depends(get_async_session),
+    current_user: User = Depends(get_current_user),
+):
+    employee = await _get_employee_or_404(db, employee_id)
+    loan_date = _parse_required_iso_date(data.loan_date, "loan_date")
+    amount = _money(data.amount)
+    if amount <= 0:
+        raise HTTPException(status_code=400, detail="Loan amount must be greater than 0")
+    loan = EmployeeLoan(
+        employee_id=employee.id,
+        loan_date=loan_date,
+        amount=amount,
+        description=(data.description or "").strip() or None,
+        status="open",
+        created_by_user_id=current_user.id,
+    )
+    db.add(loan)
+    await db.flush()
+    record(
+        db,
+        "HR",
+        "create_employee_loan",
+        f"Created loan for {employee.name}: {amount:.2f}",
+        user=current_user,
+        ref_type="employee_loan",
+        ref_id=loan.id,
+    )
+    await db.commit()
+    await db.refresh(loan)
+    return {"ok": True, **_loan_payload(loan, Decimal("0"))}
+
+
+@router.post("/api/loans/{loan_id}/repayments", dependencies=[Depends(require_permission("action_hr_manage_loans"))])
+async def create_loan_repayment(
+    loan_id: int,
+    data: LoanRepaymentCreate,
+    db: AsyncSession = Depends(get_async_session),
+    current_user: User = Depends(get_current_user),
+):
+    result = await db.execute(select(EmployeeLoan).where(EmployeeLoan.id == loan_id))
+    loan = result.scalar_one_or_none()
+    if not loan:
+        raise HTTPException(status_code=404, detail="Loan not found")
+    if loan.status == "cancelled":
+        raise HTTPException(status_code=400, detail="Cannot repay a cancelled loan")
+    repayment_date = _parse_required_iso_date(data.repayment_date, "repayment_date")
+    amount = _money(data.amount)
+    balance = await _loan_balance(db, loan)
+    if amount <= 0:
+        raise HTTPException(status_code=400, detail="Repayment amount must be greater than 0")
+    if amount > balance:
+        raise HTTPException(status_code=400, detail="Repayment amount exceeds outstanding balance")
+    repayment = EmployeeLoanRepayment(
+        loan_id=loan.id,
+        employee_id=loan.employee_id,
+        repayment_date=repayment_date,
+        amount=amount,
+        note=(data.note or "").strip() or None,
+        created_by_user_id=current_user.id,
+    )
+    db.add(repayment)
+    await db.flush()
+    balance = await _update_loan_status(db, loan)
+    record(
+        db,
+        "HR",
+        "create_loan_repayment",
+        f"Recorded repayment for loan #{loan.id}: {amount:.2f}",
+        user=current_user,
+        ref_type="employee_loan",
+        ref_id=loan.id,
+    )
+    await db.commit()
+    return {
+        "ok": True,
+        "id": repayment.id,
+        "loan_id": loan.id,
+        "employee_id": loan.employee_id,
+        "amount": _as_float(amount),
+        "balance": _as_float(balance),
+        "status": loan.status,
+    }
+
+
+@router.post("/api/loans/{loan_id}/cancel", dependencies=[Depends(require_permission("action_hr_manage_loans"))])
+async def cancel_employee_loan(
+    loan_id: int,
+    db: AsyncSession = Depends(get_async_session),
+    current_user: User = Depends(get_current_user),
+):
+    result = await db.execute(select(EmployeeLoan).where(EmployeeLoan.id == loan_id))
+    loan = result.scalar_one_or_none()
+    if not loan:
+        raise HTTPException(status_code=404, detail="Loan not found")
+    repayments_result = await db.execute(
+        select(func.count(EmployeeLoanRepayment.id)).where(EmployeeLoanRepayment.loan_id == loan.id)
+    )
+    repayment_count = repayments_result.scalar() or 0
+    if repayment_count and current_user.role != "admin":
+        raise HTTPException(status_code=403, detail="Only admins can cancel loans with repayments")
+    loan.status = "cancelled"
+    record(
+        db,
+        "HR",
+        "cancel_employee_loan",
+        f"Cancelled loan #{loan.id}",
+        user=current_user,
+        ref_type="employee_loan",
+        ref_id=loan.id,
+    )
+    await db.commit()
+    return {"ok": True, "loan_id": loan.id, "status": loan.status}
+
+
+@router.get("/api/employees/{employee_id}/deductions", dependencies=[Depends(require_permission("action_hr_view_deductions"))])
+async def get_employee_deductions(employee_id: int, db: AsyncSession = Depends(get_async_session)):
+    await _get_employee_or_404(db, employee_id)
+    result = await db.execute(
+        select(EmployeePayrollDeduction)
+        .options(selectinload(EmployeePayrollDeduction.payroll))
+        .where(EmployeePayrollDeduction.employee_id == employee_id)
+        .order_by(EmployeePayrollDeduction.created_at.desc(), EmployeePayrollDeduction.id.desc())
+    )
+    return [_deduction_payload(deduction) for deduction in result.scalars().all()]
+
+
+@router.post("/api/employees/{employee_id}/deductions/day", dependencies=[Depends(require_permission("action_hr_manage_deductions"))])
+async def create_day_deduction(
+    employee_id: int,
+    data: DayDeductionCreate,
+    db: AsyncSession = Depends(get_async_session),
+    current_user: User = Depends(get_current_user),
+):
+    employee = await _get_employee_or_404(db, employee_id)
+    period = _validate_period(data.period)
+    deduction_date = _parse_required_iso_date(data.deduction_date, "deduction_date")
+    days = _days(data.days)
+    working_days = _days(data.working_days)
+    base_salary = _money(employee.base_salary)
+    if base_salary <= 0:
+        raise HTTPException(status_code=400, detail="Employee base salary must be greater than 0")
+    if days <= 0:
+        raise HTTPException(status_code=400, detail="Deduction days must be greater than 0")
+    if working_days <= 0:
+        raise HTTPException(status_code=400, detail="Working days must be greater than 0")
+    daily_rate = _money(base_salary / working_days)
+    amount = _money(daily_rate * days)
+    deduction = EmployeePayrollDeduction(
+        employee_id=employee.id,
+        period=period,
+        deduction_date=deduction_date,
+        type="day_deduction",
+        days=days,
+        daily_rate=daily_rate,
+        amount=amount,
+        note=(data.note or "").strip() or None,
+        created_by_user_id=current_user.id,
+    )
+    db.add(deduction)
+    await db.flush()
+    record(
+        db,
+        "HR",
+        "create_day_deduction",
+        f"Created {days} day deduction for {employee.name}: {amount:.2f}",
+        user=current_user,
+        ref_type="employee_payroll_deduction",
+        ref_id=deduction.id,
+    )
+    await db.commit()
+    await db.refresh(deduction)
+    return {"ok": True, **_deduction_payload(deduction)}
+
+
+@router.post("/api/employees/{employee_id}/deductions/manual", dependencies=[Depends(require_permission("action_hr_manage_deductions"))])
+async def create_manual_deduction(
+    employee_id: int,
+    data: ManualDeductionCreate,
+    db: AsyncSession = Depends(get_async_session),
+    current_user: User = Depends(get_current_user),
+):
+    employee = await _get_employee_or_404(db, employee_id)
+    period = _validate_period(data.period)
+    amount = _money(data.amount)
+    if amount <= 0:
+        raise HTTPException(status_code=400, detail="Deduction amount must be greater than 0")
+    deduction = EmployeePayrollDeduction(
+        employee_id=employee.id,
+        period=period,
+        type="manual",
+        amount=amount,
+        note=(data.note or "").strip() or None,
+        created_by_user_id=current_user.id,
+    )
+    db.add(deduction)
+    await db.flush()
+    record(
+        db,
+        "HR",
+        "create_manual_deduction",
+        f"Created manual deduction for {employee.name}: {amount:.2f}",
+        user=current_user,
+        ref_type="employee_payroll_deduction",
+        ref_id=deduction.id,
+    )
+    await db.commit()
+    await db.refresh(deduction)
+    return {"ok": True, **_deduction_payload(deduction)}
+
+
+async def _pending_deductions_for_period(
+    db: AsyncSession,
+    employee_id: int,
+    period: str,
+) -> tuple[list[EmployeePayrollDeduction], Decimal, Decimal, Decimal]:
+    result = await db.execute(
+        select(EmployeePayrollDeduction)
+        .where(
+            EmployeePayrollDeduction.employee_id == employee_id,
+            EmployeePayrollDeduction.period == period,
+            EmployeePayrollDeduction.payroll_id.is_(None),
+            EmployeePayrollDeduction.type.in_(["day_deduction", "manual"]),
+        )
+        .order_by(EmployeePayrollDeduction.deduction_date, EmployeePayrollDeduction.id)
+    )
+    deductions = result.scalars().all()
+    day_deduction_days = _days(
+        sum((_dec(item.days) for item in deductions if item.type == "day_deduction"), Decimal("0"))
+    )
+    day_deductions = _money(
+        sum((_dec(item.amount) for item in deductions if item.type == "day_deduction"), Decimal("0"))
+    )
+    manual_deductions = _money(
+        sum((_dec(item.amount) for item in deductions if item.type == "manual"), Decimal("0"))
+    )
+    return deductions, day_deduction_days, day_deductions, manual_deductions
+
+
+async def _payroll_preview_for_employee(
+    db: AsyncSession,
+    employee: Employee,
+    *,
+    period: str,
+    working_days: int,
+    days_elapsed: int,
+    year: int,
+    month: int,
+    include_loans: bool,
+    include_deductions: bool,
+) -> dict:
+    _dp = await db.execute(select(func.count(Attendance.id)).where(
+        Attendance.employee_id == employee.id,
+        Attendance.status == "present",
+        func.extract("year",  Attendance.date) == year,
+        func.extract("month", Attendance.date) == month,
+    ))
+    days_present = _dp.scalar() or 0
+
+    _ar = await db.execute(select(Payroll).where(
+        Payroll.employee_id == employee.id,
+        Payroll.period == period,
+    ))
+    already_run = _ar.scalar_one_or_none() is not None
+
+    base_salary = _money(employee.base_salary)
+    daily_rate = _money(base_salary / Decimal(str(working_days))) if working_days > 0 else Decimal("0")
+    pending_day_days = Decimal("0")
+    pending_day_amount = Decimal("0")
+    pending_manual_amount = Decimal("0")
+    if include_deductions:
+        _, pending_day_days, pending_day_amount, pending_manual_amount = await _pending_deductions_for_period(
+            db,
+            employee.id,
+            period,
+        )
+    outstanding_loan_balance = await _employee_loan_balance(db, employee.id) if include_loans else None
+    total_pending = _money(pending_day_amount + pending_manual_amount)
+    net_before_loan = _money(base_salary - total_pending)
+    return {
+        "employee_id": employee.id,
+        "employee": employee.name,
+        "position": employee.position or "—",
+        "base_salary": _as_float(base_salary),
+        "working_days": working_days,
+        "days_elapsed": days_elapsed,
+        "days_present": days_present,
+        "days_absent": days_elapsed - days_present,
+        "daily_rate": _as_float(daily_rate),
+        "earned": _as_float(base_salary),
+        "already_run": already_run,
+        "outstanding_loan_balance": _as_float(outstanding_loan_balance) if outstanding_loan_balance is not None else None,
+        "pending_day_deduction_days": _as_day_float(pending_day_days),
+        "pending_day_deductions": _as_float(pending_day_amount),
+        "pending_manual_deductions": _as_float(pending_manual_amount),
+        "pending_total_deductions": _as_float(total_pending),
+        "net_before_loan": _as_float(net_before_loan),
+    }
 
 
 # ── ATTENDANCE API ─────────────────────────────────────
@@ -493,6 +1026,10 @@ async def get_payroll(period: str = None, db: AsyncSession = Depends(get_async_s
             "working_days":r.working_days or 0,
             "bonuses":     float(r.bonuses)     if r.bonuses     else 0,
             "deductions":  float(r.deductions)  if r.deductions  else 0,
+            "loan_deductions": float(r.loan_deductions) if getattr(r, "loan_deductions", None) else 0,
+            "day_deduction_days": float(r.day_deduction_days) if getattr(r, "day_deduction_days", None) else 0,
+            "day_deductions": float(r.day_deductions) if getattr(r, "day_deductions", None) else 0,
+            "manual_deductions": float(r.manual_deductions) if getattr(r, "manual_deductions", None) else 0,
             "net_salary":  float(r.net_salary)  if r.net_salary  else 0,
             "paid":        r.paid,
             "paid_at":     str(r.paid_at) if r.paid_at else None,
@@ -501,13 +1038,18 @@ async def get_payroll(period: str = None, db: AsyncSession = Depends(get_async_s
     ]
 
 @router.get("/api/payroll/preview")
-async def preview_payroll(period: str, db: AsyncSession = Depends(get_async_session)):
+async def preview_payroll(
+    period: str,
+    db: AsyncSession = Depends(get_async_session),
+    current_user: User = Depends(get_current_user),
+):
     """
     Preview payroll for a period without saving.
     Calculates each employee's salary based on days worked.
     period format: "2026-04"
     """
     from calendar import monthrange
+    period = _validate_period(period)
     year, month = int(period.split("-")[0]), int(period.split("-")[1])
     # Total working days in month (Mon-Fri)
     total_days   = monthrange(year, month)[1]
@@ -525,59 +1067,40 @@ async def preview_payroll(period: str, db: AsyncSession = Depends(get_async_sess
     employees = _r.scalars().all()
     result = []
     total_to_pay = 0
+    include_loans = has_permission(current_user, "action_hr_view_loans")
+    include_deductions = has_permission(current_user, "action_hr_view_deductions")
     for emp in employees:
-        # Count present days in this period
-        _dp = await db.execute(select(func.count(Attendance.id)).where(
-            Attendance.employee_id == emp.id,
-            Attendance.status == "present",
-            func.extract("year",  Attendance.date) == year,
-            func.extract("month", Attendance.date) == month,
-        ))
-        days_present = _dp.scalar() or 0
-
-        _ar = await db.execute(select(Payroll).where(
-            Payroll.employee_id == emp.id,
-            Payroll.period == period,
-        ))
-        already_run = _ar.scalar_one_or_none() is not None
-
-        daily_rate  = float(emp.base_salary) / working_days if working_days > 0 else 0
-        earned      = round(daily_rate * days_present, 2)
-        total_to_pay += earned
-        result.append({
-            "employee_id":  emp.id,
-            "employee":     emp.name,
-            "position":     emp.position or "—",
-            "base_salary":  float(emp.base_salary),
-            "working_days": working_days,
-            "days_elapsed": days_elapsed,
-            "days_present": days_present,
-            "days_absent":  days_elapsed - days_present,
-            "daily_rate":   round(daily_rate, 2),
-            "earned":       earned,
-            "already_run":  already_run,
-        })
+        row = await _payroll_preview_for_employee(
+            db,
+            emp,
+            period=period,
+            working_days=working_days,
+            days_elapsed=days_elapsed,
+            year=year,
+            month=month,
+            include_loans=include_loans,
+            include_deductions=include_deductions,
+        )
+        total_to_pay += row["net_before_loan"]
+        result.append(row)
     return {
         "period":       period,
         "working_days": working_days,
         "days_elapsed": days_elapsed,
         "employees":    result,
         "total_to_pay": round(total_to_pay, 2),
+        "can_view_loans": include_loans,
+        "can_view_deductions": include_deductions,
     }
 
 @router.post("/api/payroll/run", dependencies=[Depends(require_permission("action_hr_run_payroll"))])
 async def run_payroll(data: PayrollRun, db: AsyncSession = Depends(get_async_session), current_user: User = Depends(get_current_user)):
     from calendar import monthrange
-    year, month = int(data.period.split("-")[0]), int(data.period.split("-")[1])
+    period = _validate_period(data.period)
+    year, month = int(period.split("-")[0]), int(period.split("-")[1])
     total_days   = monthrange(year, month)[1]
     working_days = sum(1 for d in range(1, total_days+1)
                        if date(year, month, d).weekday() < 5)
-    today = date.today()
-    if today.year == year and today.month == month:
-        days_elapsed = sum(1 for d in range(1, today.day+1)
-                           if date(year, month, d).weekday() < 5)
-    else:
-        days_elapsed = working_days
 
     emp_stmt = select(Employee).where(Employee.is_active == True)
     if data.emp_ids:
@@ -585,15 +1108,19 @@ async def run_payroll(data: PayrollRun, db: AsyncSession = Depends(get_async_ses
     _re = await db.execute(emp_stmt)
     employees = _re.scalars().all()
 
-    created = 0; skipped = 0
-    for emp in employees:
-        _ex = await db.execute(select(Payroll).where(
-            Payroll.employee_id == emp.id,
-            Payroll.period == data.period,
-        ))
-        exists = _ex.scalar_one_or_none()
-        if exists:
-            # Update existing with latest attendance
+    bonus_by_employee = data.bonuses or {}
+    loan_repayment_by_employee = data.loan_repayments or {}
+    created = 0
+    skipped = 0
+    payroll_ids = []
+    try:
+        for emp in employees:
+            _ex = await db.execute(select(Payroll).where(
+                Payroll.employee_id == emp.id,
+                Payroll.period == period,
+            ))
+            payroll = _ex.scalar_one_or_none()
+
             _dp = await db.execute(select(func.count(Attendance.id)).where(
                 Attendance.employee_id == emp.id,
                 Attendance.status == "present",
@@ -601,44 +1128,88 @@ async def run_payroll(data: PayrollRun, db: AsyncSession = Depends(get_async_ses
                 func.extract("month", Attendance.date) == month,
             ))
             days_present = _dp.scalar() or 0
-            daily_rate      = float(emp.base_salary) / working_days if working_days > 0 else 0
-            earned          = round(daily_rate * days_present, 2)
-            exists.base_salary  = emp.base_salary
-            exists.net_salary   = earned + float(exists.bonuses or 0) - float(exists.deductions or 0)
-            exists.days_worked  = days_present
-            exists.working_days = working_days
-            skipped += 1
-            continue
 
-        _dp = await db.execute(select(func.count(Attendance.id)).where(
-            Attendance.employee_id == emp.id,
-            Attendance.status == "present",
-            func.extract("year",  Attendance.date) == year,
-            func.extract("month", Attendance.date) == month,
-        ))
-        days_present = _dp.scalar() or 0
+            pending_deductions, pending_day_days, pending_day_amount, pending_manual_amount = await _pending_deductions_for_period(
+                db,
+                emp.id,
+                period,
+            )
+            requested_loan_repayment = _money(loan_repayment_by_employee.get(emp.id, Decimal("0")))
+            bonus_amount = _money(bonus_by_employee.get(emp.id, Decimal("0")))
 
-        daily_rate = float(emp.base_salary) / working_days if working_days > 0 else 0
-        earned     = round(daily_rate * days_present, 2)
+            if payroll:
+                skipped += 1
+                existing_loan_deductions = _money(getattr(payroll, "loan_deductions", 0))
+                existing_day_days = _days(getattr(payroll, "day_deduction_days", 0))
+                existing_day_deductions = _money(getattr(payroll, "day_deductions", 0))
+                existing_manual_deductions = _money(getattr(payroll, "manual_deductions", 0))
+                if emp.id not in bonus_by_employee:
+                    bonus_amount = _money(payroll.bonuses)
+            else:
+                payroll = Payroll(
+                    employee_id=emp.id,
+                    period=period,
+                    paid=False,
+                )
+                db.add(payroll)
+                created += 1
+                existing_loan_deductions = Decimal("0")
+                existing_day_days = Decimal("0")
+                existing_day_deductions = Decimal("0")
+                existing_manual_deductions = Decimal("0")
 
-        p = Payroll(
-            employee_id=emp.id,
-            period=data.period,
-            base_salary=emp.base_salary,
-            bonuses=0, deductions=0,
-            net_salary=earned,
-            paid=False,
-            days_worked=days_present,
-            working_days=working_days,
-        )
-        db.add(p)
-        created += 1
+            payroll.base_salary = _money(emp.base_salary)
+            payroll.bonuses = bonus_amount
+            payroll.days_worked = days_present
+            payroll.working_days = working_days
+            payroll.day_deduction_days = _days(existing_day_days + pending_day_days)
+            payroll.day_deductions = _money(existing_day_deductions + pending_day_amount)
+            payroll.manual_deductions = _money(existing_manual_deductions + pending_manual_amount)
+            payroll.loan_deductions = _money(existing_loan_deductions + requested_loan_repayment)
+            payroll.deductions = _money(
+                payroll.loan_deductions + payroll.day_deductions + payroll.manual_deductions
+            )
+            payroll.net_salary = _money(payroll.base_salary + payroll.bonuses - payroll.deductions)
+            await db.flush()
+            payroll_ids.append(payroll.id)
 
-    record(db, "HR", "run_payroll",
-           f"Payroll run for {data.period} — {created} created, {skipped} updated",
-           ref_type="payroll", ref_id=data.period)
-    await db.commit()
-    return {"created": created, "skipped": skipped, "period": data.period}
+            for deduction in pending_deductions:
+                deduction.payroll_id = payroll.id
+
+            if requested_loan_repayment > 0:
+                applied = await _apply_loan_repayment_to_oldest_loans(
+                    db,
+                    employee_id=emp.id,
+                    amount=requested_loan_repayment,
+                    repayment_date=date.today(),
+                    payroll_id=payroll.id,
+                    note=f"Payroll loan repayment - {period}",
+                    current_user=current_user,
+                )
+                db.add(
+                    EmployeePayrollDeduction(
+                        employee_id=emp.id,
+                        payroll_id=payroll.id,
+                        period=period,
+                        deduction_date=date.today(),
+                        type="loan_repayment",
+                        amount=applied,
+                        note=f"Payroll loan repayment - {period}",
+                        created_by_user_id=current_user.id,
+                    )
+                )
+
+        record(db, "HR", "run_payroll",
+               f"Payroll run for {period} — {created} created, {skipped} updated",
+               user=current_user, ref_type="payroll", ref_id=period)
+        await db.commit()
+    except HTTPException:
+        await db.rollback()
+        raise
+    except Exception as exc:
+        await db.rollback()
+        raise HTTPException(status_code=500, detail="Could not run payroll. No payroll changes were saved.") from exc
+    return {"created": created, "skipped": skipped, "period": period, "payroll_ids": payroll_ids}
 
 
 @router.put("/api/payroll/{payroll_id}", dependencies=[Depends(require_permission("action_hr_run_payroll"))])
@@ -647,20 +1218,29 @@ async def update_payroll(payroll_id: int, data: PayrollUpdate, db: AsyncSession 
     p = _r.scalar_one_or_none()
     if not p:
         raise HTTPException(status_code=404, detail="Payroll record not found")
-    # Back-calculate the attendance-earned amount from the previously stored values
-    # before applying the new bonuses/deductions
-    old_bonuses    = float(p.bonuses    or 0)
-    old_deductions = float(p.deductions or 0)
-    earned         = float(p.net_salary) - old_bonuses + old_deductions
-
-    p.bonuses    = data.bonuses
-    p.deductions = data.deductions
-    p.net_salary = round(earned + data.bonuses - data.deductions, 2)
-    if data.notes:
-        p.notes = data.notes
+    p.bonuses = _money(data.bonuses)
+    p.manual_deductions = _money(data.deductions)
+    p.deductions = _money(
+        _dec(getattr(p, "loan_deductions", 0))
+        + _dec(getattr(p, "day_deductions", 0))
+        + p.manual_deductions
+    )
+    p.net_salary = _money(_dec(p.base_salary) + p.bonuses - p.deductions)
+    if data.notes and p.manual_deductions > 0:
+        db.add(
+            EmployeePayrollDeduction(
+                employee_id=p.employee_id,
+                payroll_id=p.id,
+                period=p.period,
+                type="manual",
+                amount=p.manual_deductions,
+                note=data.notes,
+                created_by_user_id=current_user.id,
+            )
+        )
     record(db, "HR", "update_payroll",
-           f"Updated payroll #{payroll_id} — bonuses: {data.bonuses}, deductions: {data.deductions}, net: {p.net_salary:.2f}",
-           ref_type="payroll", ref_id=payroll_id)
+           f"Updated payroll #{payroll_id} — bonuses: {p.bonuses}, deductions: {p.deductions}, net: {p.net_salary:.2f}",
+           user=current_user, ref_type="payroll", ref_id=payroll_id)
     await db.commit()
     return {"ok": True, "net_salary": float(p.net_salary)}
 
@@ -892,11 +1472,18 @@ td.mono { font-family: var(--mono); color: var(--green); }
 .modal-bg { position: fixed; inset: 0; z-index: 500; background: rgba(0,0,0,.7); backdrop-filter: blur(4px); display: none; align-items: center; justify-content: center; }
 .modal-bg.open { display: flex; }
 .modal { background: var(--card); border: 1px solid var(--border2); border-radius: 16px; padding: 28px; width: 500px; max-width: 95vw; max-height: 90vh; overflow-y: auto; animation: modalIn .2s ease; }
+.modal.wide { width: 980px; }
 @keyframes modalIn { from{opacity:0;transform:scale(.95)} to{opacity:1;transform:scale(1)} }
 .modal-title { font-size: 18px; font-weight: 800; margin-bottom: 20px; }
 .modal-title.danger { color: var(--danger); }
 .danger-note { border:1px solid rgba(255,77,109,.28); background:rgba(255,77,109,.08); border-radius:12px; padding:12px 14px; color:var(--sub); font-size:13px; line-height:1.45; margin-bottom:16px; }
 .confirm-token { font-family:var(--mono); color:var(--danger); font-weight:800; }
+.hr-ledger-grid { display:grid; grid-template-columns:1fr 1fr; gap:16px; }
+.hr-ledger-panel { border:1px solid var(--border); border-radius:12px; padding:14px; }
+.hr-ledger-title { font-size:11px; font-weight:800; letter-spacing:1.3px; text-transform:uppercase; color:var(--muted); margin-bottom:12px; }
+.hr-ledger-table { max-height:220px; overflow:auto; border:1px solid var(--border); border-radius:10px; }
+.hr-ledger-table th,.hr-ledger-table td { padding:8px 10px; font-size:12px; }
+.money-preview { font-family:var(--mono); color:var(--green); font-weight:800; }
 .form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
 .fld { display: flex; flex-direction: column; gap: 6px; margin-bottom: 14px; }
 .fld.span2 { grid-column: span 2; }
@@ -1024,7 +1611,7 @@ td.mono { font-family: var(--mono); color: var(--green); }
             </div>
             <div class="table-wrap">
                 <table>
-                    <thead><tr><th>Employee</th><th>Base Salary</th><th>Working Days</th><th>Days Present</th><th>Days Absent</th><th>Daily Rate</th><th>Earned</th><th>Status</th></tr></thead>
+                    <thead><tr><th>Employee</th><th>Base Salary</th><th>Bonus</th><th>Day Ded.</th><th>Manual Ded.</th><th>Loan Balance</th><th>Loan Repay</th><th>Net Preview</th><th>Status</th></tr></thead>
                     <tbody id="preview-body"></tbody>
                 </table>
             </div>
@@ -1036,7 +1623,7 @@ td.mono { font-family: var(--mono); color: var(--green); }
         <!-- PAYROLL RECORDS -->
         <div class="table-wrap" id="payroll-records-wrap" style="display:none">
             <table>
-                <thead><tr><th>Employee</th><th>Period</th><th>Base Salary</th><th>Days</th><th>Bonuses</th><th>Deductions</th><th>Net Salary</th><th>Status</th><th>Actions</th></tr></thead>
+                <thead><tr><th>Employee</th><th>Period</th><th>Base Salary</th><th>Days</th><th>Bonuses</th><th>Loan</th><th>Day Ded.</th><th>Manual</th><th>Total Ded.</th><th>Net Salary</th><th>Status</th><th>Actions</th></tr></thead>
                 <tbody id="pay-body"></tbody>
             </table>
         </div>
@@ -1111,6 +1698,55 @@ td.mono { font-family: var(--mono); color: var(--green); }
         <div class="modal-actions">
             <button class="btn-cancel" onclick="closeEditPayModal()">Cancel</button>
             <button class="btn btn-green" onclick="savePayrollEdit()">Save</button>
+        </div>
+    </div>
+</div>
+
+<!-- LOANS & DEDUCTIONS MODAL -->
+<div class="modal-bg" id="loan-deduction-modal">
+    <div class="modal wide">
+        <div class="modal-title">Loans & Deductions</div>
+        <div class="modal-sub" id="loan-deduction-emp" style="color:var(--muted);font-size:13px;margin-bottom:16px"></div>
+        <div class="hr-ledger-grid">
+            <div class="hr-ledger-panel" id="loan-section">
+                <div class="hr-ledger-title">Employee Loans</div>
+                <div class="form-row" id="loan-create-form">
+                    <div class="fld"><label>Loan Date</label><input id="loan-date" type="date"></div>
+                    <div class="fld"><label>Amount</label><input id="loan-amount" type="number" min="0" step="0.01"></div>
+                    <div class="fld span2"><label>Description</label><input id="loan-description" placeholder="Salary advance"></div>
+                    <div class="fld span2"><button class="btn btn-green" onclick="saveEmployeeLoan()">Save Loan</button></div>
+                </div>
+                <div class="form-row" id="loan-repayment-form" style="margin-top:10px">
+                    <div class="fld"><label>Loan</label><select id="repay-loan-id"></select></div>
+                    <div class="fld"><label>Repayment Date</label><input id="repay-date" type="date"></div>
+                    <div class="fld"><label>Amount</label><input id="repay-amount" type="number" min="0" step="0.01"></div>
+                    <div class="fld"><label>Note</label><input id="repay-note" placeholder="Cash repayment"></div>
+                    <div class="fld span2"><button class="btn btn-blue" onclick="saveLoanRepayment()">Save Repayment</button></div>
+                </div>
+                <div class="hr-ledger-table"><table><thead><tr><th>Date</th><th>Amount</th><th>Repaid</th><th>Balance</th><th>Status</th><th>Actions</th></tr></thead><tbody id="loan-history-body"></tbody></table></div>
+            </div>
+            <div class="hr-ledger-panel" id="deduction-section">
+                <div class="hr-ledger-title">Payroll Deductions</div>
+                <div class="form-row" id="day-deduction-form">
+                    <div class="fld"><label>Period</label><input id="deduct-period" type="month"></div>
+                    <div class="fld"><label>Date</label><input id="deduct-date" type="date"></div>
+                    <div class="fld"><label>Days</label><input id="deduct-days" type="number" min="0" step="0.25" oninput="updateDayDeductionPreview()"></div>
+                    <div class="fld"><label>Working Days</label><input id="deduct-working-days" type="number" min="1" step="1" oninput="updateDayDeductionPreview()"></div>
+                    <div class="fld"><label>Amount Preview</label><div class="money-preview" id="deduct-preview">0.00</div></div>
+                    <div class="fld"><label>Note</label><input id="deduct-note" placeholder="Left early"></div>
+                    <div class="fld span2"><button class="btn btn-blue" onclick="saveDayDeduction()">Save Day Deduction</button></div>
+                </div>
+                <div class="form-row" id="manual-deduction-form" style="margin-top:10px">
+                    <div class="fld"><label>Period</label><input id="manual-deduct-period" type="month"></div>
+                    <div class="fld"><label>Amount</label><input id="manual-deduct-amount" type="number" min="0" step="0.01"></div>
+                    <div class="fld span2"><label>Note</label><input id="manual-deduct-note" placeholder="Manual deduction"></div>
+                    <div class="fld span2"><button class="btn btn-purple" onclick="saveManualDeduction()">Save Manual Deduction</button></div>
+                </div>
+                <div class="hr-ledger-table"><table><thead><tr><th>Period</th><th>Type</th><th>Days</th><th>Rate</th><th>Amount</th><th>Payroll</th><th>Note</th></tr></thead><tbody id="deduction-history-body"></tbody></table></div>
+            </div>
+        </div>
+        <div class="modal-actions">
+            <button class="btn-cancel" onclick="closeLoanDeductionModal()">Close</button>
         </div>
     </div>
 </div>
@@ -1227,6 +1863,9 @@ let farms        = [];
 let editingEmpId = null;
 let editingPayId = null;
 let empSearchTimer = null;
+let loanDeductionEmployeeId = null;
+let loanDeductionEmployeeSalary = 0;
+let currentEmployeeLoans = [];
 
 function escapeHtml(value) {
     return String(value ?? "")
@@ -1321,6 +1960,7 @@ async function loadEmployees(){
             <td class="mono">${money(salary)}</td>
             <td style="display:flex;gap:6px">
                 <button class="action-btn" onclick="openEditEmpFromButton(this)" data-id="${id}" data-name="${escapeHtml(normalizeDashFallback(e.name))}" data-position="${escapeHtml(normalizeDashFallback(e.position))}" data-department="${escapeHtml(normalizeDashFallback(e.department))}" data-phone="${escapeHtml(normalizeDashFallback(e.phone))}" data-salary="${salary}" data-farm-id="${e.farm_id || ""}">Edit</button>
+                ${(hasPermission("action_hr_view_loans") || hasPermission("action_hr_view_deductions"))?`<button class="action-btn purple" onclick="openLoanDeductionModalFromButton(this)" data-id="${id}" data-name="${escapeHtml(normalizeDashFallback(e.name))}" data-salary="${salary}">Loans & Deductions</button>`:""}
                 ${hasPermission("action_hr_run_payroll")?`<button class="action-btn danger" onclick="deactivateEmployeeFromButton(this)" data-id="${id}" data-name="${escapeHtml(normalizeDashFallback(e.name))}">Remove</button>`:""}
             </td>
         </tr>`;
@@ -1462,6 +2102,207 @@ async function deactivateEmployee(id,name){
     }catch(err){
         showToast("Error: " + (err.message || "Could not remove employee"));
     }
+}
+
+/* ── LOANS & DEDUCTIONS ── */
+function openLoanDeductionModalFromButton(btn){
+    openLoanDeductionModal(
+        numberValue(btn.dataset.id),
+        btn.dataset.name || "",
+        numberValue(btn.dataset.salary)
+    );
+}
+
+function setDefaultLoanDeductionDates(){
+    const today = new Date().toISOString().split("T")[0];
+    const period = today.slice(0, 7);
+    ["loan-date","repay-date","deduct-date"].forEach(id => {
+        const el = document.getElementById(id);
+        if(el && !el.value) el.value = today;
+    });
+    ["deduct-period","manual-deduct-period"].forEach(id => {
+        const el = document.getElementById(id);
+        if(el && !el.value) el.value = period;
+    });
+    const working = document.getElementById("deduct-working-days");
+    if(working && !working.value) working.value = "30";
+}
+
+async function openLoanDeductionModal(employeeId, name, salary){
+    loanDeductionEmployeeId = employeeId;
+    loanDeductionEmployeeSalary = salary;
+    document.getElementById("loan-deduction-emp").innerText = `${name} - Base salary ${money(salary)} EGP`;
+    setDefaultLoanDeductionDates();
+    updateDayDeductionPreview();
+    document.getElementById("loan-section").style.display = hasPermission("action_hr_view_loans") ? "" : "none";
+    document.getElementById("loan-create-form").style.display = hasPermission("action_hr_manage_loans") ? "" : "none";
+    document.getElementById("loan-repayment-form").style.display = hasPermission("action_hr_manage_loans") ? "" : "none";
+    document.getElementById("deduction-section").style.display = hasPermission("action_hr_view_deductions") ? "" : "none";
+    document.getElementById("day-deduction-form").style.display = hasPermission("action_hr_manage_deductions") ? "" : "none";
+    document.getElementById("manual-deduction-form").style.display = hasPermission("action_hr_manage_deductions") ? "" : "none";
+    document.getElementById("loan-deduction-modal").classList.add("open");
+    await refreshLoanDeductionModal();
+}
+
+function closeLoanDeductionModal(){
+    document.getElementById("loan-deduction-modal").classList.remove("open");
+}
+
+async function refreshLoanDeductionModal(){
+    if(!loanDeductionEmployeeId) return;
+    if(hasPermission("action_hr_view_loans")) await loadEmployeeLoans();
+    if(hasPermission("action_hr_view_deductions")) await loadEmployeeDeductions();
+}
+
+async function loadEmployeeLoans(){
+    const body = document.getElementById("loan-history-body");
+    const select = document.getElementById("repay-loan-id");
+    try{
+        const res = await fetch(`/hr/api/employees/${loanDeductionEmployeeId}/loans`);
+        currentEmployeeLoans = await readApiResponse(res);
+        const openLoans = currentEmployeeLoans.filter(loan => loan.status === "open" && numberValue(loan.balance) > 0);
+        select.innerHTML = openLoans.map(loan =>
+            `<option value="${numberValue(loan.id)}">#${numberValue(loan.id)} - ${money(loan.balance)} EGP</option>`
+        ).join("") || `<option value="">No open loans</option>`;
+        body.innerHTML = currentEmployeeLoans.map(loan => `
+            <tr>
+                <td>${displayText(loan.loan_date)}</td>
+                <td class="mono">${money(loan.amount)}</td>
+                <td class="mono">${money(loan.repaid_amount)}</td>
+                <td class="mono">${money(loan.balance)}</td>
+                <td>${displayText(loan.status)}</td>
+                <td>
+                    ${loan.status === "open" && hasPermission("action_hr_manage_loans") ? `<button class="action-btn" onclick="selectLoanForRepayment(${numberValue(loan.id)})">Repay</button> <button class="action-btn danger" onclick="cancelLoan(${numberValue(loan.id)})">Cancel</button>` : ""}
+                </td>
+            </tr>`).join("") || `<tr><td colspan="6" style="text-align:center;color:var(--muted);padding:18px">No loans recorded</td></tr>`;
+    }catch(err){
+        body.innerHTML = `<tr><td colspan="6" style="color:var(--danger);padding:18px">Could not load loans</td></tr>`;
+    }
+}
+
+async function loadEmployeeDeductions(){
+    const body = document.getElementById("deduction-history-body");
+    try{
+        const res = await fetch(`/hr/api/employees/${loanDeductionEmployeeId}/deductions`);
+        const deductions = await readApiResponse(res);
+        body.innerHTML = deductions.map(d => `
+            <tr>
+                <td>${displayText(d.period || d.payroll_period)}</td>
+                <td>${displayText(String(d.type || "").replace(/_/g, " "))}</td>
+                <td>${d.days === null || d.days === undefined ? "-" : numberValue(d.days)}</td>
+                <td class="mono">${d.daily_rate === null || d.daily_rate === undefined ? "-" : money(d.daily_rate)}</td>
+                <td class="mono">${money(d.amount)}</td>
+                <td>${d.payroll_id ? "#" + numberValue(d.payroll_id) : "Pending"}</td>
+                <td>${displayText(d.note)}</td>
+            </tr>`).join("") || `<tr><td colspan="7" style="text-align:center;color:var(--muted);padding:18px">No deductions recorded</td></tr>`;
+    }catch(err){
+        body.innerHTML = `<tr><td colspan="7" style="color:var(--danger);padding:18px">Could not load deductions</td></tr>`;
+    }
+}
+
+async function saveEmployeeLoan(){
+    if(!hasPermission("action_hr_manage_loans")) return;
+    const body = {
+        loan_date: document.getElementById("loan-date").value,
+        amount: parseFloat(document.getElementById("loan-amount").value || "0"),
+        description: document.getElementById("loan-description").value.trim() || null,
+    };
+    try{
+        const res = await fetch(`/hr/api/employees/${loanDeductionEmployeeId}/loans`, {
+            method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(body),
+        });
+        await readApiResponse(res);
+        document.getElementById("loan-amount").value = "";
+        document.getElementById("loan-description").value = "";
+        showToast("Loan saved");
+        await loadEmployeeLoans();
+    }catch(err){ showToast("Error: " + (err.message || "Could not save loan")); }
+}
+
+function selectLoanForRepayment(loanId){
+    document.getElementById("repay-loan-id").value = String(loanId);
+    document.getElementById("repay-amount").focus();
+}
+
+async function saveLoanRepayment(){
+    if(!hasPermission("action_hr_manage_loans")) return;
+    const loanId = document.getElementById("repay-loan-id").value;
+    if(!loanId){ showToast("Select an open loan"); return; }
+    const body = {
+        repayment_date: document.getElementById("repay-date").value,
+        amount: parseFloat(document.getElementById("repay-amount").value || "0"),
+        note: document.getElementById("repay-note").value.trim() || null,
+    };
+    try{
+        const res = await fetch(`/hr/api/loans/${loanId}/repayments`, {
+            method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(body),
+        });
+        await readApiResponse(res);
+        document.getElementById("repay-amount").value = "";
+        document.getElementById("repay-note").value = "";
+        showToast("Repayment saved");
+        await loadEmployeeLoans();
+    }catch(err){ showToast("Error: " + (err.message || "Could not save repayment")); }
+}
+
+async function cancelLoan(loanId){
+    if(!hasPermission("action_hr_manage_loans")) return;
+    if(!confirm("Cancel this loan? It will stay in history.")) return;
+    try{
+        const res = await fetch(`/hr/api/loans/${loanId}/cancel`, {method:"POST"});
+        await readApiResponse(res);
+        showToast("Loan cancelled");
+        await loadEmployeeLoans();
+    }catch(err){ showToast("Error: " + (err.message || "Could not cancel loan")); }
+}
+
+function updateDayDeductionPreview(){
+    const days = numberValue(document.getElementById("deduct-days")?.value);
+    const workingDays = numberValue(document.getElementById("deduct-working-days")?.value);
+    const amount = workingDays > 0 ? (loanDeductionEmployeeSalary / workingDays) * days : 0;
+    const preview = document.getElementById("deduct-preview");
+    if(preview) preview.innerText = money(amount);
+}
+
+async function saveDayDeduction(){
+    if(!hasPermission("action_hr_manage_deductions")) return;
+    const body = {
+        period: document.getElementById("deduct-period").value,
+        deduction_date: document.getElementById("deduct-date").value,
+        days: parseFloat(document.getElementById("deduct-days").value || "0"),
+        working_days: parseFloat(document.getElementById("deduct-working-days").value || "0"),
+        note: document.getElementById("deduct-note").value.trim() || null,
+    };
+    try{
+        const res = await fetch(`/hr/api/employees/${loanDeductionEmployeeId}/deductions/day`, {
+            method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(body),
+        });
+        await readApiResponse(res);
+        document.getElementById("deduct-days").value = "";
+        document.getElementById("deduct-note").value = "";
+        updateDayDeductionPreview();
+        showToast("Day deduction saved");
+        await loadEmployeeDeductions();
+    }catch(err){ showToast("Error: " + (err.message || "Could not save deduction")); }
+}
+
+async function saveManualDeduction(){
+    if(!hasPermission("action_hr_manage_deductions")) return;
+    const body = {
+        period: document.getElementById("manual-deduct-period").value,
+        amount: parseFloat(document.getElementById("manual-deduct-amount").value || "0"),
+        note: document.getElementById("manual-deduct-note").value.trim() || null,
+    };
+    try{
+        const res = await fetch(`/hr/api/employees/${loanDeductionEmployeeId}/deductions/manual`, {
+            method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(body),
+        });
+        await readApiResponse(res);
+        document.getElementById("manual-deduct-amount").value = "";
+        document.getElementById("manual-deduct-note").value = "";
+        showToast("Manual deduction saved");
+        await loadEmployeeDeductions();
+    }catch(err){ showToast("Error: " + (err.message || "Could not save deduction")); }
 }
 
 /* ── ATTENDANCE ── */
@@ -1614,7 +2455,7 @@ async function loadPayrollPreview(){
     document.getElementById("payroll-preview-wrap").style.display  = "";
     document.getElementById("payroll-records-wrap").style.display  = "none";
     document.getElementById("preview-body").innerHTML =
-        `<tr><td colspan="8" style="text-align:center;color:var(--muted);padding:20px">Loading preview...</td></tr>`;
+        `<tr><td colspan="9" style="text-align:center;color:var(--muted);padding:20px">Loading preview...</td></tr>`;
 
     let d    = await (await fetch(`/hr/api/payroll/preview?period=${period}`)).json();
     let [yr, mo] = period.split("-");
@@ -1626,28 +2467,55 @@ async function loadPayrollPreview(){
 
     document.getElementById("preview-body").innerHTML = d.employees.map(e => `
         <tr>
-            <td class="name">${displayText(e.employee)}<br><span style="font-size:11px;color:var(--muted)">${displayText(e.position)}</span></td>
+            <td class="name">${displayText(e.employee)}<br><span style="font-size:11px;color:var(--muted)">${displayText(e.position)} - ${numberValue(e.days_present)} present / ${numberValue(e.working_days)} working</span></td>
             <td style="font-family:var(--mono)">${money(e.base_salary)}</td>
-            <td style="font-family:var(--mono);color:var(--sub)">${numberValue(e.working_days)}</td>
-            <td style="font-family:var(--mono);color:var(--green);font-weight:700">${numberValue(e.days_present)}</td>
-            <td style="font-family:var(--mono);color:${numberValue(e.days_absent)>0?"var(--danger)":"var(--muted)"}">${numberValue(e.days_absent)}</td>
-            <td style="font-family:var(--mono);color:var(--blue)">${money(e.daily_rate)}</td>
-            <td style="font-family:var(--mono);font-size:15px;font-weight:700;color:var(--green)">${money(e.earned)}</td>
+            <td><input class="pay-bonus-input" data-emp-id="${numberValue(e.employee_id)}" type="number" min="0" step="0.01" value="0" style="width:86px;background:var(--card2);border:1px solid var(--border2);border-radius:8px;color:var(--text);padding:6px" oninput="updatePayrollPreviewNet(this)"></td>
+            <td style="font-family:var(--mono);color:var(--danger)" data-day-ded="${numberValue(e.pending_day_deductions)}">${numberValue(e.pending_day_deduction_days)}d / ${money(e.pending_day_deductions)}</td>
+            <td style="font-family:var(--mono);color:var(--danger)" data-manual-ded="${numberValue(e.pending_manual_deductions)}">${money(e.pending_manual_deductions)}</td>
+            <td style="font-family:var(--mono);color:var(--warn)">${e.outstanding_loan_balance === null || e.outstanding_loan_balance === undefined ? "-" : money(e.outstanding_loan_balance)}</td>
+            <td><input class="pay-loan-input" data-emp-id="${numberValue(e.employee_id)}" data-max="${numberValue(e.outstanding_loan_balance)}" type="number" min="0" step="0.01" value="0" style="width:96px;background:var(--card2);border:1px solid var(--border2);border-radius:8px;color:var(--text);padding:6px" oninput="updatePayrollPreviewNet(this)"></td>
+            <td class="mono pay-net-preview" data-base="${numberValue(e.base_salary)}">${money(e.net_before_loan)}</td>
             <td><span style="font-size:11px;color:${e.already_run?"var(--warn)":"var(--muted)"}">${e.already_run?"Will update":"New"}</span></td>
         </tr>`).join("") +
         `<tr style="background:var(--card2)">
-            <td colspan="6" style="font-weight:700;color:var(--sub)">Total to Pay</td>
+            <td colspan="7" style="font-weight:700;color:var(--sub)">Total to Pay</td>
             <td style="font-family:var(--mono);font-size:16px;font-weight:700;color:var(--green)">${money(d.total_to_pay)}</td>
             <td></td>
         </tr>`;
 }
 
+function updatePayrollPreviewNet(input){
+    const row = input.closest("tr");
+    if(!row) return;
+    const base = numberValue(row.querySelector(".pay-net-preview")?.dataset.base);
+    const bonus = numberValue(row.querySelector(".pay-bonus-input")?.value);
+    const loan = numberValue(row.querySelector(".pay-loan-input")?.value);
+    const maxLoan = numberValue(row.querySelector(".pay-loan-input")?.dataset.max);
+    if(maxLoan > 0 && loan > maxLoan){
+        row.querySelector(".pay-loan-input").value = maxLoan.toFixed(2);
+    }
+    const day = numberValue(row.querySelector("[data-day-ded]")?.dataset.dayDed);
+    const manual = numberValue(row.querySelector("[data-manual-ded]")?.dataset.manualDed);
+    const safeLoan = Math.min(numberValue(row.querySelector(".pay-loan-input")?.value), maxLoan || 0);
+    row.querySelector(".pay-net-preview").innerText = money(base + bonus - day - manual - safeLoan);
+}
+
 async function confirmRunPayroll(){
     let period = document.getElementById("pay-period").value;
     if(!period){ showToast("Select a period first"); return; }
+    const bonuses = {};
+    document.querySelectorAll(".pay-bonus-input").forEach(input => {
+        const value = numberValue(input.value);
+        if(value > 0) bonuses[numberValue(input.dataset.empId)] = value;
+    });
+    const loan_repayments = {};
+    document.querySelectorAll(".pay-loan-input").forEach(input => {
+        const value = numberValue(input.value);
+        if(value > 0) loan_repayments[numberValue(input.dataset.empId)] = value;
+    });
     let res  = await fetch("/hr/api/payroll/run",{
         method:"POST", headers:{"Content-Type":"application/json"},
-        body: JSON.stringify({period}),
+        body: JSON.stringify({period, bonuses, loan_repayments}),
     });
     let data = await res.json();
     if(data.detail){ showToast("Error: "+data.detail); return; }
@@ -1674,7 +2542,7 @@ async function loadPayrollRecords(){
 
     if(!records.length){
         document.getElementById("pay-body").innerHTML =
-            `<tr><td colspan="9" style="text-align:center;color:var(--muted);padding:40px">No payroll records. Use preview above to generate.</td></tr>`;
+            `<tr><td colspan="12" style="text-align:center;color:var(--muted);padding:40px">No payroll records. Use preview above to generate.</td></tr>`;
         return;
     }
     let totalNet = records.reduce((s,r)=>s+numberValue(r.net_salary),0);
@@ -1685,16 +2553,19 @@ async function loadPayrollRecords(){
             <td style="font-family:var(--mono)">${money(r.base_salary)}</td>
             <td style="font-family:var(--mono);color:var(--sub)">${r.days_worked ? numberValue(r.days_worked) : "-"} / ${r.working_days ? numberValue(r.working_days) : "-"}</td>
             <td style="font-family:var(--mono);color:var(--green)">+${money(r.bonuses)}</td>
+            <td style="font-family:var(--mono);color:var(--danger)">-${money(r.loan_deductions)}</td>
+            <td style="font-family:var(--mono);color:var(--danger)">${numberValue(r.day_deduction_days)}d / -${money(r.day_deductions)}</td>
+            <td style="font-family:var(--mono);color:var(--danger)">-${money(r.manual_deductions)}</td>
             <td style="font-family:var(--mono);color:var(--danger)">-${money(r.deductions)}</td>
             <td style="font-family:var(--mono);font-size:15px;font-weight:700;color:var(--green)">${money(r.net_salary)}</td>
             <td>${r.paid?`<span class="paid-badge">Paid</span>`:`<span class="unpaid-badge">Pending</span>`}</td>
             <td style="display:flex;gap:6px">
-                <button class="action-btn purple" onclick="openEditPayFromButton(this)" data-id="${numberValue(r.id)}" data-employee="${escapeHtml(normalizeDashFallback(r.employee))}" data-bonuses="${numberValue(r.bonuses)}" data-deductions="${numberValue(r.deductions)}">Edit</button>
+                <button class="action-btn purple" onclick="openEditPayFromButton(this)" data-id="${numberValue(r.id)}" data-employee="${escapeHtml(normalizeDashFallback(r.employee))}" data-bonuses="${numberValue(r.bonuses)}" data-deductions="${numberValue(r.manual_deductions)}">Edit</button>
                 ${!r.paid && hasPermission("action_hr_mark_paid")?`<button class="action-btn green" onclick="markPaid(${numberValue(r.id)})">Mark Paid</button>`:""}
             </td>
         </tr>`).join("") +
         `<tr style="background:var(--card2)">
-            <td colspan="6" style="font-weight:700;color:var(--sub)">Total</td>
+            <td colspan="9" style="font-weight:700;color:var(--sub)">Total</td>
             <td style="font-family:var(--mono);font-size:16px;font-weight:700;color:var(--green)">${money(totalNet)}</td>
             <td colspan="2"></td>
         </tr>`;
@@ -1832,7 +2703,7 @@ async function confirmClearHRData(){
 }
 
 /* ── MODAL CLOSE ON BG ── */
-["emp-modal","att-modal","pay-run-modal","edit-pay-modal","clear-hr-modal"].forEach(id=>{
+["emp-modal","att-modal","pay-run-modal","edit-pay-modal","loan-deduction-modal","clear-hr-modal"].forEach(id=>{
     document.getElementById(id).addEventListener("click",function(e){
         if(e.target!==this) return;
         if(id === "clear-hr-modal") closeClearHRDataModal();

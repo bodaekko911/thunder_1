@@ -23,7 +23,14 @@ from app.models.production import ProductionBatch, BatchInput, BatchOutput
 from app.models.accounting import Account, Journal, JournalEntry
 from app.models.receipt import ProductReceipt
 from app.models.expense import Expense, ExpenseCategory
-from app.models.hr import Attendance, Employee, Payroll
+from app.models.hr import (
+    Attendance,
+    Employee,
+    EmployeeLoan,
+    EmployeeLoanRepayment,
+    EmployeePayrollDeduction,
+    Payroll,
+)
 from app.models.user import User
 from app.services.expense_service import SALARY_CATEGORY_NAME
 
@@ -1923,6 +1930,73 @@ async def _build_hr_report(
     included_ids = active_ids | attendance_employee_ids | payroll_employee_ids
     included_ids &= filtered_employee_ids
 
+    loan_balance_by_employee = defaultdict(float)
+    loan_history = []
+    deduction_history = []
+    if included_ids:
+        loans_res = await db.execute(
+            select(EmployeeLoan)
+            .where(EmployeeLoan.employee_id.in_(included_ids))
+            .order_by(EmployeeLoan.loan_date.desc(), EmployeeLoan.id.desc())
+        )
+        loans = loans_res.scalars().all()
+        loan_ids = [loan.id for loan in loans]
+        repayment_by_loan = defaultdict(float)
+        if loan_ids:
+            repayments_res = await db.execute(
+                select(
+                    EmployeeLoanRepayment.loan_id,
+                    func.coalesce(func.sum(EmployeeLoanRepayment.amount), 0),
+                )
+                .where(EmployeeLoanRepayment.loan_id.in_(loan_ids))
+                .group_by(EmployeeLoanRepayment.loan_id)
+            )
+            for loan_id, total in repayments_res.all():
+                repayment_by_loan[loan_id] = _num(total)
+        for loan in loans:
+            repaid_amount = round(repayment_by_loan[loan.id], 2)
+            balance = 0.0 if loan.status == "cancelled" else round(max(_num(loan.amount) - repaid_amount, 0), 2)
+            if loan.status != "cancelled":
+                loan_balance_by_employee[loan.employee_id] += balance
+            employee = employee_map.get(loan.employee_id)
+            loan_history.append({
+                "loan_id": loan.id,
+                "employee_id": loan.employee_id,
+                "employee": employee.name if employee else f"Employee #{loan.employee_id}",
+                "loan_date": loan.loan_date.isoformat() if loan.loan_date else "—",
+                "amount": round(_num(loan.amount), 2),
+                "repaid_amount": repaid_amount,
+                "balance": balance,
+                "status": loan.status,
+                "description": loan.description or "",
+            })
+
+        deduction_stmt = (
+            select(EmployeePayrollDeduction)
+            .options(selectinload(EmployeePayrollDeduction.payroll))
+            .where(EmployeePayrollDeduction.employee_id.in_(included_ids))
+            .order_by(EmployeePayrollDeduction.created_at.desc(), EmployeePayrollDeduction.id.desc())
+        )
+        if periods:
+            deduction_stmt = deduction_stmt.where(EmployeePayrollDeduction.period.in_(periods))
+        deductions_res = await db.execute(deduction_stmt)
+        for deduction in deductions_res.scalars().all():
+            employee = employee_map.get(deduction.employee_id)
+            payroll = getattr(deduction, "payroll", None)
+            deduction_history.append({
+                "deduction_id": deduction.id,
+                "employee_id": deduction.employee_id,
+                "employee": employee.name if employee else f"Employee #{deduction.employee_id}",
+                "period": deduction.period or (payroll.period if payroll else "—"),
+                "type": deduction.type,
+                "days": _num(deduction.days) if deduction.days is not None else None,
+                "daily_rate": _num(deduction.daily_rate) if deduction.daily_rate is not None else None,
+                "amount": round(_num(deduction.amount), 2),
+                "payroll_id": deduction.payroll_id,
+                "note": deduction.note or "",
+                "created_at": str(deduction.created_at) if deduction.created_at else "",
+            })
+
     attendance_by_employee = defaultdict(lambda: {"present": 0, "absent": 0, "late": 0, "leave": 0, "records": 0})
     for record in attendance_records:
         if record.employee_id not in included_ids:
@@ -1961,6 +2035,10 @@ async def _build_hr_report(
         working_days = sum(int(payroll.working_days or 0) for payroll in payrolls)
         bonuses = round(sum(_num(payroll.bonuses) for payroll in payrolls), 2)
         deductions = round(sum(_num(payroll.deductions) for payroll in payrolls), 2)
+        loan_deductions = round(sum(_num(getattr(payroll, "loan_deductions", 0)) for payroll in payrolls), 2)
+        day_deduction_days = round(sum(_num(getattr(payroll, "day_deduction_days", 0)) for payroll in payrolls), 2)
+        day_deductions = round(sum(_num(getattr(payroll, "day_deductions", 0)) for payroll in payrolls), 2)
+        manual_deductions = round(sum(_num(getattr(payroll, "manual_deductions", 0)) for payroll in payrolls), 2)
         net_salary = round(sum(_num(payroll.net_salary) for payroll in payrolls), 2)
         paid = bool(payrolls) and all(bool(payroll.paid) for payroll in payrolls)
         farm = getattr(employee, "farm", None)
@@ -1986,6 +2064,12 @@ async def _build_hr_report(
             "days_worked": days_worked,
             "working_days": working_days,
             "bonuses": bonuses,
+            "outstanding_loan_balance": round(loan_balance_by_employee[employee.id], 2),
+            "loan_deductions": loan_deductions,
+            "day_deduction_days": day_deduction_days,
+            "day_deductions": day_deductions,
+            "manual_deductions": manual_deductions,
+            "total_deductions": deductions,
             "deductions": deductions,
             "net_salary": net_salary,
             "paid": paid,
@@ -2040,9 +2124,14 @@ async def _build_hr_report(
     leave_days = sum(row["leave_days"] for row in employee_rows)
     gross_salary = round(sum(_num(payroll.base_salary) for payroll in payroll_records if payroll.employee_id in included_ids), 2)
     bonuses_total = round(sum(_num(payroll.bonuses) for payroll in payroll_records if payroll.employee_id in included_ids), 2)
+    loan_deductions_total = round(sum(_num(getattr(payroll, "loan_deductions", 0)) for payroll in payroll_records if payroll.employee_id in included_ids), 2)
+    day_deduction_days_total = round(sum(_num(getattr(payroll, "day_deduction_days", 0)) for payroll in payroll_records if payroll.employee_id in included_ids), 2)
+    day_deductions_total = round(sum(_num(getattr(payroll, "day_deductions", 0)) for payroll in payroll_records if payroll.employee_id in included_ids), 2)
+    manual_deductions_total = round(sum(_num(getattr(payroll, "manual_deductions", 0)) for payroll in payroll_records if payroll.employee_id in included_ids), 2)
     deductions_total = round(sum(_num(payroll.deductions) for payroll in payroll_records if payroll.employee_id in included_ids), 2)
     net_salary_total = round(sum(_num(payroll.net_salary) for payroll in payroll_records if payroll.employee_id in included_ids), 2)
     paid_salary = round(sum(_num(payroll.net_salary) for payroll in payroll_records if payroll.employee_id in included_ids and payroll.paid), 2)
+    total_outstanding_loans = round(sum(loan_balance_by_employee.values()), 2)
 
     return {
         "date_from": d_from.strftime("%Y-%m-%d"),
@@ -2061,6 +2150,11 @@ async def _build_hr_report(
             "payroll_records": len([payroll for payroll in payroll_records if payroll.employee_id in included_ids]),
             "gross_salary": gross_salary,
             "bonuses": bonuses_total,
+            "total_outstanding_loans": total_outstanding_loans,
+            "total_loan_deductions": loan_deductions_total,
+            "total_day_deduction_days": day_deduction_days_total,
+            "total_day_deductions": day_deductions_total,
+            "total_manual_deductions": manual_deductions_total,
             "deductions": deductions_total,
             "net_salary": net_salary_total,
             "paid_salary": paid_salary,
@@ -2069,6 +2163,8 @@ async def _build_hr_report(
         "by_department": by_department,
         "by_farm": by_farm,
         "employees": _paginate_rows(employee_rows, skip, limit, include_all=include_all),
+        "loans": loan_history,
+        "deduction_history": deduction_history,
         "total_rows": len(employee_rows),
     }
 
@@ -2138,6 +2234,11 @@ async def export_hr(
                 ["Payroll Records", summary["payroll_records"]],
                 ["Gross Salary", summary["gross_salary"]],
                 ["Bonuses", summary["bonuses"]],
+                ["Outstanding Loan Balance", summary["total_outstanding_loans"]],
+                ["Loan Deductions", summary["total_loan_deductions"]],
+                ["Day Deduction Days", summary["total_day_deduction_days"]],
+                ["Day Deductions", summary["total_day_deductions"]],
+                ["Manual Deductions", summary["total_manual_deductions"]],
                 ["Deductions", summary["deductions"]],
                 ["Net Salary", summary["net_salary"]],
                 ["Paid Salary", summary["paid_salary"]],
@@ -2167,11 +2268,29 @@ async def export_hr(
         {
             "sheet_name": "Employees",
             "report_title": "HR Employee Detail",
-            "headers": ["Employee ID", "Employee", "Phone", "Position", "Department", "Farm", "Hire Date", "Base Salary", "Present Days", "Absent Days", "Late Days", "Leave Days", "Attendance Records", "Attendance Rate", "Payroll Period", "Days Worked", "Working Days", "Bonuses", "Deductions", "Net Salary", "Paid"],
-            "rows": [[row["employee_id"], row["employee"], row["phone"], row["position"], row["department"], row["farm_name"], row["hire_date"], row["base_salary"], row["present_days"], row["absent_days"], row["late_days"], row["leave_days"], row["attendance_records"], row["attendance_rate"], row["payroll_period"], row["days_worked"], row["working_days"], row["bonuses"], row["deductions"], row["net_salary"], "Yes" if row["paid"] else "No"] for row in data["employees"]],
+            "headers": ["Employee ID", "Employee", "Phone", "Position", "Department", "Farm", "Hire Date", "Base Salary", "Present Days", "Absent Days", "Late Days", "Leave Days", "Attendance Records", "Attendance Rate", "Payroll Period", "Days Worked", "Working Days", "Bonuses", "Outstanding Loan Balance", "Loan Deductions", "Day Deduction Days", "Day Deductions", "Manual Deductions", "Total Deductions", "Net Salary", "Paid"],
+            "rows": [[row["employee_id"], row["employee"], row["phone"], row["position"], row["department"], row["farm_name"], row["hire_date"], row["base_salary"], row["present_days"], row["absent_days"], row["late_days"], row["leave_days"], row["attendance_records"], row["attendance_rate"], row["payroll_period"], row["days_worked"], row["working_days"], row["bonuses"], row["outstanding_loan_balance"], row["loan_deductions"], row["day_deduction_days"], row["day_deductions"], row["manual_deductions"], row["total_deductions"], row["net_salary"], "Yes" if row["paid"] else "No"] for row in data["employees"]],
             "metadata": [("Date Range", f"{data['date_from']} to {data['date_to']}"), ("Payroll Period", data["period"] or "Range months"), ("Rows", data["total_rows"])],
-            "column_formats": {"Employee ID": "int", "Hire Date": "date", "Base Salary": "money", "Present Days": "int", "Absent Days": "int", "Late Days": "int", "Leave Days": "int", "Attendance Records": "int", "Attendance Rate": "percent_value", "Days Worked": "int", "Working Days": "int", "Bonuses": "money", "Deductions": "money", "Net Salary": "money"},
+            "column_formats": {"Employee ID": "int", "Hire Date": "date", "Base Salary": "money", "Present Days": "int", "Absent Days": "int", "Late Days": "int", "Leave Days": "int", "Attendance Records": "int", "Attendance Rate": "percent_value", "Days Worked": "int", "Working Days": "int", "Bonuses": "money", "Outstanding Loan Balance": "money", "Loan Deductions": "money", "Day Deductions": "money", "Manual Deductions": "money", "Total Deductions": "money", "Net Salary": "money"},
             "tab_color": "7C3AED",
+        },
+        {
+            "sheet_name": "Loan History",
+            "report_title": "HR Loan History",
+            "headers": ["Loan ID", "Employee ID", "Employee", "Loan Date", "Amount", "Repaid", "Balance", "Status", "Description"],
+            "rows": [[row["loan_id"], row["employee_id"], row["employee"], row["loan_date"], row["amount"], row["repaid_amount"], row["balance"], row["status"], row["description"]] for row in data["loans"]],
+            "metadata": [("Date Range", f"{data['date_from']} to {data['date_to']}"), ("Rows", len(data["loans"]))],
+            "column_formats": {"Loan ID": "int", "Employee ID": "int", "Loan Date": "date", "Amount": "money", "Repaid": "money", "Balance": "money"},
+            "tab_color": "B45309",
+        },
+        {
+            "sheet_name": "Deductions",
+            "report_title": "HR Deduction History",
+            "headers": ["Deduction ID", "Employee ID", "Employee", "Period", "Type", "Days", "Daily Rate", "Amount", "Payroll ID", "Note", "Created At"],
+            "rows": [[row["deduction_id"], row["employee_id"], row["employee"], row["period"], row["type"], row["days"], row["daily_rate"], row["amount"], row["payroll_id"], row["note"], row["created_at"]] for row in data["deduction_history"]],
+            "metadata": [("Date Range", f"{data['date_from']} to {data['date_to']}"), ("Rows", len(data["deduction_history"]))],
+            "column_formats": {"Deduction ID": "int", "Employee ID": "int", "Daily Rate": "money", "Amount": "money", "Payroll ID": "int"},
+            "tab_color": "BE123C",
         },
     ])
     buf = workbook_to_buffer(wb)
@@ -2648,6 +2767,8 @@ td.mono{font-family:var(--mono);}
             <div class="stat-card sc-danger"><div class="stat-label">Absent Days</div><div class="stat-value sv-danger" id="hr-absent">—</div></div>
             <div class="stat-card sc-green"><div class="stat-label">Net Salary</div><div class="stat-value sv-green" id="hr-net">—</div></div>
             <div class="stat-card sc-orange"><div class="stat-label">Unpaid Salary</div><div class="stat-value sv-orange" id="hr-unpaid">—</div></div>
+            <div class="stat-card sc-orange"><div class="stat-label">Outstanding Loans</div><div class="stat-value sv-orange" id="hr-loans">—</div></div>
+            <div class="stat-card sc-danger"><div class="stat-label">Total Deductions</div><div class="stat-value sv-danger" id="hr-deductions">—</div></div>
         </div>
         <div class="two-col">
             <div class="table-wrap">
@@ -2664,7 +2785,7 @@ td.mono{font-family:var(--mono);}
         <div class="table-wrap">
             <div class="table-title">Employee Detail</div>
             <div style="overflow-x:auto">
-            <table><thead><tr><th>Employee</th><th>Phone</th><th>Position</th><th>Department</th><th>Farm</th><th>Hire Date</th><th>Base Salary</th><th>Attendance</th><th>Rate</th><th>Payroll</th><th>Worked</th><th>Net Salary</th><th>Paid</th></tr></thead>
+            <table><thead><tr><th>Employee</th><th>Phone</th><th>Position</th><th>Department</th><th>Farm</th><th>Hire Date</th><th>Base Salary</th><th>Attendance</th><th>Rate</th><th>Payroll</th><th>Worked</th><th>Loan Bal.</th><th>Loan Ded.</th><th>Day Ded.</th><th>Manual Ded.</th><th>Total Ded.</th><th>Net Salary</th><th>Paid</th></tr></thead>
             <tbody id="hr-emp-body"></tbody></table>
             </div>
         </div>
@@ -3461,6 +3582,8 @@ async function loadHR(){
     document.getElementById("hr-absent").innerText = summary.absent_days;
     document.getElementById("hr-net").innerText = Number(summary.net_salary || 0).toFixed(2);
     document.getElementById("hr-unpaid").innerText = Number(summary.unpaid_salary || 0).toFixed(2);
+    document.getElementById("hr-loans").innerText = Number(summary.total_outstanding_loans || 0).toFixed(2);
+    document.getElementById("hr-deductions").innerText = Number(summary.deductions || 0).toFixed(2);
 
     document.getElementById("hr-dept-body").innerHTML = data.by_department.length
         ? data.by_department.map(row=>`<tr>
@@ -3499,10 +3622,15 @@ async function loadHR(){
             <td class="mono">${Number(row.attendance_rate || 0).toFixed(1)}%</td>
             <td class="mono">${row.payroll_period}</td>
             <td class="mono">${row.days_worked}/${row.working_days}</td>
+            <td class="mono" style="color:var(--orange)">${Number(row.outstanding_loan_balance || 0).toFixed(2)}</td>
+            <td class="mono" style="color:var(--danger)">${Number(row.loan_deductions || 0).toFixed(2)}</td>
+            <td class="mono" style="color:var(--danger)">${Number(row.day_deduction_days || 0).toFixed(2)}d / ${Number(row.day_deductions || 0).toFixed(2)}</td>
+            <td class="mono" style="color:var(--danger)">${Number(row.manual_deductions || 0).toFixed(2)}</td>
+            <td class="mono" style="color:var(--danger)">${Number(row.total_deductions || row.deductions || 0).toFixed(2)}</td>
             <td class="mono" style="color:var(--green)">${Number(row.net_salary || 0).toFixed(2)}</td>
             <td><span class="badge ${row.paid?"badge-ok":"badge-low"}">${row.paid?"Paid":"Unpaid"}</span></td>
           </tr>`).join("")
-        : `<tr><td colspan="13" style="text-align:center;color:var(--muted);padding:30px">No employee rows in this period</td></tr>`;
+        : `<tr><td colspan="18" style="text-align:center;color:var(--muted);padding:30px">No employee rows in this period</td></tr>`;
 }
 
 
