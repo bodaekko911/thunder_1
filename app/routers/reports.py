@@ -1710,15 +1710,18 @@ async def _build_transactions_report(
             })
 
     if not source or source == "expense":
-        receipt_expense_ids_res = await db.execute(select(ProductReceipt.expense_id).where(ProductReceipt.expense_id.is_not(None)))
-        receipt_expense_ids = {row[0] for row in receipt_expense_ids_res.all() if row[0] is not None}
+        skip_receipt_linked_expenses = not source
+        receipt_expense_ids = set()
+        if skip_receipt_linked_expenses:
+            receipt_expense_ids_res = await db.execute(select(ProductReceipt.expense_id).where(ProductReceipt.expense_id.is_not(None)))
+            receipt_expense_ids = {row[0] for row in receipt_expense_ids_res.all() if row[0] is not None}
         exp_res = await db.execute(
             select(Expense)
             .where(Expense.expense_date >= d_from.date(), Expense.expense_date <= d_to.date())
             .options(selectinload(Expense.category), selectinload(Expense.user))
         )
         for exp in exp_res.scalars().all():
-            if exp.id in receipt_expense_ids:
+            if skip_receipt_linked_expenses and exp.id in receipt_expense_ids:
                 continue
             rows.append({
                 "date": exp.created_at.strftime("%Y-%m-%d %H:%M") if exp.created_at else (exp.expense_date.isoformat() if exp.expense_date else "—"),
@@ -1762,199 +1765,6 @@ async def transactions_report(
 ):
     d_from, d_to = parse_dates(date_from, date_to)
     return await _build_transactions_report(db, d_from=d_from, d_to=d_to, source=source)
-    from app.models.refund import RetailRefundItem
-    receipt_expense_ids_res = await db.execute(
-        select(ProductReceipt.expense_id).where(ProductReceipt.expense_id.is_not(None))
-    )
-    receipt_expense_ids = {row[0] for row in receipt_expense_ids_res.all() if row[0] is not None}
-    d_from, d_to = parse_dates(date_from, date_to)
-    rows   = []
-
-    # POS
-    if not source or source == "pos":
-        pos_res = await db.execute(
-            select(Invoice)
-            .where(Invoice.created_at >= d_from, Invoice.created_at <= d_to)
-            .order_by(Invoice.created_at.desc())
-            .options(selectinload(Invoice.items), selectinload(Invoice.user), selectinload(Invoice.customer))
-        )
-        for inv in pos_res.scalars().all():
-            cname    = inv.customer.name if inv.customer else "Walk-in"
-            items    = inv.items
-            disc_per = round(float(inv.discount)/len(items), 2) if items else 0
-            disc_pct = round(float(inv.discount)/float(inv.subtotal)*100, 1) if float(inv.subtotal) > 0 else 0
-            for item in items:
-                rows.append({
-                    "date":           inv.created_at.strftime("%Y-%m-%d %H:%M") if inv.created_at else "—",
-                    "invoice_number": inv.invoice_number,
-                    "source":         "POS",
-                    "customer":       cname,
-                    "sku":            item.sku or "—",
-                    "user_name":      inv.user.name if inv.user else "—",
-                    "product":        item.name or "—",
-                    "qty":            float(item.qty),
-                    "unit_price":     float(item.unit_price),
-                    "line_total":     float(item.total),
-                    "discount":       disc_per,
-                    "discount_pct":   disc_pct,
-                    "payment_method": inv.payment_method or "cash",
-                    "invoice_total":  float(inv.total),
-                    "status":         inv.status,
-                    "row_type":       "sale",
-                })
-
-    # B2B
-    if not source or source == "b2b":
-        b2b_res = await db.execute(
-            select(B2BInvoice)
-            .where(B2BInvoice.created_at >= d_from, B2BInvoice.created_at <= d_to)
-            .order_by(B2BInvoice.created_at.desc())
-            .options(selectinload(B2BInvoice.items).selectinload(B2BInvoiceItem.product),
-                     selectinload(B2BInvoice.client), selectinload(B2BInvoice.user))
-        )
-        for inv in b2b_res.scalars().all():
-            cname    = inv.client.name if inv.client else "—"
-            items    = inv.items
-            disc_per = round(float(inv.discount)/len(items), 2) if items else 0
-            disc_pct = round(float(inv.discount)/float(inv.subtotal)*100, 1) if float(inv.subtotal) > 0 else 0
-            for item in items:
-                product = item.product
-                rows.append({
-                    "date":           inv.created_at.strftime("%Y-%m-%d %H:%M") if inv.created_at else "—",
-                    "invoice_number": inv.invoice_number,
-                    "user_name":      inv.user.name if inv.user else "—",
-                    "source":         f"B2B ({inv.invoice_type.replace('_', ' ').title()})",
-                    "customer":       cname,
-                    "sku":            product.sku if product else "—",
-                    "product":        product.name if product else "—",
-                    "qty":            float(item.qty),
-                    "unit_price":     float(item.unit_price),
-                    "line_total":     float(item.total),
-                    "discount":       disc_per,
-                    "discount_pct":   disc_pct,
-                    "payment_method": inv.payment_method or inv.invoice_type,
-                    "invoice_total":  float(inv.total),
-                    "status":         inv.status,
-                    "row_type":       "sale",
-                })
-
-    # Refunds
-    if not source or source == "refund":
-        ref_res = await db.execute(
-            select(RetailRefund)
-            .where(RetailRefund.created_at >= d_from, RetailRefund.created_at <= d_to)
-            .order_by(RetailRefund.created_at.desc())
-            .options(selectinload(RetailRefund.customer), selectinload(RetailRefund.user),
-                     selectinload(RetailRefund.items).selectinload(RetailRefundItem.product))
-        )
-        for ref in ref_res.scalars().all():
-            cname = ref.customer.name if ref.customer else "—"
-            for item in ref.items:
-                product = item.product
-                rows.append({
-                    "date":           ref.created_at.strftime("%Y-%m-%d %H:%M") if ref.created_at else "—",
-                    "invoice_number": ref.refund_number,
-                    "user_name":      ref.user.name if ref.user else "—",
-                    "source":         "Refund",
-                    "customer":       cname,
-                    "sku":            product.sku if product else "—",
-                    "product":        product.name if product else "—",
-                    "qty":            -float(item.qty),
-                    "unit_price":     float(item.unit_price),
-                    "line_total":     -float(item.total),
-                    "discount":       0,
-                    "discount_pct":   0,
-                    "payment_method": ref.refund_method,
-                    "invoice_total":  -float(ref.total),
-                    "status":         "refunded",
-                    "row_type":       "refund",
-                    "reason":         ref.reason or "—",
-                })
-
-    # Receive
-    if not source or source == "receive":
-        rec_res = await db.execute(
-            select(ProductReceipt)
-            .where(
-                ProductReceipt.receive_date >= d_from.date(),
-                ProductReceipt.receive_date <= d_to.date(),
-            )
-            .order_by(ProductReceipt.receive_date.desc(), ProductReceipt.id.desc())
-            .options(
-                selectinload(ProductReceipt.product),
-                selectinload(ProductReceipt.user),
-                selectinload(ProductReceipt.expense),
-            )
-        )
-        for rec in rec_res.scalars().all():
-            product = rec.product
-            expense = rec.expense
-            total_cost = float(rec.total_cost or 0)
-            rows.append({
-                "date":           rec.created_at.strftime("%Y-%m-%d %H:%M") if rec.created_at else (rec.receive_date.isoformat() if rec.receive_date else "—"),
-                "invoice_number": rec.ref_number,
-                "user_name":      rec.user.name if rec.user else "—",
-                "source":         "Receive",
-                "customer":       rec.supplier_ref or "—",
-                "sku":            product.sku if product else "—",
-                "product":        product.name if product else "—",
-                "qty":            float(rec.qty),
-                "unit_price":     float(rec.unit_cost or 0),
-                "line_total":     -total_cost,
-                "discount":       0,
-                "discount_pct":   0,
-                "payment_method": expense.payment_method if expense and expense.payment_method else "cash",
-                "invoice_total":  -total_cost,
-                "status":         "received",
-                "row_type":       "receipt",
-                "reason":         rec.notes or "—",
-            })
-
-    # Expenses
-    if not source or source == "expense":
-        exp_res = await db.execute(
-            select(Expense)
-            .where(
-                Expense.expense_date >= d_from.date(),
-                Expense.expense_date <= d_to.date(),
-            )
-            .order_by(Expense.expense_date.desc(), Expense.id.desc())
-            .options(selectinload(Expense.category), selectinload(Expense.user))
-        )
-        for exp in exp_res.scalars().all():
-            if exp.id in receipt_expense_ids:
-                continue
-            rows.append({
-                "date":           exp.created_at.strftime("%Y-%m-%d %H:%M") if exp.created_at else (exp.expense_date.isoformat() if exp.expense_date else "—"),
-                "invoice_number": exp.ref_number,
-                "user_name":      exp.user.name if exp.user else "—",
-                "source":         "Expense",
-                "customer":       exp.vendor or "—",
-                "sku":            "—",
-                "product":        exp.category.name if exp.category else "Expense",
-                "qty":            1.0,
-                "unit_price":     float(exp.amount),
-                "line_total":     -float(exp.amount),
-                "discount":       0,
-                "discount_pct":   0,
-                "payment_method": exp.payment_method or "cash",
-                "invoice_total":  -float(exp.amount),
-                "status":         "posted",
-                "row_type":       "expense",
-                "reason":         exp.description or "—",
-            })
-
-    rows.sort(key=lambda x: x["date"], reverse=True)
-    total_revenue  = sum(r["line_total"] for r in rows)
-    total_qty      = sum(r["qty"]        for r in rows)
-    total_discount = sum(r["discount"]   for r in rows)
-    return {
-        "rows":           rows,
-        "total_rows":     len(rows),
-        "total_revenue":  round(total_revenue,  2),
-        "total_qty":      round(total_qty,       2),
-        "total_discount": round(total_discount,  2),
-    }
 
 @router.get("/export/transactions", dependencies=[Depends(require_permission("action_export_excel"))])
 async def export_transactions(date_from: str = None, date_to: str = None, source: str = None, db: AsyncSession = Depends(get_async_session)):
