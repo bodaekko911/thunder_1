@@ -172,8 +172,8 @@ def test_expense_import_real_run_auto_creates_category_and_uses_null_farm(monkey
 
     workbook = _make_xlsx(
         [
-            ["Fuel", 120, "North Farm", "2026-04-10", "Fuel refill"],
-            ["Office Supplies", 75, "", "2026-04-11", ""],
+            ["Fuel", 120, "North Farm", "2024-01-15", "Fuel refill"],
+            ["Office Supplies", 75, "", "2024-01-16", ""],
         ],
         headers=["Category", "Amount", "Farm", "Date", "Notes"],
     )
@@ -195,9 +195,11 @@ def test_expense_import_real_run_auto_creates_category_and_uses_null_farm(monkey
     assert result["batch_id"]
     assert len(created_payloads) == 2
     assert created_payloads[0][0].category_id == 1
+    assert created_payloads[0][0].expense_date == "2024-01-15"
     assert created_payloads[0][0].farm_id == 10
     assert created_payloads[0][0].description == "Fuel refill"
     assert created_payloads[1][0].category_id == 2
+    assert created_payloads[1][0].expense_date == "2024-01-16"
     assert created_payloads[1][0].farm_id is None
     assert any(isinstance(item, ActivityLog) and item.action == "expense_import_batch" for item in db.logs)
     assert any(isinstance(item, ActivityLog) and item.action == "expense_import_item" for item in db.logs)

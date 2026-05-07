@@ -249,6 +249,24 @@ def _num(value) -> float:
         return 0.0
 
 
+def _transaction_sort_value(value) -> datetime:
+    if isinstance(value, datetime):
+        if value.tzinfo is not None:
+            value = value.astimezone(timezone.utc).replace(tzinfo=None)
+        return value
+    if isinstance(value, date):
+        return datetime.combine(value, datetime.min.time())
+    if isinstance(value, str):
+        normalized = value.replace("T", " ")
+        for candidate in (normalized, normalized[:10]):
+            for parser in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d"):
+                try:
+                    return datetime.strptime(candidate, parser)
+                except ValueError:
+                    continue
+    return datetime.min
+
+
 def _paginate_rows(rows, skip, limit, include_all=False):
     if include_all:
         return rows
@@ -1585,6 +1603,7 @@ async def _build_transactions_report(
             for item in inv.items:
                 rows.append({
                     "date": inv.created_at.strftime("%Y-%m-%d %H:%M") if inv.created_at else "—",
+                    "_sort_date": _transaction_sort_value(inv.created_at),
                     "reference": inv.invoice_number,
                     "transaction_type": "POS Sale",
                     "source": "POS",
@@ -1614,6 +1633,7 @@ async def _build_transactions_report(
                 product = item.product
                 rows.append({
                     "date": inv.created_at.strftime("%Y-%m-%d %H:%M") if inv.created_at else "—",
+                    "_sort_date": _transaction_sort_value(inv.created_at),
                     "reference": inv.invoice_number,
                     "transaction_type": "B2B Invoice",
                     "source": "B2B",
@@ -1634,6 +1654,7 @@ async def _build_transactions_report(
         for payment in b2b_payment_records:
             rows.append({
                 "date": payment["datetime"],
+                "_sort_date": _transaction_sort_value(payment["datetime"]),
                 "reference": payment["reference"],
                 "transaction_type": "B2B Client Payment",
                 "source": "B2B Collection",
@@ -1663,6 +1684,7 @@ async def _build_transactions_report(
                 product = item.product
                 rows.append({
                     "date": refund.created_at.strftime("%Y-%m-%d %H:%M") if refund.created_at else "—",
+                    "_sort_date": _transaction_sort_value(refund.created_at),
                     "reference": refund.refund_number,
                     "transaction_type": "Retail Refund",
                     "source": "Refund",
@@ -1690,7 +1712,8 @@ async def _build_transactions_report(
         for rec in rec_res.scalars().all():
             product = rec.product
             rows.append({
-                "date": rec.created_at.strftime("%Y-%m-%d %H:%M") if rec.created_at else (rec.receive_date.isoformat() if rec.receive_date else "—"),
+                "date": rec.receive_date.isoformat() if rec.receive_date else "—",
+                "_sort_date": _transaction_sort_value(rec.receive_date),
                 "reference": rec.ref_number,
                 "transaction_type": "Stock Receipt",
                 "source": "Receive",
@@ -1724,7 +1747,8 @@ async def _build_transactions_report(
             if skip_receipt_linked_expenses and exp.id in receipt_expense_ids:
                 continue
             rows.append({
-                "date": exp.created_at.strftime("%Y-%m-%d %H:%M") if exp.created_at else (exp.expense_date.isoformat() if exp.expense_date else "—"),
+                "date": exp.expense_date.isoformat() if exp.expense_date else "—",
+                "_sort_date": _transaction_sort_value(exp.expense_date),
                 "reference": exp.ref_number,
                 "transaction_type": "Expense",
                 "source": "Expense",
@@ -1743,7 +1767,9 @@ async def _build_transactions_report(
                 "notes": exp.description or "",
             })
 
-    rows.sort(key=lambda x: x["date"], reverse=True)
+    rows.sort(key=lambda x: x["_sort_date"], reverse=True)
+    for row in rows:
+        row.pop("_sort_date", None)
     return {
         "rows": rows,
         "total_rows": len(rows),

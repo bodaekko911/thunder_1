@@ -1,6 +1,7 @@
 import asyncio
 import io
 import json
+from datetime import date
 from types import SimpleNamespace
 
 import openpyxl
@@ -151,7 +152,7 @@ def test_receive_import_real_run_uses_existing_receipt_flow(monkeypatch) -> None
     monkeypatch.setattr(receive_import_service, "create_receipt", fake_create_receipt)
 
     workbook = _make_xlsx(
-        [["SKU-001", "Olive Oil", 10, 3.5, "Products", "2026-04-20"]]
+        [["SKU-001", "Olive Oil", 10, 3.5, "Products", "2024-02-10"]]
     )
     result = _run(
         receive_import_service.import_receive_products(
@@ -170,6 +171,7 @@ def test_receive_import_real_run_uses_existing_receipt_flow(monkeypatch) -> None
     assert len(created_payloads) == 1
     assert created_payloads[0][0].product_id == 1
     assert created_payloads[0][0].product_type == "products"
+    assert created_payloads[0][0].receive_date == date(2024, 2, 10)
     assert any(log.action == "receive_import_batch" for log in db.logs)
     assert any(log.action == "receive_import_item" for log in db.logs)
 
