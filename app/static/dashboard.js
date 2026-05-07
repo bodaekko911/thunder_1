@@ -7,12 +7,43 @@ let refreshTimer = null;
 let salesChart = null;
 let topProductsTab = "revenue";
 let activityFilter = "all";
-let b2bClientsTab = "revenue";
 let dashboardData = null;
 let currentUser = null;
 let dashboardAbortController = null;
 let dashboardRequestId = 0;
 let dashboardHasLoaded = false;
+let dashboardIsStale = false;
+
+// ── Stale-while-revalidate cache ─────────────────────────────────────────────
+const SWR_MAX_AGE_MS = 5 * 60 * 1000; // 5 minutes
+
+function swrKey(range) {
+  return `dash:swr:${range}`;
+}
+
+function swrRead(range) {
+  try {
+    const raw = localStorage.getItem(swrKey(range));
+    if (!raw) return null;
+    const { ts, data } = JSON.parse(raw);
+    if (Date.now() - ts > SWR_MAX_AGE_MS) return null;
+    return data;
+  } catch {
+    return null;
+  }
+}
+
+function swrWrite(range, data) {
+  try {
+    localStorage.setItem(swrKey(range), JSON.stringify({ ts: Date.now(), data }));
+  } catch {
+    // QuotaExceededError or private browsing — silently skip
+  }
+}
+
+function swrInvalidate(range) {
+  try { localStorage.removeItem(swrKey(range)); } catch {}
+}
 
 function escHtml(value) {
   return String(value || "").replace(/[&<>"']/g, (char) => (
@@ -128,15 +159,22 @@ function applyCustomRange() {
   loadDashboard();
 }
 
-function markUpdated() {
+function markUpdated(stale = false) {
   clearInterval(elapsedTimer);
   lastUpdatedAt = Date.now();
   const node = document.getElementById("last-updated");
-  if (node) node.classList.remove("last-updated-error");
+  if (node) {
+    node.classList.remove("last-updated-error");
+    node.classList.toggle("last-updated-stale", stale);
+  }
   const tick = () => {
     if (!node) return;
+    if (dashboardIsStale) {
+      node.textContent = "cached · refreshing…";
+      return;
+    }
     const seconds = Math.max(0, Math.round((Date.now() - lastUpdatedAt) / 1000));
-    node.textContent = `Updated ${seconds}s ago`;
+    node.textContent = seconds < 10 ? "just now" : `Updated ${seconds}s ago`;
   };
   tick();
   elapsedTimer = setInterval(tick, 5000);
@@ -448,110 +486,6 @@ function renderRecentActivity() {
   });
 }
 
-function renderProfitSummary() {
-  const el = document.getElementById("profit-summary");
-  if (!el) return;
-  const profit = dashboardData?.numbers?.profit;
-  if (!profit || profit.gross_profit === null) {
-    el.innerHTML = `<div class="empty-state">Cost data unavailable — add product costs to see profit breakdown.</div>`;
-    return;
-  }
-  const revenue = dashboardData?.numbers?.sales?.value || 0;
-  const gp = profit.gross_profit ?? 0;
-  const opex = profit.operating_expenses ?? 0;
-  const net = profit.net_profit ?? 0;
-  const cogs = Math.max(0, revenue - gp);
-  const maxBar = Math.max(revenue, 1);
-  const pct = (v) => `${Math.round((v / maxBar) * 100)}%`;
-  const deltaBadge = profit.net_margin_delta_pts !== null
-    ? `<span class="profit-delta ${profit.net_margin_delta_pts >= 0 ? "up" : "down"}">${profit.net_margin_delta_pts >= 0 ? "+" : ""}${profit.net_margin_delta_pts?.toFixed(1)} pp vs last period</span>`
-    : "";
-  el.innerHTML = `
-    <div class="profit-header">
-      <span class="profit-title">Profit summary</span>
-      ${deltaBadge}
-    </div>
-    <div class="profit-row">
-      <span class="profit-label bold">Revenue</span>
-      <div class="profit-bar-wrap"><div class="profit-bar bar-revenue" style="width:100%"></div></div>
-      <span class="profit-value">${formatMoney(revenue)}</span>
-      <span class="profit-pct">100%</span>
-    </div>
-    <div class="profit-row">
-      <span class="profit-label">— Cost of goods</span>
-      <div class="profit-bar-wrap"><div class="profit-bar bar-cogs" style="width:${pct(cogs)}"></div></div>
-      <span class="profit-value neg">${formatMoney(cogs)}</span>
-      <span class="profit-pct">${revenue > 0 ? Math.round((cogs / revenue) * 100) : 0}%</span>
-    </div>
-    <div class="profit-divider"></div>
-    <div class="profit-row">
-      <span class="profit-label bold">Gross profit</span>
-      <div class="profit-bar-wrap"><div class="profit-bar bar-gp" style="width:${pct(gp)}"></div></div>
-      <span class="profit-value pos">${formatMoney(gp)}</span>
-      <span class="profit-pct">${profit.gross_margin_pct !== null ? profit.gross_margin_pct + "%" : "—"}</span>
-    </div>
-    <div class="profit-row">
-      <span class="profit-label">— Operating expenses</span>
-      <div class="profit-bar-wrap"><div class="profit-bar bar-opex" style="width:${pct(opex)}"></div></div>
-      <span class="profit-value neg">${formatMoney(opex)}</span>
-      <span class="profit-pct">${revenue > 0 ? Math.round((opex / revenue) * 100) : 0}%</span>
-    </div>
-    <div class="profit-divider"></div>
-    <div class="profit-row">
-      <span class="profit-label bold">Net profit</span>
-      <div class="profit-bar-wrap"><div class="profit-bar bar-net" style="width:${pct(Math.max(0, net))}"></div></div>
-      <span class="profit-value ${net >= 0 ? "pos" : "neg"}">${formatMoney(net)}</span>
-      <span class="profit-pct">${profit.net_margin_pct !== null ? profit.net_margin_pct + "%" : "—"}</span>
-    </div>`;
-}
-
-function renderTopB2BClients() {
-  const el = document.getElementById("top-b2b-list");
-  if (!el) return;
-  const clients = dashboardData?.panels?.top_b2b_clients || [];
-  if (!clients.length) {
-    el.innerHTML = `<div class="empty-state">No B2B sales in this range.</div>`;
-    return;
-  }
-  const avatarColors = ["info", "success", "warning", "secondary", "secondary"];
-  let sorted;
-  if (b2bClientsTab === "invoices") {
-    sorted = [...clients].sort((a, b) => b.invoice_count - a.invoice_count);
-  } else if (b2bClientsTab === "outstanding") {
-    sorted = [...clients].sort((a, b) => b.outstanding - a.outstanding);
-  } else {
-    sorted = [...clients];
-  }
-  const maxVal = Math.max(...sorted.map((c) =>
-    b2bClientsTab === "invoices" ? c.invoice_count :
-    b2bClientsTab === "outstanding" ? c.outstanding : c.revenue
-  ), 1);
-  el.innerHTML = sorted.map((client, i) => {
-    const val = b2bClientsTab === "invoices" ? client.invoice_count :
-                b2bClientsTab === "outstanding" ? client.outstanding : client.revenue;
-    const displayVal = b2bClientsTab === "invoices"
-      ? `${client.invoice_count} invoices`
-      : formatMoney(val);
-    const width = Math.max(8, Math.round((val / maxVal) * 100));
-    const initials = client.name.split(" ").map((w) => w[0]).join("").slice(0, 2).toUpperCase();
-    const colorClass = avatarColors[i % avatarColors.length];
-    const oweBadge = client.outstanding > 0 && b2bClientsTab !== "outstanding"
-      ? `<span class="b2b-owe-badge">owes ${formatMoney(client.outstanding)}</span>` : "";
-    return `
-      <div class="list-row b2b-client-row">
-        <span class="b2b-rank">${i + 1}</span>
-        <div class="b2b-avatar b2b-avatar-${colorClass}">${escHtml(initials)}</div>
-        <div class="b2b-info">
-          <span class="b2b-name">${escHtml(client.name)}</span>
-          <span class="b2b-meta">${client.invoice_count} invoice${client.invoice_count !== 1 ? "s" : ""} · ${escHtml(client.payment_terms)}</span>
-        </div>
-        <div class="profit-bar-wrap" style="width:80px"><div class="profit-bar bar-gp" style="width:${width}%"></div></div>
-        <span class="b2b-value">${escHtml(displayVal)}</span>
-        ${oweBadge}
-      </div>`;
-  }).join("");
-}
-
 function showErrorState(message) {
   if (dashboardHasLoaded) {
     const node = document.getElementById("last-updated");
@@ -565,10 +499,33 @@ function showErrorState(message) {
   document.getElementById("loading").innerHTML = `<div class="load-error">${escHtml(message)}</div>`;
 }
 
+function renderAll() {
+  try { renderBriefing(); }      catch(e) { console.error("renderBriefing", e); }
+  try { renderNumbers(); }       catch(e) { console.error("renderNumbers", e); }
+  try { renderChart(); }         catch(e) { console.error("renderChart", e); }
+  try { renderTopProducts(); }   catch(e) { console.error("renderTopProducts", e); }
+  try { renderRecentActivity(); } catch(e) { console.error("renderRecentActivity", e); }
+  try { renderProfitSummary(); } catch(e) { console.error("renderProfitSummary", e); }
+  try { renderTopB2BClients(); } catch(e) { console.error("renderTopB2BClients", e); }
+}
+
 async function loadDashboard() {
   if (dashboardAbortController) dashboardAbortController.abort();
   dashboardAbortController = new AbortController();
   const requestId = ++dashboardRequestId;
+
+  // ── Stale-while-revalidate: render cached data immediately ──
+  const rangeKey = currentRange === "custom" ? `custom:${customStart}:${customEnd}` : currentRange;
+  const cached = swrRead(rangeKey);
+  if (cached && !dashboardHasLoaded) {
+    dashboardData = cached;
+    dashboardIsStale = true;
+    document.getElementById("loading").classList.add("hidden");
+    dashboardHasLoaded = true;
+    renderAll();
+    markUpdated(true);
+  }
+
   let url = `/dashboard/summary?range=${currentRange}&_=${Date.now()}`;
   if (currentRange === "custom" && customStart && customEnd) {
     url += `&start=${customStart}&end=${customEnd}`;
@@ -581,21 +538,31 @@ async function loadDashboard() {
     if (!response.ok) throw new Error(`Dashboard request failed (${response.status})`);
     const nextData = await response.json();
     if (requestId !== dashboardRequestId) return;
+
     dashboardData = nextData;
+    dashboardIsStale = false;
+
     if (!dashboardHasLoaded) {
       document.getElementById("loading").classList.add("hidden");
       dashboardHasLoaded = true;
     }
-    try { renderBriefing(); } catch(e) { console.error("renderBriefing", e); }
-    try { renderNumbers(); } catch(e) { console.error("renderNumbers", e); }
-    try { renderChart(); } catch(e) { console.error("renderChart", e); }
-    try { renderTopProducts(); } catch(e) { console.error("renderTopProducts", e); }
-    try { renderRecentActivity(); } catch(e) { console.error("renderRecentActivity", e); }
-    try { renderProfitSummary(); } catch(e) { console.error("renderProfitSummary", e); }
-    try { renderTopB2BClients(); } catch(e) { console.error("renderTopB2BClients", e); }
-    markUpdated();
+
+    renderAll();
+    markUpdated(false);
+    swrWrite(rangeKey, nextData);
   } catch (error) {
     if (error.name === "AbortError") return;
+    // If we have stale data showing, keep it visible and just mark the error
+    if (dashboardHasLoaded) {
+      dashboardIsStale = false;
+      const node = document.getElementById("last-updated");
+      if (node) {
+        node.classList.add("last-updated-error");
+        node.textContent = "refresh failed";
+      }
+      clearInterval(elapsedTimer);
+      return;
+    }
     showErrorState(error.message);
   }
 }
@@ -671,13 +638,6 @@ function bindEvents() {
       activityFilter = button.dataset.activityFilter;
       document.querySelectorAll("[data-activity-filter]").forEach((item) => item.classList.toggle("active", item === button));
       renderRecentActivity();
-    });
-  });
-  document.querySelectorAll("[data-b2b-tab]").forEach((button) => {
-    button.addEventListener("click", () => {
-      b2bClientsTab = button.dataset.b2bTab;
-      document.querySelectorAll("[data-b2b-tab]").forEach((item) => item.classList.toggle("active", item === button));
-      renderTopB2BClients();
     });
   });
 }
